@@ -19,10 +19,9 @@ base = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(base)
 sys.path.insert(0, os.path.dirname(base))
 from setup import __appname__, __version__
-import calibre.utils.localization as l  # Ensure calibre translations are installed
+from calibre.utils.localization import localize_website_link
 import custom
 del sys.path[0]
-del l
 custom
 # General configuration
 # ---------------------
@@ -31,7 +30,7 @@ needs_sphinx = '1.2'
 
 # Add any Sphinx extension module names here, as strings. They can be extensions
 # coming with Sphinx (named 'sphinx.addons.*') or your custom ones.
-extensions = ['sphinx.ext.autodoc', 'custom', 'sidebar_toc', 'sphinx.ext.viewcode']
+extensions = ['sphinx.ext.autodoc', 'custom', 'sidebar_toc', 'sphinx.ext.viewcode', 'sphinx.ext.extlinks']
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['templates']
@@ -93,7 +92,8 @@ unused_docs = ['global', 'cli/global']
 
 locale_dirs = ['locale/']
 title = '%s User Manual' % __appname__
-if language not in {'en', 'eng'}:
+needs_localization = language not in {'en', 'eng'}
+if needs_localization:
     import gettext
     try:
         t = gettext.translation('simple_index', locale_dirs[0], [language])
@@ -148,7 +148,6 @@ html_favicon = '../icons/favicon.ico'
 # relative to this directory. They are copied after the built-in static files,
 # so a file named "default.css" will overwrite the built-in "default.css".
 html_static_path = ['resources', '../icons/favicon.ico']
-html_css_files = ['custom.css']
 
 # If not '', a 'Last updated on:' timestamp is inserted at every page bottom,
 # using the given strftime format.
@@ -175,6 +174,12 @@ def sort_languages(x):
 html_context['other_languages'].sort(key=sort_languages)
 html_context['support_text'] = _('Support calibre')
 html_context['support_tooltip'] = _('Contribute to support calibre development')
+html_context['homepage_url'] = 'https://calibre-ebook.com'
+if needs_localization:
+    html_context['homepage_url'] = localize_website_link(html_context['homepage_url'])
+extlinks = {
+    'website': (html_context['homepage_url'] + '/%s', None),
+}
 del sort_languages, get_language
 
 epub_author      = u'Kovid Goyal'

@@ -9,15 +9,19 @@ __docformat__ = 'restructuredtext en'
 Module to implement the Cover Flow feature
 '''
 
-import sys, os, time
+import os
+import sys
+import time
+from qt.core import (
+    QAction, QApplication, QDialog, QFont, QImage, QItemSelectionModel,
+    QKeySequence, QLabel, QSize, QSizePolicy, QStackedLayout, Qt, QTimer, pyqtSignal
+)
 
-from PyQt5.Qt import (QImage, QSizePolicy, QTimer, QDialog, Qt, QSize, QAction,
-        QStackedLayout, QLabel, pyqtSignal, QKeySequence, QFont, QApplication, QItemSelectionModel)
-
-from calibre.ebooks.metadata import rating_to_stars
 from calibre.constants import islinux
-from calibre.gui2 import (config, available_height, available_width, gprefs,
-        rating_font)
+from calibre.ebooks.metadata import rating_to_stars
+from calibre.gui2 import (
+    available_height, available_width, config, gprefs, rating_font
+)
 from calibre_extensions import pictureflow
 
 
@@ -94,7 +98,7 @@ class DatabaseImages(pictureflow.FlowImages):
     def init_template(self, db):
         self.template_cache = {}
         self.template_error_reported = False
-        self.template = db.pref('cover_browser_title_template', '{title}')
+        self.template = db.pref('cover_browser_title_template', '{title}') or ''
         self.template_is_title = self.template == '{title}'
         self.template_is_empty = not self.template.strip()
 
@@ -190,6 +194,12 @@ class CoverFlow(pictureflow.PictureFlow):
         if not gprefs['cover_browser_reflections']:
             self.setShowReflections(False)
 
+    def one_auto_scroll(self):
+        if self.currentSlide() >= self.count() - 1:
+            self.setCurrentSlide(0)
+        else:
+            self.showNext()
+
     def set_subtitle_font(self, for_ratings=True):
         if for_ratings:
             self.setSubtitleFont(QFont(rating_font()))
@@ -230,8 +240,8 @@ class CBDialog(QDialog):
 
     closed = pyqtSignal()
 
-    def __init__(self, parent, cover_flow):
-        QDialog.__init__(self, parent)
+    def __init__(self, gui, cover_flow):
+        QDialog.__init__(self, gui)
         self._layout = QStackedLayout()
         self.setLayout(self._layout)
         self.setWindowTitle(_('Browse by covers'))
@@ -243,8 +253,7 @@ class CBDialog(QDialog):
             self.resize(w, h)
         self.action_fs_toggle = a = QAction(self)
         self.addAction(a)
-        a.setShortcuts([QKeySequence('F11', QKeySequence.SequenceFormat.PortableText),
-            QKeySequence('Ctrl+Shift+F', QKeySequence.SequenceFormat.PortableText)])
+        a.setShortcuts([QKeySequence(QKeySequence.StandardKey.FullScreen)])
         a.triggered.connect(self.toggle_fullscreen)
         self.action_esc_fs = a = QAction(self)
         a.triggered.connect(self.show_normal)
@@ -254,11 +263,17 @@ class CBDialog(QDialog):
         self.pre_fs_geom = None
         cover_flow.setFocus(Qt.FocusReason.OtherFocusReason)
         self.view_action = a = QAction(self)
-        iactions = parent.iactions
+        iactions = gui.iactions
         self.addAction(a)
         a.setShortcuts(list(iactions['View'].menuless_qaction.shortcuts())+
                 [QKeySequence(Qt.Key.Key_Space)])
         a.triggered.connect(iactions['View'].menuless_qaction.trigger)
+
+        self.auto_scroll_action = a = QAction(self)
+        a.setShortcuts(list(iactions['Autoscroll Books'].menuless_qaction.shortcuts()))
+        self.addAction(a)
+        a.triggered.connect(iactions['Autoscroll Books'].menuless_qaction.trigger)
+
         self.sd_action = a = QAction(self)
         self.addAction(a)
         a.setShortcuts(list(iactions['Send To Device'].
@@ -294,6 +309,28 @@ class CoverFlowMixin(object):
 
     def __init__(self, *args, **kwargs):
         pass
+
+    def one_auto_scroll(self):
+        cb_visible = self.cover_flow is not None and self.cb_splitter.button.isChecked()
+        if cb_visible:
+            self.cover_flow.one_auto_scroll()
+        else:
+            self.library_view.show_next_book()
+
+    def toggle_auto_scroll(self):
+        if not hasattr(self, 'auto_scroll_timer'):
+            self.auto_scroll_timer = t = QTimer(self)
+            t.timeout.connect(self.one_auto_scroll)
+        if self.auto_scroll_timer.isActive():
+            self.auto_scroll_timer.stop()
+        else:
+            self.one_auto_scroll()
+            self.auto_scroll_timer.start(int(1000 * gprefs['books_autoscroll_time']))
+
+    def update_auto_scroll_timeout(self):
+        if hasattr(self, 'auto_scroll_timer') and self.auto_scroll_timer.isActive():
+            self.auto_scroll_timer.stop()
+            self.toggle_auto_scroll()
 
     def init_cover_flow_mixin(self):
         self.cover_flow = None
@@ -444,7 +481,7 @@ class CoverFlowMixin(object):
 
 
 def test():
-    from PyQt5.Qt import QMainWindow
+    from qt.core import QMainWindow
     app = QApplication([])
     w = QMainWindow()
     cf = CoverFlow()
@@ -465,7 +502,7 @@ def main(args=sys.argv):
 
 
 if __name__ == '__main__':
-    from PyQt5.Qt import QMainWindow
+    from qt.core import QMainWindow
     app = QApplication([])
     w = QMainWindow()
     cf = CoverFlow()

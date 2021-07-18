@@ -6,14 +6,10 @@ __license__   = 'GPL v3'
 __copyright__ = '2012, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
-from PyQt5.Qt import (
+from qt.core import (
     QLineEdit, QAbstractListModel, Qt, pyqtSignal, QObject, QKeySequence, QAbstractItemView,
     QApplication, QListView, QPoint, QModelIndex, QEvent,
-    QStyleOptionComboBox, QStyle, QComboBox, QTimer)
-try:
-    from PyQt5 import sip
-except ImportError:
-    import sip
+    QStyleOptionComboBox, QStyle, QComboBox, QTimer, sip)
 
 from calibre.constants import ismacos
 from calibre.utils.icu import sort_key, primary_startswith, primary_contains
@@ -295,6 +291,7 @@ class LineEdit(QLineEdit, LineEditECM):
 
     def __init__(self, parent=None, completer_widget=None, sort_func=sort_key, strip_completion_entries=True):
         QLineEdit.__init__(self, parent)
+        self.setClearButtonEnabled(True)
 
         self.sep = ','
         self.space_before_sep = False
@@ -339,6 +336,9 @@ class LineEdit(QLineEdit, LineEditECM):
     @disable_popup.setter
     def disable_popup(self, val):
         self.mcompleter.disable_popup = bool(val)
+
+    def set_elide_mode(self, val):
+        self.mcompleter.setTextElideMode(val)
     # }}}
 
     def event(self, ev):
@@ -478,6 +478,12 @@ class EditWithComplete(EnComboBox):
     @disable_popup.setter
     def disable_popup(self, val):
         self.lineEdit().disable_popup = bool(val)
+
+    def set_elide_mode(self, val):
+        self.lineEdit().set_elide_mode(val)
+
+    def set_clear_button_enabled(self, val=True):
+        self.lineEdit().setClearButtonEnabled(bool(val))
     # }}}
 
     def text(self):
@@ -519,7 +525,7 @@ class EditWithComplete(EnComboBox):
 
 
 if __name__ == '__main__':
-    from PyQt5.Qt import QDialog, QVBoxLayout
+    from qt.core import QDialog, QVBoxLayout
     from calibre.gui2 import Application
     app = Application([])
     d = QDialog()

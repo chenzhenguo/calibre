@@ -7,7 +7,7 @@ Miscellaneous widgets used in the GUI
 '''
 import re, os
 
-from PyQt5.Qt import (QIcon, QFont, QLabel, QListWidget, QAction, QEvent,
+from qt.core import (QIcon, QFont, QLabel, QListWidget, QAction, QEvent,
         QListWidgetItem, QTextCharFormat, QApplication, QSyntaxHighlighter,
         QCursor, QColor, QWidget, QPixmap, QSplitterHandle, QToolButton,
         Qt, pyqtSignal, QRegExp, QSize, QSplitter, QPainter, QPageSize, QPrinter,
@@ -403,6 +403,7 @@ class CoverView(QGraphicsView, ImageDropMixin):  # {{{
         self.pixmap_size = 0, 0
         if self.show_size:
             self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+        self.set_background()
 
     def get_pixmap(self):
         for item in self.scene.items():
@@ -413,6 +414,9 @@ class CoverView(QGraphicsView, ImageDropMixin):  # {{{
         self.scene = QGraphicsScene()
         self.scene.addPixmap(pmap)
         self.setScene(self.scene)
+
+    def set_background(self, brush=None):
+        self.setBackgroundBrush(brush or self.palette().color(QPalette.ColorRole.Window))
 
     def paintEvent(self, ev):
         QGraphicsView.paintEvent(self, ev)
@@ -1289,7 +1293,7 @@ class PaperSizes(QComboBox):  # {{{
 
 
 if __name__ == '__main__':
-    from PyQt5.Qt import QTextEdit
+    from qt.core import QTextEdit
     app = QApplication([])
     w = QTextEdit()
     s = PythonHighlighter(w)

@@ -10,11 +10,11 @@ import sys
 import textwrap
 import time
 
-from PyQt5.Qt import (
+from qt.core import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
     QFrame, QHBoxLayout, QIcon, QLabel, QLineEdit, QListWidget, QPlainTextEdit, QLayout,
     QPushButton, QScrollArea, QSize, QSizePolicy, QSpinBox, Qt, QTabWidget, QTimer,
-    QToolButton, QUrl, QVBoxLayout, QWidget, pyqtSignal
+    QToolButton, QUrl, QVBoxLayout, QWidget, pyqtSignal, sip
 )
 
 from calibre import as_unicode
@@ -36,11 +36,6 @@ from calibre.srv.users import (
 from calibre.utils.icu import primary_sort_key
 from calibre.utils.shared_file import share_open
 from polyglot.builtins import as_bytes, unicode_type
-
-try:
-    from PyQt5 import sip
-except ImportError:
-    import sip
 
 
 if iswindows and not isportable:
@@ -324,7 +319,7 @@ class MainTab(QWidget):  # {{{
         fl.addRow(options['port'].shortdoc + ':', sb)
         l.addSpacing(25)
         self.opt_auth = cb = QCheckBox(
-            _('Require &username and password to access the content server')
+            _('Require &username and password to access the Content server')
         )
         l.addWidget(cb)
         self.auth_desc = la = QLabel(self)
@@ -400,7 +395,7 @@ class MainTab(QWidget):  # {{{
 
     def change_auth_desc(self):
         self.auth_desc.setText(
-            _('Remember to create some user accounts in the "User accounts" tab')
+            _('Remember to create at least one user account in the "User accounts" tab')
             if self.opt_auth.isChecked() else _(
                 'Requiring a username/password prevents unauthorized people from'
                 ' accessing your calibre library. It is also needed for some features'
@@ -1174,7 +1169,7 @@ class SearchTheInternet(QWidget):
         cu = self.current_urls
         if cu:
             with lopen(search_the_net_urls.path, 'wb') as f:
-                f.write(self.serialized_urls)
+                f.write(self.serialized_urls.encode('utf-8'))
         else:
             try:
                 os.remove(search_the_net_urls.path)
@@ -1189,7 +1184,7 @@ class SearchTheInternet(QWidget):
             filters=[(_('URL files'), ['json'])], initial_filename='search-urls.json')
         if path:
             with lopen(path, 'wb') as f:
-                f.write(self.serialized_urls)
+                f.write(self.serialized_urls.encode('utf-8'))
 
     def import_urls(self):
         paths = choose_files(self, 'search-net-urls', _('Choose URLs file'),
@@ -1379,7 +1374,7 @@ class ConfigWidget(ConfigWidgetBase):
                     _('No users specified'),
                     _(
                         'You have turned on the setting to require passwords to access'
-                        ' the content server, but you have not created any user accounts.'
+                        ' the Content server, but you have not created any user accounts.'
                         ' Create at least one user account in the "User accounts" tab to proceed.'
                     ),
                     show=True

@@ -8,7 +8,7 @@ __copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
 import sys, textwrap
 from io import BytesIO
 
-from PyQt5.Qt import (
+from qt.core import (
     QSplitter, QVBoxLayout, QTableView, QWidget, QLabel, QAbstractTableModel,
     Qt, QTimer, QPushButton, pyqtSignal, QFormLayout, QLineEdit, QIcon, QSize,
     QHBoxLayout, QTextEdit, QApplication, QMessageBox, QAbstractItemView, QDialog, QDialogButtonBox)
@@ -227,7 +227,7 @@ class ManageFonts(Dialog):
     subset_all_fonts = pyqtSignal()
 
     def __init__(self, parent=None):
-        Dialog.__init__(self, _('Manage Fonts'), 'manage-fonts', parent=parent)
+        Dialog.__init__(self, _('Manage fonts'), 'manage-fonts', parent=parent)
 
     def setup_ui(self):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)

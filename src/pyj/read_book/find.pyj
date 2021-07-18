@@ -45,7 +45,8 @@ def index_for_node(node, node_list):
 
 
 def tts_word_regex():
-    return /[\p{Letter}\p{Mark}\p{Number}\p{Punctuation}]{1,50}/gu
+    # Cf is Other, formatting, including soft hyphens zero-width joiners, etc
+    return /[\p{Letter}\p{Mark}\p{Number}\p{Punctuation}\p{Cf}]{1,50}/gu
 
 
 def tts_data(text_node, offset):
@@ -152,11 +153,11 @@ def select_search_result(sr):
     q = ''
     before_len = after_len = 0
     if sr.before:
-        q = sr.before[-5:]
+        q = sr.before[-15:]
         before_len = q.length
     q += sr.text
     if sr.after:
-        after = sr.after[:5]
+        after = sr.after[:15]
         after_len = after.length
         q += after
     match = find_specific_occurrence(q, int(sr.index), before_len, after_len, cache.text_map, sr.from_offset)

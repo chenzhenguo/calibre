@@ -5,28 +5,29 @@
 __license__ = 'GPL v3'
 __copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
 
-import os, weakref
+import os
+import weakref
 from collections import OrderedDict, namedtuple
 from functools import partial
-from polyglot.builtins import iteritems, itervalues, zip, unicode_type, range, map
-
-from PyQt5.Qt import (
-    QDialog, QWidget, QGridLayout, QLabel, QToolButton, QIcon,
-    QVBoxLayout, QDialogButtonBox, QApplication, pyqtSignal, QFont, QPixmap,
-    QSize, QPainter, Qt, QColor, QPen, QSizePolicy, QScrollArea,
-    QKeySequence, QAction, QMenu, QHBoxLayout, QCheckBox)
+from qt.core import (
+    QAction, QApplication, QCheckBox, QColor, QDialog, QDialogButtonBox, QFont,
+    QGridLayout, QHBoxLayout, QIcon, QKeySequence, QLabel, QMenu, QPainter, QPen,
+    QPixmap, QScrollArea, QSize, QSizePolicy, QStackedLayout, Qt, QToolButton,
+    QVBoxLayout, QWidget, pyqtSignal
+)
 
 from calibre import fit_image
-from calibre.ebooks.metadata import title_sort, authors_to_sort_string, fmt_sidx
-from calibre.gui2 import pixmap_to_data, gprefs
-from calibre.gui2.complete2 import LineEdit as EditWithComplete
+from calibre.ebooks.metadata import authors_to_sort_string, fmt_sidx, title_sort
+from calibre.gui2 import gprefs, pixmap_to_data
 from calibre.gui2.comments_editor import Editor
+from calibre.gui2.complete2 import LineEdit as EditWithComplete
 from calibre.gui2.dialogs.confirm_delete import confirm
 from calibre.gui2.languages import LanguagesEdit as LE
-from calibre.gui2.widgets2 import RightClickButton
 from calibre.gui2.metadata.basic_widgets import PubdateEdit, RatingEdit
+from calibre.gui2.widgets2 import RightClickButton
 from calibre.ptempfile import PersistentTemporaryFile
 from calibre.utils.date import UNDEFINED_DATE
+from polyglot.builtins import iteritems, itervalues, map, range, unicode_type, zip
 
 Widgets = namedtuple('Widgets', 'new old label button')
 
@@ -93,6 +94,11 @@ class LineEdit(EditWithComplete):
         self.setText(val)
         self.setCursorPosition(0)
 
+    def set_undoable(self, val):
+        self.selectAll()
+        self.insert(val)
+        self.setCursorPosition(0)
+
     @property
     def is_blank(self):
         val = self.current_val.strip()
@@ -137,6 +143,9 @@ class LanguagesEdit(LE):
 
     def same_as(self, other):
         return self.current_val == other.current_val
+
+    def set_undoable(self, val):
+        self.set_lang_codes(val, True)
 
 
 class RatingsEdit(RatingEdit):
@@ -190,6 +199,9 @@ class DateEdit(PubdateEdit):
 
     def same_as(self, other):
         return self.text() == other.text()
+
+    def set_undoable(self, val):
+        self.set_value(val)
 
 
 class SeriesEdit(LineEdit):
@@ -274,6 +286,10 @@ class CommentsEdit(Editor):
         self.html = val or ''
         self.changed.emit()
 
+    def set_undoable(self, val):
+        self.set_html(val, allow_undo=True)
+        self.changed.emit()
+
     def from_mi(self, mi):
         val = mi.get(self.field, default='')
         self.current_val = val
@@ -295,6 +311,7 @@ class CommentsEdit(Editor):
 class CoverView(QWidget):
 
     changed = pyqtSignal()
+    zoom_requested = pyqtSignal(object)
 
     def __init__(self, field, is_new, parent, metadata, extra):
         QWidget.__init__(self, parent)
@@ -305,6 +322,10 @@ class CoverView(QWidget):
         self.blank = QPixmap(I('blank.png'))
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.PolicyFlag.GrowFlag|QSizePolicy.PolicyFlag.ExpandFlag)
         self.sizePolicy().setHeightForWidth(True)
+
+    def mouseDoubleClickEvent(self, ev):
+        if self.pixmap and not self.pixmap.isNull():
+            self.zoom_requested.emit(self.pixmap)
 
     @property
     def is_blank(self):
@@ -383,6 +404,8 @@ class CoverView(QWidget):
 
 class CompareSingle(QWidget):
 
+    zoom_requested = pyqtSignal(object)
+
     def __init__(
             self, field_metadata, parent=None, revert_tooltip=None,
             datetime_fmt='MMMM yyyy', blank_as_equal=True,
@@ -459,6 +482,9 @@ class CompareSingle(QWidget):
                 m.addAction(_('Merge tags')).triggered.connect(self.merge_tags)
                 m.actions()[1].setIcon(QIcon(I('merge.png')))
 
+            if cls is CoverView:
+                neww.zoom_requested.connect(self.zoom_requested)
+                oldw.zoom_requested.connect(self.zoom_requested)
             self.widgets[field] = Widgets(neww, oldw, newl, button)
             for i, w in enumerate((newl, neww, button, oldw)):
                 c = i if i < 2 else i + 1
@@ -486,7 +512,10 @@ class CompareSingle(QWidget):
     def revert(self, field):
         widgets = self.widgets[field]
         neww, oldw = widgets[:2]
-        neww.current_val = oldw.current_val
+        if hasattr(neww, 'set_undoable'):
+            neww.set_undoable(oldw.current_val)
+        else:
+            neww.current_val = oldw.current_val
 
     def merge_identifiers(self):
         widgets = self.widgets['identifiers']
@@ -522,6 +551,45 @@ class CompareSingle(QWidget):
         return changed
 
 
+class ZoomedCover(QWidget):
+    pixmap = None
+
+    def paintEvent(self, event):
+        pmap = self.pixmap
+        if pmap is None:
+            return
+        target = self.rect()
+        scaled, width, height = fit_image(pmap.width(), pmap.height(), target.width(), target.height())
+        dx = 0
+        if target.width() > width + 1:
+            dx += (target.width() - width) // 2
+        target.setRect(target.x() + dx, target.y(), width, height)
+        p = QPainter(self)
+        p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        p.drawPixmap(target, pmap)
+
+
+class CoverZoom(QWidget):
+
+    def __init__(self, parent):
+        QWidget.__init__(self, parent)
+        self.l = l = QVBoxLayout(self)
+        self.cover = ZoomedCover(self)
+        l.addWidget(self.cover)
+        self.h = QHBoxLayout()
+        l.addLayout(self.h)
+        self.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, self)
+        self.size_label = QLabel(self)
+        self.h.addWidget(self.size_label)
+        self.h.addStretch(10)
+        self.h.addWidget(self.bb)
+
+    def set_pixmap(self, pixmap):
+        self.cover.pixmap = pixmap
+        self.size_label.setText(_('Cover size: {0}x{1}').format(pixmap.width(), pixmap.height()))
+        self.cover.update()
+
+
 class CompareMany(QDialog):
 
     def __init__(self, ids, get_metadata, field_metadata, parent=None,
@@ -534,9 +602,11 @@ class CompareMany(QDialog):
                  action_button=None,
                  **kwargs):
         QDialog.__init__(self, parent)
-        self.l = l = QVBoxLayout()
+        self.stack = s = QStackedLayout(self)
+        self.w = w = QWidget(self)
+        self.l = l = QVBoxLayout(w)
+        s.addWidget(w)
         self.next_called = False
-        self.setLayout(l)
         self.setWindowIcon(QIcon(I('auto_author_sort.png')))
         self.get_metadata = get_metadata
         self.ids = list(ids)
@@ -555,6 +625,10 @@ class CompareMany(QDialog):
         l.addWidget(sa)
         sa.setWidget(self.compare_widget)
         sa.setWidgetResizable(True)
+        self.cover_zoom = cz = CoverZoom(self)
+        cz.bb.rejected.connect(self.reject)
+        s.addWidget(cz)
+        self.compare_widget.zoom_requested.connect(self.show_zoomed_cover)
 
         self.bb = bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         bb.button(QDialogButtonBox.StandardButton.Cancel).setAutoDefault(False)
@@ -612,6 +686,10 @@ class CompareMany(QDialog):
         b.setFocus(Qt.FocusReason.OtherFocusReason)
         self.next_called = False
 
+    def show_zoomed_cover(self, pixmap):
+        self.cover_zoom.set_pixmap(pixmap)
+        self.stack.setCurrentIndex(1)
+
     @property
     def mark_rejected(self):
         return self.markq.isChecked()
@@ -625,6 +703,9 @@ class CompareMany(QDialog):
         super(CompareMany, self).accept()
 
     def reject(self):
+        if self.stack.currentIndex() == 1:
+            self.stack.setCurrentIndex(0)
+            return
         if self.next_called and not confirm(_(
             'All reviewed changes will be lost! Are you sure you want to Cancel?'),
             'confirm-metadata-diff-dialog-cancel'):

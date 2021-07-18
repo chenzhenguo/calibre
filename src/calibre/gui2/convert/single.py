@@ -5,7 +5,7 @@
 
 import shutil
 
-from PyQt5.Qt import (
+from qt.core import (
     QAbstractListModel, QCheckBox, QComboBox, QCoreApplication, QDialog,
     QDialogButtonBox, QFont, QFrame, QGridLayout, QHBoxLayout, QIcon, QLabel,
     QListView, QModelIndex, QScrollArea, QSize, QSizePolicy, QSpacerItem,
@@ -84,8 +84,6 @@ class Config(QDialog):
         self.input_formats.currentIndexChanged[native_string_type].connect(self.setup_pipeline)
         self.output_formats.currentIndexChanged[native_string_type].connect(self.setup_pipeline)
         self.groups.setSpacing(5)
-        self.groups.activated[(QModelIndex)].connect(self.show_pane)
-        self.groups.clicked[(QModelIndex)].connect(self.show_pane)
         self.groups.entered[(QModelIndex)].connect(self.show_group_help)
         rb = self.buttonBox.button(QDialogButtonBox.StandardButton.RestoreDefaults)
         rb.setText(_('Restore &defaults'))
@@ -96,6 +94,9 @@ class Config(QDialog):
             QApplication.instance().safe_restore_geometry(self, geom)
         else:
             self.resize(self.sizeHint())
+
+    def current_group_changed(self, cur, prev):
+        self.show_pane(cur)
 
     def setupUi(self):
         self.setObjectName("Dialog")
@@ -247,6 +248,7 @@ class Config(QDialog):
         idx = oidx if -1 < oidx < self._groups_model.rowCount() else 0
         self.groups.setCurrentIndex(self._groups_model.index(idx))
         self.show_pane(idx)
+        self.groups.selectionModel().currentChanged.connect(self.current_group_changed)
         try:
             shutil.rmtree(self.plumber.archive_input_tdir, ignore_errors=True)
         except Exception:

@@ -10,7 +10,7 @@ import copy
 import os
 import traceback
 from collections import OrderedDict, namedtuple
-from PyQt5.Qt import (
+from qt.core import (
     QAbstractItemModel, QFont, QIcon, QMimeData, QModelIndex, QObject, Qt,
     pyqtSignal
 )
@@ -216,7 +216,7 @@ class TagTreeItem(object):  # {{{
                 ar = self.average_rating
                 if ar:
                     tt.append(_('Average rating for books in this category: %.1f') % ar)
-                elif self.type == self.TAG and ar is not None:
+                elif self.type == self.TAG and ar is not None and self.tag.category != 'search':
                     tt.append(_('Books in this category are unrated'))
                 if self.type == self.TAG and self.tag.category == 'search':
                     tt.append(_('Search expression:') + ' ' + self.tag.search_expression)
@@ -312,7 +312,7 @@ class TagsModel(QAbstractItemModel):  # {{{
     search_item_renamed = pyqtSignal()
     tag_item_renamed = pyqtSignal()
     refresh_required = pyqtSignal()
-    restriction_error = pyqtSignal()
+    restriction_error = pyqtSignal(object)
     drag_drop_finished = pyqtSignal(object)
     user_categories_edited = pyqtSignal(object, object)
     user_category_added = pyqtSignal()
@@ -1113,12 +1113,11 @@ class TagsModel(QAbstractItemModel):  # {{{
             data = self.db.new_api.get_categories(sort=sort,
                     book_ids=self.get_book_ids_to_use(),
                     first_letter_sort=self.collapse_model == 'first letter')
-        except:
-            import traceback
+        except Exception as e:
             traceback.print_exc()
             data = self.db.new_api.get_categories(sort=sort,
                     first_letter_sort=self.collapse_model == 'first letter')
-            self.restriction_error.emit()
+            self.restriction_error.emit(str(e))
 
         if self.filter_categories_by:
             if self.filter_categories_by.startswith('='):
@@ -1142,6 +1141,22 @@ class TagsModel(QAbstractItemModel):  # {{{
                 self.categories[category] = tb_categories[category]['name']
 
         # Now build the list of fields in display order
+        order = tweaks.get('tag_browser_category_default_sort', None)
+        if order not in ('default', 'display_name', 'lookup_name'):
+            print('Tweak tag_browser_category_default_sort is not valid. Ignored')
+            order = 'default'
+        if order == 'default':
+            self.row_map = self.categories.keys()
+        else:
+            def key_func(val):
+                if order == 'display_name':
+                    return icu_lower(self.db.field_metadata[val]['name'])
+                return icu_lower(val[1:] if val.startswith('#') or val.startswith('@') else val)
+            direction = tweaks.get('tag_browser_category_default_sort_direction', None)
+            if direction not in ('ascending', 'descending'):
+                print('Tweak tag_browser_category_default_sort_direction is not valid. Ignored')
+                direction = 'ascending'
+            self.row_map = sorted(self.categories, key=key_func, reverse=direction == 'descending')
         try:
             order = tweaks['tag_browser_category_order']
             if not isinstance(order, dict):
@@ -1150,7 +1165,7 @@ class TagsModel(QAbstractItemModel):  # {{{
             print('Tweak tag_browser_category_order is not valid. Ignored')
             order = {'*': 100}
         defvalue = order.get('*', 100)
-        self.row_map = sorted(self.categories, key=lambda x: order.get(x, defvalue))
+        self.row_map = sorted(self.row_map, key=lambda x: order.get(x, defvalue))
         return data
 
     def set_categories_filter(self, txt):

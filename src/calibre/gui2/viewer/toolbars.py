@@ -6,12 +6,12 @@
 import os
 from functools import partial
 
-from PyQt5.Qt import (
+from qt.core import (
     QAction, QGroupBox, QHBoxLayout, QIcon, QKeySequence, QLabel, QListWidget,
     QListWidgetItem, QMenu, Qt, QToolBar, QToolButton, QVBoxLayout, pyqtSignal, QDialog,
     QAbstractItemView, QDialogButtonBox
 )
-from PyQt5.QtWebEngineWidgets import QWebEnginePage
+from qt.webengine import QWebEnginePage
 
 from calibre.constants import ismacos
 from calibre.gui2 import elided_text
@@ -68,6 +68,7 @@ def all_actions():
             'toggle_read_aloud': Action('bullhorn.png', _('Read aloud'), 'toggle_read_aloud'),
             'toggle_highlights': Action('highlight_only_on.png', _('Browse highlights in book'), 'toggle_highlights'),
             'select_all': Action('edit-select-all.png', _('Select all text in the current file')),
+            'edit_book': Action('edit_book.png', _('Edit this book'), 'edit_book'),
         }
         all_actions.ans = Actions(amap)
     return all_actions.ans
@@ -116,6 +117,12 @@ class ActionsToolBar(ToolBar):
         ToolBar.__init__(self, parent)
         self.setObjectName('actions_toolbar')
         self.customContextMenuRequested.connect(self.show_context_menu)
+
+    def update_action_state(self, book_open):
+        for ac in self.shortcut_actions.values():
+            ac.setEnabled(book_open)
+        self.search_action.setEnabled(book_open)
+        self.color_scheme_action.setEnabled(book_open)
 
     def show_context_menu(self, pos):
         m = QMenu(self)
@@ -193,6 +200,7 @@ class ActionsToolBar(ToolBar):
         self.print_action = shortcut_action('print')
         self.preferences_action = shortcut_action('preferences')
         self.metadata_action = shortcut_action('metadata')
+        self.edit_book_action = shortcut_action('edit_book')
         self.update_mode_action()
         self.color_scheme_action = a = QAction(aa.color_scheme.icon, aa.color_scheme.text, self)
         self.color_scheme_menu = m = QMenu(self)
@@ -233,7 +241,7 @@ class ActionsToolBar(ToolBar):
 
     def update_read_aloud_action(self, active):
         self.toggle_read_aloud_action.setChecked(active)
-        self.autoscroll_action.setToolTip(
+        self.toggle_read_aloud_action.setToolTip(
             _('Stop reading') if active else _('Read the text of the book aloud'))
 
     def update_reference_mode_action(self, enabled):
@@ -354,13 +362,16 @@ class ActionsList(QListWidget):
         for name in names:
             self.add_item_from_name(name)
 
+    def remove_item(self, item):
+        action = item.data(Qt.ItemDataRole.UserRole)
+        if action is not None or not self.is_source:
+            self.takeItem(self.row(item))
+        return action
+
     def remove_selected(self):
         ans = []
         for item in tuple(self.selectedItems()):
-            action = item.data(Qt.ItemDataRole.UserRole)
-            if action is not None or not self.is_source:
-                self.takeItem(self.row(item))
-            ans.append(action)
+            ans.append(self.remove_item(item))
         return ans
 
     def add_names(self, names):
@@ -386,7 +397,9 @@ class ConfigureToolBar(Dialog):
     def setup_ui(self):
         acnames = all_actions().all_action_names
         self.available_actions = ActionsList(acnames - frozenset(current_actions()), parent=self)
+        self.available_actions.itemDoubleClicked.connect(self.add_item)
         self.current_actions = ActionsList(current_actions(), parent=self, is_source=False)
+        self.current_actions.itemDoubleClicked.connect(self.remove_item)
         self.l = l = QVBoxLayout(self)
         self.la = la = QLabel(_('Choose the actions you want on the toolbar.'
             ' Drag and drop items in the right hand list to re-arrange the toolbar.'))
@@ -421,8 +434,16 @@ class ConfigureToolBar(Dialog):
         names = self.current_actions.remove_selected()
         self.available_actions.add_names(names)
 
+    def remove_item(self, item):
+        names = self.current_actions.remove_item(item),
+        self.available_actions.add_names(names)
+
     def add_actions(self):
         names = self.available_actions.remove_selected()
+        self.current_actions.add_names(names)
+
+    def add_item(self, item):
+        names = self.available_actions.remove_item(item),
         self.current_actions.add_names(names)
 
     def restore_defaults(self):

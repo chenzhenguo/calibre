@@ -7,12 +7,11 @@ __copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
 import sys
-
-from PyQt5.Qt import (
-    QPainter, QDialog, QIcon, QApplication, QSize, QKeySequence,
-    QAction, Qt, QTextBrowser, QDialogButtonBox, QVBoxLayout, QGridLayout,
-    QLabel, QPlainTextEdit, QTextDocument, QCheckBox, pyqtSignal, QWidget,
-    QSizePolicy)
+from qt.core import (
+    QAction, QApplication, QCheckBox, QDialog, QDialogButtonBox, QGridLayout, QIcon,
+    QKeySequence, QLabel, QPainter, QPlainTextEdit, QSize, QSizePolicy, Qt,
+    QTextBrowser, QTextDocument, QVBoxLayout, QWidget, pyqtSignal
+)
 
 from calibre.constants import __version__, isfrozen
 from calibre.gui2 import gprefs
@@ -63,7 +62,7 @@ class MessageBox(QDialog):  # {{{
         la.setOpenExternalLinks(True)
         la.setObjectName("msg")
         l.addWidget(la, 0, 1, 1, 1)
-        self.det_msg = dm = QPlainTextEdit(self)
+        self.det_msg = dm = QTextBrowser(self)
         dm.setReadOnly(True)
         dm.setObjectName("det_msg")
         l.addWidget(dm, 1, 0, 1, 2)
@@ -82,8 +81,13 @@ class MessageBox(QDialog):  # {{{
                  q_icon=None,
                  show_copy_button=True,
                  parent=None, default_yes=True,
-                 yes_text=None, no_text=None, yes_icon=None, no_icon=None):
+                 yes_text=None, no_text=None, yes_icon=None, no_icon=None,
+                 add_abort_button=False,
+                 only_copy_details=False
+    ):
         QDialog.__init__(self, parent)
+        self.only_copy_details = only_copy_details
+        self.aborted = False
         if q_icon is None:
             icon = {
                     self.ERROR : 'error',
@@ -101,7 +105,10 @@ class MessageBox(QDialog):  # {{{
         self.setWindowIcon(self.icon)
         self.icon_widget.set_icon(self.icon)
         self.msg.setText(msg)
-        self.det_msg.setPlainText(det_msg)
+        if det_msg and Qt.mightBeRichText(det_msg):
+            self.det_msg.setHtml(det_msg)
+        else:
+            self.det_msg.setPlainText(det_msg)
         self.det_msg.setVisible(False)
         self.toggle_checkbox.setVisible(False)
 
@@ -139,11 +146,17 @@ class MessageBox(QDialog):  # {{{
         else:
             self.bb.button(QDialogButtonBox.StandardButton.Ok).setDefault(True)
 
+        if add_abort_button:
+            self.bb.addButton(QDialogButtonBox.StandardButton.Abort).clicked.connect(self.on_abort)
+
         if not det_msg:
             self.det_msg_toggle.setVisible(False)
 
         self.resize_needed.connect(self.do_resize, type=Qt.ConnectionType.QueuedConnection)
         self.do_resize()
+
+    def on_abort(self):
+        self.aborted = True
 
     def sizeHint(self):
         ans = QDialog.sizeHint(self)
@@ -161,11 +174,10 @@ class MessageBox(QDialog):  # {{{
         self.resize(self.sizeHint())
 
     def copy_to_clipboard(self, *args):
-        QApplication.clipboard().setText(
-                'calibre, version %s\n%s: %s\n\n%s' %
-                (__version__, unicode_type(self.windowTitle()),
-                    unicode_type(self.msg.text()),
-                    unicode_type(self.det_msg.toPlainText())))
+        text = self.det_msg.toPlainText()
+        if not self.only_copy_details:
+            text = f'calibre, version {__version__}\n{self.windowTitle()}: {self.msg.text()}\n\n{text}'
+        QApplication.clipboard().setText(text)
         if hasattr(self, 'ctc_button'):
             self.ctc_button.setText(_('Copied'))
 
@@ -184,7 +196,10 @@ class MessageBox(QDialog):  # {{{
     def set_details(self, msg):
         if not msg:
             msg = ''
-        self.det_msg.setPlainText(msg)
+        if Qt.mightBeRichText(msg):
+            self.det_msg.setHtml(msg)
+        else:
+            self.det_msg.setPlainText(msg)
         self.det_msg_toggle.setText(self.show_det_msg)
         self.det_msg_toggle.setVisible(bool(msg))
         self.det_msg.setVisible(False)
@@ -478,8 +493,17 @@ class JobError(QDialog):  # {{{
 
 
 if __name__ == '__main__':
-    from calibre.gui2 import question_dialog, Application
+    from calibre.gui2 import Application, question_dialog
+    from calibre import prepare_string_for_xml
     app = Application([])
+    merged = {'Kovid Goyal': ['Waterloo', 'Doomed'], 'Someone Else': ['Some other book ' * 1000]}
+    lines = []
+    for author in sorted(merged):
+        lines.append(f'<b><i>{prepare_string_for_xml(author)}</i></b><ol style="margin-top: 0">')
+        for title in sorted(merged[author]):
+            lines.append(f'<li>{prepare_string_for_xml(title)}</li>')
+        lines.append('</ol>')
+
     print(question_dialog(None, 'title', 'msg <a href="http://google.com">goog</a> ',
-            det_msg='det '*1000,
+            det_msg='\n'.join(lines),
             show_copy_button=True))

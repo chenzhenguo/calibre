@@ -7,7 +7,7 @@ __copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
 
 import glob, os, shutil
 from functools import partial
-from PyQt5.Qt import (
+from qt.core import (
     QDialog, QVBoxLayout, QListWidget, QListWidgetItem, Qt, QIcon,
     QApplication, QSize, QDialogButtonBox, QTimer, QLabel, QAbstractItemView, QListView)
 
@@ -53,7 +53,8 @@ class TextureChooser(QDialog):
         il.itemSelectionChanged.connect(self.update_remove_state)
         l.addWidget(il)
 
-        self.ad = ad = QLabel(_('The builtin textures come from <a href="https://subtlepatterns.com">subtlepatterns.com</a>.'))
+        self.ad = ad = QLabel(_('The builtin textures come from <a href="{}">subtlepatterns.com</a>.').format(
+            'https://www.toptal.com/designers/subtlepatterns/'))
         ad.setOpenExternalLinks(True)
         ad.setWordWrap(True)
         l.addWidget(ad)

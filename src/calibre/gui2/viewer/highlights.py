@@ -7,23 +7,23 @@ import math
 from collections import defaultdict
 from functools import lru_cache
 from itertools import chain
-from PyQt5.Qt import (
-    QColor, QFont, QHBoxLayout, QIcon, QImage, QItemSelectionModel, QKeySequence,
-    QLabel, QMenu, QPainter, QPainterPath, QPixmap, QPushButton, QRect, QSizePolicy,
-    Qt, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, pyqtSignal,
-    QAbstractItemView, QDialog, QPalette, QStyle
+from qt.core import (
+    QAbstractItemView, QColor, QDialog, QFont, QHBoxLayout, QIcon, QImage,
+    QItemSelectionModel, QKeySequence, QLabel, QMenu, QPainter, QPainterPath,
+    QPalette, QPixmap, QPushButton, QRect, QSizePolicy, QStyle, Qt, QTextCursor,
+    QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, pyqtSignal
 )
 
 from calibre.constants import (
     builtin_colors_dark, builtin_colors_light, builtin_decorations
 )
 from calibre.ebooks.epub.cfi.parse import cfi_sort_key
-from calibre.gui2 import error_dialog, is_dark_theme
+from calibre.gui2 import error_dialog, is_dark_theme, safe_open_url
 from calibre.gui2.dialogs.confirm_delete import confirm
 from calibre.gui2.library.annotations import (
     Details, Export as ExportBase, render_highlight_as_text, render_notes
 )
-from calibre.gui2.viewer import get_current_book_data
+from calibre.gui2.viewer import link_prefix_for_location_links
 from calibre.gui2.viewer.config import vprefs
 from calibre.gui2.viewer.search import SearchInput
 from calibre.gui2.viewer.shortcuts import get_shortcut_for, index_to_key_sequence
@@ -131,20 +131,6 @@ class Export(ExportBase):
         return _('highlights')
 
     def exported_data(self):
-        cbd = get_current_book_data()
-        link_prefix = library_id = None
-        if 'calibre_library_id' in cbd:
-            library_id = cbd['calibre_library_id']
-            book_id = cbd['calibre_book_id']
-            book_fmt = cbd['calibre_book_fmt']
-        elif cbd.get('book_library_details'):
-            bld = cbd['book_library_details']
-            book_id = bld['book_id']
-            book_fmt = bld['fmt'].upper()
-            library_id = bld['library_id']
-        if library_id:
-            library_id = '_hex_-' + library_id.encode('utf-8').hex()
-            link_prefix = f'calibre://view-book/{library_id}/{book_id}/{book_fmt}?open_at='
         fmt = self.export_format.currentData()
         if fmt == 'calibre_highlights':
             return json.dumps({
@@ -154,8 +140,18 @@ class Export(ExportBase):
             }, ensure_ascii=False, sort_keys=True, indent=2)
         lines = []
         as_markdown = fmt == 'md'
-        for hl in self.annotations:
-            render_highlight_as_text(hl, lines, as_markdown=as_markdown, link_prefix=link_prefix)
+        link_prefix = link_prefix_for_location_links()
+        chapter_groups = {}
+        def_chap = (_('Unknown chapter'),)
+        for a in self.annotations:
+            toc_titles = a.get('toc_family_titles', def_chap)
+            chapter_groups.setdefault(toc_titles[0], []).append(a)
+        for chapter, group in chapter_groups.items():
+            if len(chapter_groups) > 1:
+                lines.append('### ' + chapter)
+                lines.append('')
+            for hl in group:
+                render_highlight_as_text(hl, lines, as_markdown=as_markdown, link_prefix=link_prefix)
         return '\n'.join(lines).strip()
 
 
@@ -203,8 +199,15 @@ class Highlights(QTreeWidget):
     def current_item_changed(self, current, previous):
         self.current_highlight_changed.emit(current.data(0, Qt.ItemDataRole.UserRole) if current is not None else None)
 
-    def load(self, highlights):
+    def load(self, highlights, preserve_state=False):
         s = self.style()
+        expanded_chapters = set()
+        if preserve_state:
+            root = self.invisibleRootItem()
+            for i in range(root.childCount()):
+                chapter = root.child(i)
+                if chapter.isExpanded():
+                    expanded_chapters.add(chapter.data(0, Qt.ItemDataRole.DisplayRole))
         icon_size = s.pixelMetric(QStyle.PixelMetric.PM_SmallIconSize, None, self)
         dpr = self.devicePixelRatioF()
         is_dark = is_dark_theme()
@@ -238,7 +241,7 @@ class Highlights(QTreeWidget):
             if tt:
                 section.setToolTip(0, tt)
             self.addTopLevelItem(section)
-            section.setExpanded(True)
+            section.setExpanded(not preserve_state or sec in expanded_chapters)
             for itemnum, h in enumerate(items):
                 txt = h.get('highlighted_text')
                 txt = txt.replace('\n', ' ')
@@ -272,7 +275,7 @@ class Highlights(QTreeWidget):
 
     def refresh(self, highlights):
         h = self.current_highlight
-        self.load(highlights)
+        self.load(highlights, preserve_state=True)
         if h is not None:
             idx = self.uuid_map.get(h['uuid'])
             if idx is not None:
@@ -378,6 +381,7 @@ class NotesEditDialog(Dialog):
         qte.setMinimumWidth(600)
         if self.initial_notes:
             qte.setPlainText(self.initial_notes)
+            qte.moveCursor(QTextCursor.MoveOperation.End)
         l.addWidget(qte)
         l.addWidget(self.bb)
 
@@ -393,7 +397,7 @@ class NotesDisplay(Details):
     def __init__(self, parent=None):
         Details.__init__(self, parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        self.anchorClicked.connect(self.edit_notes)
+        self.anchorClicked.connect(self.anchor_clicked)
         self.current_notes = ''
 
     def show_notes(self, text=''):
@@ -401,9 +405,16 @@ class NotesDisplay(Details):
         self.setVisible(bool(text))
         self.current_notes = text
         html = '\n'.join(render_notes(text))
-        self.setHtml('<div><a href="edit://moo" style="text-decoration: none">{}</a></div>{}'.format(_('Edit notes'), html))
+        self.setHtml('<div><a href="edit://moo">{}</a></div>{}'.format(_('Edit notes'), html))
+        self.document().setDefaultStyleSheet('a[href] { text-decoration: none }')
         h = self.document().size().height() + 2
         self.setMaximumHeight(h)
+
+    def anchor_clicked(self, qurl):
+        if qurl.scheme() == 'edit':
+            self.edit_notes()
+        else:
+            safe_open_url(qurl)
 
     def edit_notes(self):
         current_text = self.current_notes
@@ -418,6 +429,7 @@ class HighlightsPanel(QWidget):
     request_highlight_action = pyqtSignal(object, object)
     web_action = pyqtSignal(object, object)
     toggle_requested = pyqtSignal()
+    notes_edited_signal = pyqtSignal(object, object)
 
     def __init__(self, parent=None):
         QWidget.__init__(self, parent)
@@ -467,6 +479,7 @@ class HighlightsPanel(QWidget):
         if h is not None:
             h['notes'] = text
             self.web_action.emit('set-notes-in-highlight', h)
+            self.notes_edited_signal.emit(h['uuid'], text)
 
     def set_tooltips(self, rmap):
         a = rmap.get('create_annotation')

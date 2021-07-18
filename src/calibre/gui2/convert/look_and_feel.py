@@ -8,7 +8,7 @@ __docformat__ = 'restructuredtext en'
 
 import json
 
-from PyQt5.Qt import Qt, QDialog
+from qt.core import Qt, QDialog
 
 from calibre.gui2.convert.look_and_feel_ui import Ui_Form
 from calibre.gui2.convert import Widget
@@ -20,7 +20,7 @@ class LookAndFeelWidget(Widget, Ui_Form):
 
     TITLE = _('Look & feel')
     ICON  = I('lookfeel.png')
-    HELP  = _('Control the look and feel of the output')
+    HELP  = _('Control the look and feel of the output.')
     COMMIT_NAME = 'look_and_feel'
 
     FILTER_CSS = {

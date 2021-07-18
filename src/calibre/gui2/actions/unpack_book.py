@@ -8,7 +8,7 @@ __docformat__ = 'restructuredtext en'
 
 import os, weakref, shutil
 
-from PyQt5.Qt import (QDialog, QVBoxLayout, QHBoxLayout, QRadioButton, QFrame,
+from qt.core import (QDialog, QVBoxLayout, QHBoxLayout, QRadioButton, QFrame,
         QPushButton, QLabel, QGroupBox, QGridLayout, QIcon, QSize, QTimer)
 
 from calibre import as_unicode
@@ -188,7 +188,7 @@ class UnpackBook(QDialog):
 
         if det_msg is not None:
             return error_dialog(self, _('Failed to unpack'),
-                _('Could not explode the %s file. Click "Show Details" for '
+                _('Could not explode the %s file. Click "Show details" for '
                     'more information.')%self.current_format, det_msg=det_msg,
                 show=True)
 

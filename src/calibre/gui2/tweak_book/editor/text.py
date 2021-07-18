@@ -9,7 +9,7 @@ import re
 import regex
 import textwrap
 import unicodedata
-from PyQt5.Qt import (
+from qt.core import (
     QColor, QColorDialog, QFont, QFontDatabase, QKeySequence, QPainter, QPalette,
     QPlainTextEdit, QRect, QSize, Qt, QTextCursor, QTextEdit, QTextFormat, QTimer,
     QToolTip, QWidget, pyqtSignal
@@ -24,8 +24,8 @@ from calibre.gui2.tweak_book import (
 )
 from calibre.gui2.tweak_book.completion.popup import CompletionPopup
 from calibre.gui2.tweak_book.editor import (
-    LINK_PROPERTY, SPELL_LOCALE_PROPERTY, SPELL_PROPERTY, SYNTAX_PROPERTY,
-    store_locale
+    CLASS_ATTRIBUTE_PROPERTY, LINK_PROPERTY, SPELL_LOCALE_PROPERTY, SPELL_PROPERTY,
+    SYNTAX_PROPERTY, store_locale
 )
 from calibre.gui2.tweak_book.editor.smarts import NullSmarts
 from calibre.gui2.tweak_book.editor.snippets import SnippetManager
@@ -93,6 +93,7 @@ class LineNumbers(QWidget):  # {{{
 class TextEdit(PlainTextEdit):
 
     link_clicked = pyqtSignal(object)
+    class_clicked = pyqtSignal(object)
     smart_highlighting_updated = pyqtSignal()
 
     def __init__(self, parent=None, expected_geometry=(100, 50)):
@@ -277,6 +278,8 @@ class TextEdit(PlainTextEdit):
             if self.smarts.override_tab_stop_width is not None:
                 self.tw = self.smarts.override_tab_stop_width
                 self.setTabStopWidth(self.tw * self.space_width)
+        if isinstance(text, bytes):
+            text = text.decode('utf-8', 'replace')
         self.setPlainText(unicodedata.normalize('NFC', unicode_type(text)))
         if process_template and QPlainTextEdit.find(self, '%CURSOR%'):
             c = self.textCursor()
@@ -713,7 +716,7 @@ class TextEdit(PlainTextEdit):
         c = self.textCursor()
         c.setPosition(block.position() + r.start)
         c.setPosition(c.position() + r.length, QTextCursor.MoveMode.KeepAnchor)
-        return unicode_type(c.selectedText())
+        return self.selected_text_from_cursor(c)
 
     def spellcheck_locale_for_cursor(self, c):
         with store_locale:
@@ -764,6 +767,45 @@ class TextEdit(PlainTextEdit):
         if r is not None and r.format.property(LINK_PROPERTY):
             return self.text_for_range(c.block(), r)
 
+    def select_class_name_at_cursor(self, cursor):
+        valid = re.compile(r'[\w_0-9\-]+', flags=re.UNICODE)
+
+        def keep_going():
+            q = cursor.selectedText()
+            m = valid.match(q)
+            return m is not None and m.group() == q
+
+        def run_loop(forward=True):
+            cursor.setPosition(pos)
+            n, p = QTextCursor.MoveOperation.NextCharacter, QTextCursor.MoveOperation.PreviousCharacter
+            if not forward:
+                n, p = p, n
+            while True:
+                if not cursor.movePosition(n, QTextCursor.MoveMode.KeepAnchor):
+                    break
+                if not keep_going():
+                    cursor.movePosition(p, QTextCursor.MoveMode.KeepAnchor)
+                    break
+            ans = cursor.position()
+            cursor.setPosition(pos)
+            return ans
+
+        pos = cursor.position()
+        forwards_limit = run_loop()
+        backwards_limit = run_loop(forward=False)
+        cursor.setPosition(backwards_limit)
+        cursor.setPosition(forwards_limit, QTextCursor.MoveMode.KeepAnchor)
+        return self.selected_text_from_cursor(cursor)
+
+    def class_for_position(self, pos):
+        c = self.cursorForPosition(pos)
+        r = self.syntax_range_for_cursor(c)
+        if r is not None and r.format.property(CLASS_ATTRIBUTE_PROPERTY):
+            class_name = self.select_class_name_at_cursor(c)
+            if class_name:
+                tags = self.current_tag(for_position_sync=False, cursor=c)
+                return {'class': class_name, 'sourceline_address': tags}
+
     def mousePressEvent(self, ev):
         if self.completion_popup.isVisible() and not self.completion_popup.rect().contains(ev.pos()):
             # For some reason using eventFilter for this does not work, so we
@@ -774,6 +816,11 @@ class TextEdit(PlainTextEdit):
             if url is not None:
                 ev.accept()
                 self.link_clicked.emit(url)
+                return
+            class_data = self.class_for_position(ev.pos())
+            if class_data is not None:
+                ev.accept()
+                self.class_clicked.emit(class_data)
                 return
         return PlainTextEdit.mousePressEvent(self, ev)
 
@@ -884,6 +931,10 @@ version="1.1" width="100%%" height="100%%" viewBox="0 0 {w} {h}" preserveAspectR
         if hasattr(self.smarts, 'remove_tag'):
             self.smarts.remove_tag(self)
 
+    def split_tag(self):
+        if hasattr(self.smarts, 'split_tag'):
+            self.smarts.split_tag(self)
+
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key.Key_X and ev.modifiers() == Qt.KeyboardModifier.AltModifier:
             if self.replace_possible_unicode_sequence():
@@ -962,8 +1013,12 @@ version="1.1" width="100%%" height="100%%" viewBox="0 0 {w} {h}" preserveAspectR
         if hasattr(self.smarts, 'rename_block_tag'):
             self.smarts.rename_block_tag(self, new_name)
 
-    def current_tag(self, for_position_sync=True):
-        return self.smarts.cursor_position_with_sourceline(self.textCursor(), for_position_sync=for_position_sync)
+    def current_tag(self, for_position_sync=True, cursor=None):
+        use_matched_tag = False
+        if cursor is None:
+            use_matched_tag = True
+            cursor = self.textCursor()
+        return self.smarts.cursor_position_with_sourceline(cursor, for_position_sync=for_position_sync, use_matched_tag=use_matched_tag)
 
     def goto_sourceline(self, sourceline, tags, attribute=None):
         return self.smarts.goto_sourceline(self, sourceline, tags, attribute=attribute)

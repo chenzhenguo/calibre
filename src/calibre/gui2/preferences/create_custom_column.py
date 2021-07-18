@@ -10,7 +10,7 @@ __copyright__ = '2010, Kovid Goyal <kovid at kovidgoyal.net>'
 import re
 from functools import partial
 
-from PyQt5.Qt import (
+from qt.core import (
     QDialog, Qt, QColor, QIcon, QVBoxLayout, QLabel, QGridLayout,
     QDialogButtonBox, QWidget, QLineEdit, QHBoxLayout, QComboBox,
     QCheckBox
@@ -451,7 +451,7 @@ class CreateCustomColumn(QDialog):
                     '</ul></p>'
                     "<p>For example:\n"
                     "<ul>\n"
-                    "<li>ddd, d MMM yyyy gives Mon, 5 Jan 2010<li>\n"
+                    "<li>ddd, d MMM yyyy gives Mon, 5 Jan 2010</li>\n"
                     "<li>dd MMMM yy gives 05 January 10</li>\n"
                     "</ul> "))
             else:

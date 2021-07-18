@@ -6,26 +6,34 @@ __license__   = 'GPL v3'
 __copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
-import os, textwrap, json
+import json
+import os
+import textwrap
+from functools import partial
+from qt.core import (
+    QAbstractItemView, QAbstractListModel, QApplication, QCheckBox, QComboBox,
+    QDialog, QDialogButtonBox, QDoubleValidator, QFrame, QGridLayout, QIcon,
+    QIntValidator, QItemSelectionModel, QLabel, QLineEdit, QListView, QMenu,
+    QPalette, QPushButton, QScrollArea, QSize, QSizePolicy, QSpacerItem,
+    QStandardItem, QStandardItemModel, Qt, QToolButton, QVBoxLayout, QWidget,
+    QItemSelection, pyqtSignal
+)
 
-from PyQt5.Qt import (QWidget, QDialog, QLabel, QGridLayout, QComboBox, QSize,
-        QLineEdit, QIntValidator, QDoubleValidator, QFrame, Qt, QIcon, QHBoxLayout,
-        QScrollArea, QPushButton, QVBoxLayout, QDialogButtonBox, QToolButton, QItemSelectionModel,
-        QListView, QAbstractListModel, pyqtSignal, QSizePolicy, QSpacerItem, QPalette,
-        QApplication, QStandardItem, QStandardItemModel, QCheckBox, QMenu, QAbstractItemView)
-
-from calibre import prepare_string_for_xml, sanitize_file_name, as_unicode
+from calibre import as_unicode, prepare_string_for_xml, sanitize_file_name
 from calibre.constants import config_dir
-from calibre.utils.icu import sort_key
-from calibre.gui2 import (error_dialog, choose_files, pixmap_to_data, gprefs,
-                          choose_save_file, open_local_file)
+from calibre.gui2 import (
+    choose_files, choose_save_file, error_dialog, gprefs, open_local_file,
+    pixmap_to_data
+)
 from calibre.gui2.dialogs.template_dialog import TemplateDialog
 from calibre.gui2.metadata.single_download import RichTextDelegate
-from calibre.gui2.widgets2 import ColorButton
-from calibre.library.coloring import (Rule, conditionable_columns,
-    displayable_columns, rule_from_template, color_row_key)
+from calibre.gui2.widgets2 import ColorButton, FlowLayout, Separator
+from calibre.library.coloring import (
+    Rule, color_row_key, conditionable_columns, displayable_columns,
+    rule_from_template
+)
+from calibre.utils.icu import lower, sort_key
 from calibre.utils.localization import lang_map
-from calibre.utils.icu import lower
 from polyglot.builtins import iteritems, unicode_type
 
 all_columns_string = _('All columns')
@@ -325,33 +333,36 @@ class RuleEditor(QDialog):  # {{{
         self.f1.setFrameShape(QFrame.Shape.HLine)
         l.addWidget(self.f1, 1, 0, 1, 8)
 
-        self.l2 = l2 = QLabel(_('Add the emblem:') if self.rule_kind == 'emblem' else _('Set the'))
-        l.addWidget(l2, 2, 0)
+        # self.l2 = l2 = QLabel(_('Add the emblem:') if self.rule_kind == 'emblem' else _('Set the'))
+        # l.addWidget(l2, 2, 0)
 
-        if self.rule_kind == 'color':
-            l.addWidget(QLabel(_('color')))
+        if self.rule_kind == 'emblem':
+            self.l2 = l2 = QLabel(_('Add the emblem:'))
+            l.addWidget(l2, 2, 0)
+        elif self.rule_kind == 'color':
+            l.addWidget(QLabel(_('Set the color of the column:')), 2, 0)
         elif self.rule_kind == 'icon':
+            l.addWidget(QLabel(_('Set the:')), 2, 0)
             self.kind_box = QComboBox(self)
             for tt, t in icon_rule_kinds:
                 self.kind_box.addItem(tt, t)
-            l.addWidget(self.kind_box, 2, 1)
+            l.addWidget(self.kind_box, 3, 0)
             self.kind_box.setToolTip(textwrap.fill(_(
                 'If you choose composed icons and multiple rules match, then all the'
                 ' matching icons will be combined, otherwise the icon from the'
                 ' first rule to match will be used.')))
+            self.l3 = l3 = QLabel(_('of the column:'))
+            l.addWidget(l3, 2, 2)
         else:
             pass
 
-        self.l3 = l3 = QLabel(_('of the column:'))
-        l.addWidget(l3, 2, 2)
-
         self.column_box = QComboBox(self)
-        l.addWidget(self.column_box, 2, 3)
+        l.addWidget(self.column_box, 3, 0 if self.rule_kind == 'color' else 2)
 
-        self.l4 = l4 = QLabel(_('to'))
-        l.addWidget(l4, 2, 4)
+        self.l4 = l4 = QLabel(_('to:'))
+        l.addWidget(l4, 2, 5)
         if self.rule_kind == 'emblem':
-            l3.setVisible(False), self.column_box.setVisible(False), l4.setVisible(False)
+            self.column_box.setVisible(False), l4.setVisible(False)
 
         def create_filename_box():
             self.filename_box = f = QComboBox()
@@ -366,59 +377,56 @@ class RuleEditor(QDialog):  # {{{
             self.color_box = ColorButton(parent=self)
             self.color_label = QLabel('Sample text Sample text')
             self.color_label.setTextFormat(Qt.TextFormat.RichText)
-            l.addWidget(self.color_box, 2, 5)
-            l.addWidget(self.color_label, 2, 6)
+            l.addWidget(self.color_box, 3, 5)
+            l.addWidget(self.color_label, 3, 6)
             l.addItem(QSpacerItem(10, 10, QSizePolicy.Policy.Expanding), 2, 7)
         elif self.rule_kind == 'emblem':
             create_filename_box()
             self.update_filename_box()
             self.filename_button = QPushButton(QIcon(I('document_open.png')),
                                                _('&Add new image'))
-            l.addWidget(self.filename_box)
-            l.addWidget(self.filename_button, 2, 6)
-            l.addWidget(QLabel(_('(Images should be square-ish)')), 2, 7)
+            l.addWidget(self.filename_box, 3, 0)
+            l.addWidget(self.filename_button, 3, 2)
+            l.addWidget(QLabel(_('(Images should be square-ish)')), 3, 4)
             l.setColumnStretch(7, 10)
         else:
             create_filename_box()
-
-            vb = QVBoxLayout()
             self.multiple_icon_cb = QCheckBox(_('Choose &more than one icon'))
-            vb.addWidget(self.multiple_icon_cb)
+            l.addWidget(self.multiple_icon_cb, 4, 5)
             self.update_filename_box()
             self.multiple_icon_cb.clicked.connect(self.multiple_box_clicked)
-            vb.addWidget(self.filename_box)
-            l.addLayout(vb, 2, 5)
+            l.addWidget(self.filename_box, 3, 5)
 
             self.filename_button = QPushButton(QIcon(I('document_open.png')),
                                                _('&Add icon'))
-            l.addWidget(self.filename_button, 2, 6)
-            l.addWidget(QLabel(_('Icons should be square or landscape')), 2, 7)
+            l.addWidget(self.filename_button, 3, 6)
+            l.addWidget(QLabel(_('(Icons should be square or landscape)')), 4, 6)
             l.setColumnStretch(7, 10)
 
         self.l5 = l5 = QLabel(
             _('Only if the following conditions are all satisfied:'))
-        l.addWidget(l5, 3, 0, 1, 7)
+        l.addWidget(l5, 5, 0, 1, 7)
 
         self.scroll_area = sa = QScrollArea(self)
         sa.setMinimumHeight(300)
-        sa.setMinimumWidth(950)
+        sa.setMinimumWidth(700)
         sa.setWidgetResizable(True)
-        l.addWidget(sa, 4, 0, 1, 8)
+        l.addWidget(sa, 6, 0, 1, 8)
 
         self.add_button = b = QPushButton(QIcon(I('plus.png')),
                 _('Add &another condition'))
-        l.addWidget(b, 5, 0, 1, 8)
+        l.addWidget(b, 7, 0, 1, 8)
         b.clicked.connect(self.add_blank_condition)
 
         self.l6 = l6 = QLabel(_('You can disable a condition by'
             ' blanking all of its boxes'))
-        l.addWidget(l6, 6, 0, 1, 8)
+        l.addWidget(l6, 8, 0, 1, 8)
 
         self.bb = bb = QDialogButtonBox(
                 QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
-        l.addWidget(bb, 7, 0, 1, 8)
+        l.addWidget(bb, 9, 0, 1, 8)
         if self.rule_kind != 'color':
             self.remove_button = b = bb.addButton(_('&Remove icon'), QDialogButtonBox.ButtonRole.ActionRole)
             b.setIcon(QIcon(I('minus.png')))
@@ -891,6 +899,7 @@ class RulesView(QListView):  # {{{
         if self.model() and new.isValid():
             _, _, rule = self.model().data(new, Qt.ItemDataRole.UserRole)
             self.enable_convert_buttons_function(isinstance(rule, Rule))
+        return super().currentChanged(new, prev)
 # }}}
 
 
@@ -934,12 +943,12 @@ class EditRules(QWidget):  # {{{
         self.up_button = b = QToolButton(self)
         b.setIcon(QIcon(I('arrow-up.png')))
         b.setToolTip(_('Move the selected rule up'))
-        b.clicked.connect(self.move_up)
+        b.clicked.connect(partial(self.move_rows, moving_up=True))
         g.addWidget(b, 0, 1, 1, 1, Qt.AlignmentFlag.AlignTop)
         self.down_button = b = QToolButton(self)
         b.setIcon(QIcon(I('arrow-down.png')))
         b.setToolTip(_('Move the selected rule down'))
-        b.clicked.connect(self.move_down)
+        b.clicked.connect(partial(self.move_rows, moving_up=False))
         g.addWidget(b, 1, 1, 1, 1, Qt.AlignmentFlag.AlignBottom)
 
         l.addLayout(g, l.rowCount(), 0, 1, 2)
@@ -948,7 +957,7 @@ class EditRules(QWidget):  # {{{
         self.add_advanced_button = b = QPushButton(QIcon(I('plus.png')),
                 _('Add ad&vanced rule'), self)
         b.clicked.connect(self.add_advanced)
-        self.hb = hb = QHBoxLayout()
+        self.hb = hb = FlowLayout()
         l.addLayout(hb, l.rowCount(), 0, 1, 2)
         hb.addWidget(b)
         self.duplicate_rule_button = b = QPushButton(QIcon(I('edit-copy.png')),
@@ -961,13 +970,15 @@ class EditRules(QWidget):  # {{{
         b.clicked.connect(self.convert_to_advanced)
         b.setEnabled(False)
         hb.addWidget(b)
-        hb.addStretch(10)
+        sep = Separator(self, b)
+        hb.addWidget(sep)
+
         self.open_icon_folder_button = b = QPushButton(QIcon(I('icon_choose.png')),
-                _('Open icon directory'), self)
-        connect_lambda(b.clicked, self,
-                       lambda _: open_local_file(os.path.join(config_dir, 'cc_icons')))
+                _('Open icon folder'), self)
+        b.clicked.connect(self.open_icon_folder)
         hb.addWidget(b)
-        hb.addStretch(10)
+        sep = Separator(self, b)
+        hb.addWidget(sep)
         self.export_button = b = QPushButton(_('E&xport'), self)
         b.clicked.connect(self.export_rules)
         b.setToolTip(_('Export these rules to a file'))
@@ -976,6 +987,11 @@ class EditRules(QWidget):  # {{{
         b.setToolTip(_('Import rules from a file'))
         b.clicked.connect(self.import_rules)
         hb.addWidget(b)
+
+    def open_icon_folder(self):
+        path = os.path.join(config_dir, 'cc_icons')
+        os.makedirs(path, exist_ok=True)
+        open_local_file(path)
 
     def initialize(self, fm, prefs, mi, pref_name):
         self.pref_name = pref_name
@@ -1131,34 +1147,26 @@ class EditRules(QWidget):  # {{{
                 self.model.remove_rule(row)
             self.changed.emit()
 
-    def move_up(self):
+    def move_rows(self, moving_up=True):
         sm = self.rules_view.selectionModel()
-        rows = sorted(list(sm.selectedRows()))
+        rows = sorted(list(sm.selectedRows()), reverse=not moving_up)
         if rows:
-            if rows[0].row() == 0:
+            if rows[0].row() == (0 if moving_up else self.model.rowCount() - 1):
                 return
             sm.clear()
+            indices_to_select = []
             for idx in rows:
                 if idx.isValid():
-                    idx = self.model.move(idx, -1)
+                    idx = self.model.move(idx, -1 if moving_up else 1)
                     if idx is not None:
-                        sm.select(idx, QItemSelectionModel.SelectionFlag.Toggle)
-                        self.rules_view.setCurrentIndex(idx)
-            self.changed.emit()
-
-    def move_down(self):
-        sm = self.rules_view.selectionModel()
-        rows = sorted(list(sm.selectedRows()))
-        if rows:
-            if rows[-1].row() == self.model.rowCount() - 1:
-                return
-            sm.clear()
-            for idx in rows:
-                if idx.isValid():
-                    idx = self.model.move(idx, 1)
-                    if idx is not None:
-                        sm.select(idx, QItemSelectionModel.SelectionFlag.Toggle)
-                        self.rules_view.setCurrentIndex(idx)
+                        indices_to_select.append(idx)
+            if indices_to_select:
+                new_selections = QItemSelection()
+                for idx in indices_to_select:
+                    new_selections.merge(QItemSelection(idx, idx),
+                                         QItemSelectionModel.SelectionFlag.Select)
+                sm.select(new_selections, QItemSelectionModel.SelectionFlag.Select)
+                self.rules_view.scrollTo(indices_to_select[0])
             self.changed.emit()
 
     def clear(self):

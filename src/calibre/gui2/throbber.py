@@ -7,7 +7,7 @@ __copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
 
-from PyQt5.Qt import (
+from qt.core import (
     QToolButton, QSize, QPropertyAnimation, Qt, QMetaObject, pyqtProperty, QSizePolicy,
     QWidget, QIcon, QPainter, QStyleOptionToolButton, QStyle, QAbstractAnimation)
 
@@ -33,7 +33,7 @@ class ThrobbingButton(QToolButton):
         QToolButton.setIcon(self, QIcon(I('donate.png')))
         self.setText('\xa0')
         self.animation = QPropertyAnimation(self, b'icon_size', self)
-        self.animation.setDuration(60/72.*1000)
+        self.animation.setDuration(int(60/72.*1000))
         self.animation.setLoopCount(4)
         self.animation.valueChanged.connect(self.value_changed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -77,7 +77,7 @@ class ThrobbingButton(QToolButton):
 
 
 if __name__ == '__main__':
-    from PyQt5.Qt import QApplication, QHBoxLayout
+    from qt.core import QApplication, QHBoxLayout
     app = QApplication([])
     w = QWidget()
     w.setLayout(QHBoxLayout())

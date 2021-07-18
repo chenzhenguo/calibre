@@ -13,14 +13,13 @@ import threading
 from contextlib import contextmanager
 from threading import Lock, RLock
 
-from PyQt5.Qt import (
+from qt.core import (
     QT_VERSION, QApplication, QBuffer, QByteArray, QCoreApplication, QDateTime,
     QDesktopServices, QDialog, QEvent, QFileDialog, QFileIconProvider, QFileInfo, QPalette,
     QFont, QFontDatabase, QFontInfo, QFontMetrics, QIcon, QLocale, QColor,
     QNetworkProxyFactory, QObject, QSettings, QSocketNotifier, QStringListModel, Qt,
-    QThread, QTimer, QTranslator, QUrl, pyqtSignal, QIODevice, QDialogButtonBox
+    QThread, QTimer, QTranslator, QUrl, pyqtSignal, QIODevice, QDialogButtonBox, QStyle
 )
-from PyQt5.QtWidgets import QStyle  # Gives a nicer error message than import from Qt
 
 from calibre import as_unicode, prints
 from calibre.constants import (
@@ -125,7 +124,8 @@ def create_defs():
             'Edit Metadata', 'Send To Device', 'Save To Disk',
             'Connect Share', 'Copy To Library', None,
             'Convert Books', 'View', 'Open Folder', 'Show Book Details',
-            'Similar Books', 'Tweak ePub', None, 'Remove Books',
+            'Similar Books', 'Tweak ePub', None, 'Remove Books', None,
+            'Autoscroll Books'
             )
 
     defs['show_splash_screen'] = True
@@ -199,6 +199,7 @@ def create_defs():
     defs['browse_annots_restrict_to_type'] = None
     defs['browse_annots_use_stemmer'] = True
     defs['annots_export_format'] = 'txt'
+    defs['books_autoscroll_time'] = 2.0
 
 
 create_defs()
@@ -234,7 +235,7 @@ def _config():  # {{{
     c.add_opt('LRF_ebook_viewer_options', default=None,
               help=_('Options for the LRF e-book viewer'))
     c.add_opt('internally_viewed_formats', default=['LRF', 'EPUB', 'LIT',
-        'MOBI', 'PRC', 'POBI', 'AZW', 'AZW3', 'HTML', 'FB2', 'PDB', 'RB',
+        'MOBI', 'PRC', 'POBI', 'AZW', 'AZW3', 'HTML', 'FB2', 'FBZ', 'PDB', 'RB',
         'SNB', 'HTMLZ', 'KEPUB'], help=_(
             'Formats that are viewed using the internal viewer'))
     c.add_opt('column_map', default=ALL_COLUMNS,
@@ -308,7 +309,7 @@ def _config():  # {{{
     # This option is no longer used. It remains for compatibility with upgrades
     # so the value can be migrated
     c.add_opt('tag_browser_hidden_categories', default=set(),
-            help=_('tag browser categories not to display'))
+            help=_('Tag browser categories not to display'))
 
     c.add_opt
     return ConfigProxy(c)
@@ -399,6 +400,10 @@ def error_dialog(parent, title, msg, det_msg='', show=False,
     return d
 
 
+class Aborted(Exception):
+    pass
+
+
 def question_dialog(parent, title, msg, det_msg='', show_copy_button=False,
     default_yes=True,
     # Skippable dialogs
@@ -411,13 +416,17 @@ def question_dialog(parent, title, msg, det_msg='', show_copy_button=False,
     # Change the text/icons of the yes and no buttons.
     # The icons must be QIcon objects or strings for I()
     yes_text=None, no_text=None, yes_icon=None, no_icon=None,
+    # Add an Abort button which if clicked will cause this function to raise
+    # the Aborted exception
+    add_abort_button=False,
 ):
     from calibre.gui2.dialogs.message_box import MessageBox
+    prefs = gui_prefs()
 
     if not isinstance(skip_dialog_name, unicode_type):
         skip_dialog_name = None
     try:
-        auto_skip = set(gprefs.get('questions_to_auto_skip', ()))
+        auto_skip = set(prefs.get('questions_to_auto_skip', ()))
     except Exception:
         auto_skip = set()
     if (skip_dialog_name is not None and skip_dialog_name in auto_skip):
@@ -426,7 +435,7 @@ def question_dialog(parent, title, msg, det_msg='', show_copy_button=False,
     d = MessageBox(MessageBox.QUESTION, title, msg, det_msg, parent=parent,
                    show_copy_button=show_copy_button, default_yes=default_yes,
                    q_icon=override_icon, yes_text=yes_text, no_text=no_text,
-                   yes_icon=yes_icon, no_icon=no_icon)
+                   yes_icon=yes_icon, no_icon=no_icon, add_abort_button=add_abort_button)
 
     if skip_dialog_name is not None and skip_dialog_msg:
         tc = d.toggle_checkbox
@@ -436,19 +445,21 @@ def question_dialog(parent, title, msg, det_msg='', show_copy_button=False,
         d.resize_needed.emit()
 
     ret = d.exec_() == QDialog.DialogCode.Accepted
+    if add_abort_button and d.aborted:
+        raise Aborted()
 
     if skip_dialog_name is not None and not d.toggle_checkbox.isChecked():
         auto_skip.add(skip_dialog_name)
-        gprefs.set('questions_to_auto_skip', list(auto_skip))
+        prefs.set('questions_to_auto_skip', list(auto_skip))
 
     return ret
 
 
 def info_dialog(parent, title, msg, det_msg='', show=False,
-        show_copy_button=True):
+        show_copy_button=True, only_copy_details=False):
     from calibre.gui2.dialogs.message_box import MessageBox
     d = MessageBox(MessageBox.INFO, title, msg, det_msg, parent=parent,
-                    show_copy_button=show_copy_button)
+                    show_copy_button=show_copy_button, only_copy_details=only_copy_details)
 
     if show:
         return d.exec_()
@@ -805,8 +816,8 @@ def show_temp_dir_error(err):
     extra = _('Click "Show details" for more information.')
     if 'CALIBRE_TEMP_DIR' in os.environ:
         extra = _('The %s environment variable is set. Try unsetting it.') % 'CALIBRE_TEMP_DIR'
-    error_dialog(None, _('Could not create temporary directory'), _(
-        'Could not create temporary directory, calibre cannot start.') + ' ' + extra, det_msg=traceback.format_exc(), show=True)
+    error_dialog(None, _('Could not create temporary folder'), _(
+        'Could not create temporary folder, calibre cannot start.') + ' ' + extra, det_msg=traceback.format_exc(), show=True)
 
 
 def setup_hidpi():
@@ -909,7 +920,7 @@ class Application(QApplication):
         except EnvironmentError as err:
             if not headless:
                 show_temp_dir_error(err)
-            raise SystemExit('Failed to create temporary directory')
+            raise SystemExit('Failed to create temporary folder')
         if DEBUG and not headless:
             prints('devicePixelRatio:', self.devicePixelRatio())
             s = self.primaryScreen()
@@ -994,6 +1005,11 @@ class Application(QApplication):
 
     def ensure_window_on_screen(self, widget):
         screen_rect = self.desktop().availableGeometry(widget)
+        g = widget.geometry()
+        w = min(screen_rect.width(), g.width())
+        h = min(screen_rect.height(), g.height())
+        if w != g.width() or h != g.height():
+            widget.resize(w, h)
         if not widget.geometry().intersects(screen_rect):
             w = min(widget.width(), screen_rect.width() - 10)
             h = min(widget.height(), screen_rect.height() - 10)
@@ -1171,14 +1187,14 @@ class Application(QApplication):
 
     @property
     def current_custom_colors(self):
-        from PyQt5.Qt import QColorDialog
+        from qt.core import QColorDialog
 
         return [col.getRgb() for col in
                     (QColorDialog.customColor(i) for i in range(QColorDialog.customCount()))]
 
     @current_custom_colors.setter
     def current_custom_colors(self, colors):
-        from PyQt5.Qt import QColorDialog
+        from qt.core import QColorDialog
         num = min(len(colors), QColorDialog.customCount())
         for i in range(num):
             QColorDialog.setCustomColor(i, QColor(*colors[i]))
@@ -1205,7 +1221,7 @@ class Application(QApplication):
 
     def signal_received(self):
         try:
-            os.read(self.signal_notifier.socket(), 1024)
+            os.read(int(self.signal_notifier.socket()), 1024)
         except OSError:
             return
         self.shutdown_signal_received.emit()
@@ -1386,7 +1402,7 @@ def elided_text(text, font=None, width=300, pos='middle'):
     rendered, replacing characters from the left, middle or right (as per pos)
     of the string with an ellipsis. Results in a string much closer to the
     limit than Qt's elidedText().'''
-    from PyQt5.Qt import QFontMetrics, QApplication
+    from qt.core import QFontMetrics, QApplication
     if font is None:
         font = QApplication.instance().font()
     fm = (font if isinstance(font, QFontMetrics) else QFontMetrics(font))
@@ -1469,7 +1485,6 @@ if is_running_from_develop:
 
 
 def event_type_name(ev_or_etype):
-    from PyQt5.QtCore import QEvent
     etype = ev_or_etype.type() if isinstance(ev_or_etype, QEvent) else ev_or_etype
     for name, num in iteritems(vars(QEvent)):
         if num == etype:

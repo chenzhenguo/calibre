@@ -6,10 +6,10 @@ __license__   = 'GPL v3'
 __copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
-import textwrap
+import copy, textwrap
 from functools import partial
 
-from PyQt5.Qt import (
+from qt.core import (
     Qt, QIcon, QWidget, QHBoxLayout, QVBoxLayout, QToolButton, QLabel, QFrame, QDialog, QComboBox, QLineEdit,
     QTimer, QMenu, QActionGroup, QAction, QSizePolicy, pyqtSignal)
 
@@ -87,6 +87,7 @@ class TagBrowserMixin(object):  # {{{
         self.tags_view.restriction_error.connect(self.do_restriction_error,
                                                  type=Qt.ConnectionType.QueuedConnection)
         self.tags_view.tag_item_delete.connect(self.do_tag_item_delete)
+        self.tags_view.tag_identifier_delete.connect(self.delete_identifier)
         self.tags_view.apply_tag_to_selected.connect(self.apply_tag_to_selected)
         self.populate_tb_manage_menu(db)
         self.tags_view.model().user_categories_edited.connect(self.user_categories_edited,
@@ -98,9 +99,10 @@ class TagBrowserMixin(object):  # {{{
     def user_categories_edited(self):
         self.library_view.model().refresh()
 
-    def do_restriction_error(self):
+    def do_restriction_error(self, e):
         error_dialog(self.tags_view, _('Invalid search restriction'),
-                         _('The current search restriction is invalid'), show=True)
+                         _('The current search restriction is invalid'),
+                         det_msg=str(e) if e else '', show=True)
 
     def do_add_subcategory(self, on_category_key, new_category_name=None):
         '''
@@ -134,6 +136,9 @@ class TagBrowserMixin(object):  # {{{
         self.tags_view.show_item_at_index(idx)
         # Open the editor on the new item to rename it
         if new_category_name is None:
+            item = m.get_node(idx)
+            item.use_vl = False
+            item.ignore_vl = True
             self.tags_view.edit(idx)
 
     def do_edit_user_categories(self, on_category=None):
@@ -380,6 +385,33 @@ class TagBrowserMixin(object):  # {{{
             self.library_view.model().refresh_ids(set(changes), current_row=self.library_view.currentIndex().row())
             self.tags_view.recount_with_position_based_index()
 
+    def delete_identifier(self, name, in_vl):
+        d = self.current_db.new_api
+        changed = False
+        books_to_use = self.tags_view.model().get_book_ids_to_use() if in_vl else d.all_book_ids()
+        ids = d.all_field_for('identifiers', books_to_use)
+        new_ids = {}
+        for id_ in ids:
+            for identifier_type in ids[id_]:
+                if identifier_type == name:
+                    new_ids[id_] = copy.copy(ids[id_])
+                    new_ids[id_].pop(name)
+                    changed = True
+        if changed:
+            if in_vl:
+                msg = _('The identifier %s will be deleted from books in the '
+                        'current virtual library. Are you sure?')%name
+            else:
+                msg= _('The identifier %s will be deleted from all books. Are you sure?')%name
+            if not question_dialog(self,
+                title=_('Delete identifier'),
+                msg=msg,
+                skip_dialog_name='tag_browser_delete_identifiers',
+                skip_dialog_msg=_('Show this confirmation again')):
+                return
+            d.set_field('identifiers', new_ids)
+            self.tags_view.recount_with_position_based_index()
+
     def edit_enum_values(self, parent, db, key):
         from calibre.gui2.dialogs.enum_values_edit import EnumValuesEdit
         d = EnumValuesEdit(parent, db, key)
@@ -434,6 +466,34 @@ class TagBrowserMixin(object):  # {{{
 
     def drag_drop_finished(self, ids):
         self.library_view.model().refresh_ids(ids)
+
+    def tb_category_visibility(self, category, operation):
+        '''
+        Hide or show categories in the tag browser. 'category' is the lookup key.
+        Operation can be:
+        - 'show' to show the category in the tag browser
+        - 'hide' to hide the category
+        - 'toggle' to invert its visibility
+        - 'is_visible' returns True if the category is currently visible, False otherwise
+        '''
+        if category not in self.tags_view.model().categories:
+            raise ValueError(_('change_tb_category_visibility: category %s does not exist') % category)
+        cats = self.tags_view.hidden_categories
+        if operation == 'hide':
+            cats.add(category)
+        elif operation == 'show':
+            cats.discard(category)
+        elif operation == 'toggle':
+            if category in cats:
+                cats.remove(category)
+            else:
+                cats.add(category)
+        elif operation == 'is_visible':
+            return category not in cats
+        else:
+            raise ValueError(_('change_tb_category_visibility: invalid operation %s') % operation)
+        self.library_view.model().db.new_api.set_pref('tag_browser_hidden_categories', list(cats))
+        self.tags_view.recount()
 
 # }}}
 
@@ -798,7 +858,7 @@ class TagBrowserWidget(QFrame):  # {{{
         self.not_found_label.setVisible(False)
 
     def keyPressEvent(self, ev):
-        if ev.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return) and self.find_text:
+        if ev.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return) and self.item_search.hasFocus():
             self.find()
             ev.accept()
             return

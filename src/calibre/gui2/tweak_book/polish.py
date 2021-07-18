@@ -8,7 +8,7 @@ __copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
 import re
 from threading import Thread
 
-from PyQt5.Qt import (
+from qt.core import (
     QTextBrowser, QVBoxLayout, QDialog, QDialogButtonBox, QIcon, QLabel,
     QCheckBox, Qt, QListWidgetItem, QHBoxLayout, QListWidget, QPixmap,
     QSpinBox, QStyledItemDelegate, QSize, QStyle, QPen, QPalette,
@@ -66,11 +66,12 @@ def customize_remove_unused_css(name, parent, ans):
     d.l.addWidget(d.bb)
     d.bb.rejected.connect(d.reject)
     d.bb.accepted.connect(d.accept)
-    if d.exec_() != QDialog.DialogCode.Accepted:
-        raise Abort()
+    ret = d.exec_()
     ans['remove_unused_classes'] = tprefs['remove_unused_classes'] = c.isChecked()
     ans['merge_identical_selectors'] = tprefs['merge_identical_selectors'] = m.isChecked()
     ans['merge_rules_with_identical_properties'] = tprefs['merge_rules_with_identical_properties'] = p.isChecked()
+    if ret != QDialog.DialogCode.Accepted:
+        raise Abort()
 
 
 def get_customization(action, name, parent):
@@ -79,7 +80,7 @@ def get_customization(action, name, parent):
         if action == 'remove_unused_css':
             customize_remove_unused_css(name, parent, ans)
         elif action == 'upgrade_book':
-            ans['remove_ncx'] = question_dialog(
+            ans['remove_ncx'] = tprefs['remove_ncx'] = question_dialog(
                 parent, _('Remove NCX ToC file'),
                 _('Remove the legacy Table of Contents in NCX form?'),
                 _('This form of Table of Contents is superseded by the new HTML based Table of Contents.'
@@ -87,6 +88,7 @@ def get_customization(action, name, parent):
                   ' old devices that lack proper support for EPUB 3'),
                 skip_dialog_name='edit-book-remove-ncx',
                 skip_dialog_msg=_('Ask this question again in the future'),
+                skip_dialog_skipped_value=tprefs['remove_ncx'],
                 yes_text=_('Remove NCX'), no_text=_('Keep NCX')
             )
     except Abort:

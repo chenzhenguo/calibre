@@ -3,7 +3,7 @@
 __license__   = 'GPL v3'
 __copyright__ = '2008, Kovid Goyal <kovid at kovidgoyal.net>'
 
-from PyQt5.Qt import Qt, QDialog, QAbstractItemView, QApplication
+from qt.core import Qt, QDialog, QAbstractItemView, QApplication
 
 from calibre.gui2.dialogs.confirm_delete import confirm
 from calibre.gui2.dialogs.tag_editor_ui import Ui_TagEditor
@@ -153,6 +153,10 @@ class TagEditor(QDialog, Ui_TagEditor):
         items = self.available_tags.selectedItems() if item is None else [item]
         rows = [self.available_tags.row(i) for i in items]
         if not rows:
+            text = self.available_filter_input.text()
+            if text and text.strip():
+                self.add_tag_input.setText(text)
+                self.add_tag_input.setFocus(Qt.FocusReason.OtherFocusReason)
             return
         row = max(rows)
         tags = self._get_applied_tags_box_contents()

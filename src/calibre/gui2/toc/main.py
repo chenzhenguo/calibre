@@ -5,13 +5,15 @@
 
 import os
 import sys
+import tempfile
 import textwrap
 from functools import partial
-from PyQt5.Qt import (
-    QApplication, QCheckBox, QCursor, QDialog, QDialogButtonBox, QFrame, QGridLayout,
-    QIcon, QInputDialog, QItemSelectionModel, QKeySequence, QLabel, QMenu,
-    QPushButton, QScrollArea, QSize, QSizePolicy, QStackedWidget, Qt, QAbstractItemView,
-    QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, pyqtSignal, QEvent
+from qt.core import (
+    QAbstractItemView, QApplication, QCheckBox, QCursor, QDialog, QDialogButtonBox,
+    QEvent, QFrame, QGridLayout, QIcon, QInputDialog, QItemSelectionModel,
+    QKeySequence, QLabel, QMenu, QPushButton, QScrollArea, QSize, QSizePolicy,
+    QStackedWidget, Qt, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QWidget, pyqtSignal
 )
 from threading import Thread
 
@@ -21,13 +23,14 @@ from calibre.ebooks.oeb.polish.toc import (
     TOC, add_id, commit_toc, from_files, from_links, from_xpaths, get_toc
 )
 from calibre.gui2 import (
-    Application, error_dialog, gprefs, info_dialog, question_dialog, set_app_uid
+    Application, error_dialog, info_dialog, question_dialog, set_app_uid
 )
 from calibre.gui2.convert.xpath_wizard import XPathEdit
 from calibre.gui2.progress_indicator import ProgressIndicator
 from calibre.gui2.toc.location import ItemEdit
 from calibre.ptempfile import reset_base_dir
-from calibre.utils.lock import ExclusiveFile
+from calibre.utils.config import JSONConfig
+from calibre.utils.filenames import atomic_rename
 from calibre.utils.logging import GUILog
 from polyglot.builtins import map, range, unicode_type
 
@@ -974,14 +977,19 @@ class TOCView(QWidget):  # {{{
 
 # }}}
 
+
+te_prefs = JSONConfig('toc-editor')
+
+
 class TOCEditor(QDialog):  # {{{
 
     explode_done = pyqtSignal(object)
     writing_done = pyqtSignal(object)
 
-    def __init__(self, pathtobook, title=None, parent=None, prefs=None):
+    def __init__(self, pathtobook, title=None, parent=None, prefs=None, write_result_to=None):
         QDialog.__init__(self, parent)
-        self.prefs = prefs or gprefs
+        self.write_result_to = write_result_to
+        self.prefs = prefs or te_prefs
         self.pathtobook = pathtobook
         self.working = True
 
@@ -1063,10 +1071,9 @@ class TOCEditor(QDialog):  # {{{
             error_dialog(self, _('Failed to write book'),
                 _('Could not write %s. Click "Show details" for'
                   ' more information.')%self.book_title, det_msg=tb, show=True)
-            self.prefs['toc_editor_window_geom'] = bytearray(self.saveGeometry())
             super(TOCEditor, self).reject()
             return
-
+        self.write_result(0)
         super(TOCEditor, self).accept()
 
     def reject(self):
@@ -1078,7 +1085,16 @@ class TOCEditor(QDialog):  # {{{
         else:
             self.working = False
             self.prefs['toc_editor_window_geom'] = bytearray(self.saveGeometry())
+            self.write_result(1)
             super(TOCEditor, self).reject()
+
+    def write_result(self, res):
+        if self.write_result_to:
+            with tempfile.NamedTemporaryFile(dir=os.path.dirname(self.write_result_to), delete=False) as f:
+                src = f.name
+                f.write(str(res).encode('utf-8'))
+                f.flush()
+            atomic_rename(src, self.write_result_to)
 
     def start(self):
         t = Thread(target=self.explode)
@@ -1135,15 +1151,15 @@ def main(path=None, title=None):
         # launched from within calibre, as both use calibre-parallel.exe
         set_app_uid(TOC_DIALOG_APP_UID)
 
-    with ExclusiveFile(path + '.lock') as wf:
-        override = 'calibre-gui' if islinux else None
-        app = Application([], override_program_name=override)
-        d = TOCEditor(path, title=title)
-        d.start()
-        ret = 1
-        if d.exec_() == QDialog.DialogCode.Accepted:
-            ret = 0
-        wf.write('{}'.format(ret).encode('ascii'))
+    with open(path + '.started', 'w'):
+        pass
+    override = 'calibre-gui' if islinux else None
+    app = Application([], override_program_name=override)
+    d = TOCEditor(path, title=title, write_result_to=path + '.result')
+    d.start()
+    ret = 1
+    if d.exec_() == QDialog.DialogCode.Accepted:
+        ret = 0
     del d
     del app
     raise SystemExit(ret)

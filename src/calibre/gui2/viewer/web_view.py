@@ -7,13 +7,17 @@ import os
 import shutil
 import sys
 from itertools import count
-from PyQt5.Qt import (
-    QT_VERSION, QApplication, QBuffer, QByteArray, QFontDatabase, QFontInfo, QPalette, QEvent,
-    QHBoxLayout, QMimeData, QSize, Qt, QTimer, QUrl, QWidget, pyqtSignal, QIODevice, QLocale
+from qt.core import (
+    QT_VERSION, QApplication, QBuffer, QByteArray, QEvent, QFontDatabase, QFontInfo,
+    QHBoxLayout, QIODevice, QLocale, QMimeData, QPalette, QSize, Qt, QTimer, QUrl,
+    QWidget, pyqtSignal, sip
 )
-from PyQt5.QtWebEngineCore import QWebEngineUrlSchemeHandler, QWebEngineUrlRequestJob, QWebEngineUrlRequestInfo
-from PyQt5.QtWebEngineWidgets import (
-    QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineView, QWebEngineSettings
+from qt.webengine import (
+    QWebEngineUrlRequestInfo, QWebEngineUrlRequestJob, QWebEngineUrlSchemeHandler
+)
+from qt.webengine import (
+    QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineSettings,
+    QWebEngineView
 )
 
 from calibre import as_unicode, prints
@@ -24,6 +28,7 @@ from calibre.constants import (
 from calibre.ebooks.metadata.book.base import field_metadata
 from calibre.ebooks.oeb.polish.utils import guess_type
 from calibre.gui2 import choose_images, error_dialog, safe_open_url
+from calibre.gui2.viewer import link_prefix_for_location_links, performance_monitor
 from calibre.gui2.viewer.config import viewer_config_dir, vprefs
 from calibre.gui2.viewer.tts import TTS
 from calibre.gui2.webengine import (
@@ -35,11 +40,6 @@ from calibre.utils.serialize import json_loads
 from calibre.utils.shared_file import share_open
 from polyglot.builtins import as_bytes, iteritems, unicode_type
 from polyglot.functools import lru_cache
-
-try:
-    from PyQt5 import sip
-except ImportError:
-    import sip
 
 SANDBOX_HOST = FAKE_HOST.rpartition('.')[0] + '.sandbox'
 
@@ -243,9 +243,10 @@ class ViewerBridge(Bridge):
     toggle_lookup = from_js(object)
     show_search = from_js(object, object)
     search_result_not_found = from_js(object)
+    search_result_discovered = from_js(object)
     find_next = from_js(object)
     quit = from_js()
-    update_current_toc_nodes = from_js(object, object)
+    update_current_toc_nodes = from_js(object)
     toggle_full_screen = from_js()
     report_cfi = from_js(object, object)
     ask_for_open = from_js(object)
@@ -272,6 +273,8 @@ class ViewerBridge(Bridge):
     open_url = from_js(object)
     speak_simple_text = from_js(object)
     tts = from_js(object, object)
+    edit_book = from_js(object, object, object)
+    show_book_folder = from_js()
 
     create_view = to_js()
     start_book_load = to_js()
@@ -288,6 +291,7 @@ class ViewerBridge(Bridge):
     generic_action = to_js()
     show_search_result = to_js()
     prepare_for_close = to_js()
+    repair_after_fullscreen_switch = to_js()
     viewer_font_size_changed = to_js()
     tts_event = to_js()
 
@@ -444,6 +448,7 @@ class WebView(RestartingWebEngineView):
     toggle_toc = pyqtSignal()
     show_search = pyqtSignal(object, object)
     search_result_not_found = pyqtSignal(object)
+    search_result_discovered = pyqtSignal(object)
     find_next = pyqtSignal(object)
     toggle_bookmarks = pyqtSignal()
     toggle_highlights = pyqtSignal()
@@ -451,7 +456,7 @@ class WebView(RestartingWebEngineView):
     toggle_inspector = pyqtSignal()
     toggle_lookup = pyqtSignal(object)
     quit = pyqtSignal()
-    update_current_toc_nodes = pyqtSignal(object, object)
+    update_current_toc_nodes = pyqtSignal(object)
     toggle_full_screen = pyqtSignal()
     ask_for_open = pyqtSignal(object)
     selection_changed = pyqtSignal(object, object)
@@ -470,6 +475,7 @@ class WebView(RestartingWebEngineView):
     scrollbar_context_menu = pyqtSignal(object, object, object)
     close_prep_finished = pyqtSignal(object)
     highlights_changed = pyqtSignal(object)
+    edit_book = pyqtSignal(object, object, object)
     shortcuts_changed = pyqtSignal(object)
     paged_mode_changed = pyqtSignal()
     standalone_misc_settings_changed = pyqtSignal(object)
@@ -491,6 +497,7 @@ class WebView(RestartingWebEngineView):
         self.show_home_page_on_ready = True
         self._size_hint = QSize(int(w/3), int(w/2))
         self._page = WebPage(self)
+        self._page.linkHovered.connect(self.link_hovered)
         self.view_is_ready = False
         self.bridge.bridge_ready.connect(self.on_bridge_ready)
         self.bridge.view_created.connect(self.on_view_created)
@@ -501,6 +508,7 @@ class WebView(RestartingWebEngineView):
         self.bridge.toggle_toc.connect(self.toggle_toc)
         self.bridge.show_search.connect(self.show_search)
         self.bridge.search_result_not_found.connect(self.search_result_not_found)
+        self.bridge.search_result_discovered.connect(self.search_result_discovered)
         self.bridge.find_next.connect(self.find_next)
         self.bridge.toggle_bookmarks.connect(self.toggle_bookmarks)
         self.bridge.toggle_highlights.connect(self.toggle_highlights)
@@ -528,6 +536,8 @@ class WebView(RestartingWebEngineView):
         self.bridge.scrollbar_context_menu.connect(self.scrollbar_context_menu)
         self.bridge.close_prep_finished.connect(self.close_prep_finished)
         self.bridge.highlights_changed.connect(self.highlights_changed)
+        self.bridge.edit_book.connect(self.edit_book)
+        self.bridge.show_book_folder.connect(self.show_book_folder)
         self.bridge.open_url.connect(safe_open_url)
         self.bridge.speak_simple_text.connect(self.tts.speak_simple_text)
         self.bridge.tts.connect(self.tts.action)
@@ -543,6 +553,11 @@ class WebView(RestartingWebEngineView):
         if parent is not None:
             self.inspector = Inspector(parent.inspector_dock.toggleViewAction(), self)
             parent.inspector_dock.setWidget(self.inspector)
+
+    def link_hovered(self, url):
+        if url == 'javascript:void(0)':
+            url = ''
+        self.generic_action('show-status-message', {'text': url})
 
     def shutdown(self):
         self.tts.shutdown()
@@ -609,6 +624,7 @@ class WebView(RestartingWebEngineView):
         }
         self.bridge.create_view(
             vprefs['session_data'], vprefs['local_storage'], field_metadata.all_metadata(), ui_data)
+        performance_monitor('bridge ready')
         for func, args in iteritems(self.pending_bridge_ready_actions):
             getattr(self.bridge, func)(*args)
 
@@ -621,11 +637,7 @@ class WebView(RestartingWebEngineView):
 
     def start_book_load(self, initial_position=None, highlights=None, current_book_data=None):
         key = (set_book_path.path,)
-        cbd = current_book_data or {}
-        book_url = None
-        if 'calibre_library_id' in cbd:
-            lid = cbd['calibre_library_id'].encode('utf-8').hex()
-            book_url = f'calibre://view-book/_hex_-{lid}/{cbd["calibre_book_id"]}/{cbd["calibre_book_fmt"]}'
+        book_url = link_prefix_for_location_links(add_open_at=False)
         self.execute_when_ready('start_book_load', key, initial_position, set_book_path.pathtoebook, highlights or [], book_url)
 
     def execute_when_ready(self, action, *args):
@@ -637,8 +649,8 @@ class WebView(RestartingWebEngineView):
     def goto_toc_node(self, node_id):
         self.execute_when_ready('goto_toc_node', node_id)
 
-    def goto_cfi(self, cfi):
-        self.execute_when_ready('goto_cfi', cfi)
+    def goto_cfi(self, cfi, add_to_history=False):
+        self.execute_when_ready('goto_cfi', cfi, bool(add_to_history))
 
     def notify_full_screen_state_change(self, in_fullscreen_mode):
         self.execute_when_ready('full_screen_state_changed', in_fullscreen_mode)
@@ -727,3 +739,10 @@ class WebView(RestartingWebEngineView):
 
     def tts_settings_changed(self, ui_settings):
         self.execute_when_ready('tts_event', 'configured', ui_settings)
+
+    def show_book_folder(self):
+        path = os.path.dirname(os.path.abspath(set_book_path.pathtoebook))
+        safe_open_url(QUrl.fromLocalFile(path))
+
+    def repair_after_fullscreen_switch(self):
+        self.execute_when_ready('repair_after_fullscreen_switch')

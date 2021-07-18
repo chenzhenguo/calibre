@@ -8,7 +8,7 @@ __copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
 import math
 import unicodedata
 from functools import partial
-from PyQt5.Qt import (
+from qt.core import (
     QAction, QApplication, QColor, QIcon, QImage, QInputDialog, QMainWindow, QMenu,
     QPainter, QPixmap, QSize, Qt, QTextCursor, QToolButton, pyqtSignal,
     qDrawShadeRect
@@ -23,7 +23,8 @@ from calibre.gui2.tweak_book import (
     editors, tprefs, update_mark_text_action
 )
 from calibre.gui2.tweak_book.editor import (
-    CSS_PROPERTY, LINK_PROPERTY, SPELL_PROPERTY, TAG_NAME_PROPERTY
+    CLASS_ATTRIBUTE_PROPERTY, CSS_PROPERTY, LINK_PROPERTY, SPELL_PROPERTY,
+    TAG_NAME_PROPERTY
 )
 from calibre.gui2.tweak_book.editor.help import help_url
 from calibre.gui2.tweak_book.editor.text import TextEdit
@@ -120,6 +121,9 @@ def register_text_editor_actions(_reg, palette):
     ac = reg('trash.png', _('Remove &tag'), ('remove_tag',), 'remove-tag', ('Ctrl+>'), _('Remove tag'), syntaxes=('html', 'xml'))
     ac.setToolTip(_('<h3>Remove tag</h3>Remove the currently highlighted tag'))
 
+    ac = reg('split.png', _('&Split tag'), ('split_tag',), 'split-tag', ('Ctrl+Alt+>'), _('Split current tag'), syntaxes=('html', 'xml'))
+    ac.setToolTip(_('<h3>Split tag</h3>Split the current tag at the cursor position'))
+
     editor_toolbar_actions['html']['fix-html-current'] = actions['fix-html-current']
     for s in ('xml', 'html', 'css'):
         editor_toolbar_actions[s]['pretty-current'] = actions['pretty-current']
@@ -138,6 +142,8 @@ class Editor(QMainWindow):
     cursor_position_changed = pyqtSignal()
     word_ignored = pyqtSignal(object, object)
     link_clicked = pyqtSignal(object)
+    class_clicked = pyqtSignal(object)
+    rename_class = pyqtSignal(object)
     smart_highlighting_updated = pyqtSignal()
 
     def __init__(self, syntax, parent=None):
@@ -161,6 +167,7 @@ class Editor(QMainWindow):
         self.editor.copyAvailable.connect(self._copy_available)
         self.editor.cursorPositionChanged.connect(self._cursor_position_changed)
         self.editor.link_clicked.connect(self.link_clicked)
+        self.editor.class_clicked.connect(self.class_clicked)
         self.editor.smart_highlighting_updated.connect(self.smart_highlighting_updated)
 
     @property
@@ -425,7 +432,7 @@ class Editor(QMainWindow):
         self.restore_state()
 
     def break_cycles(self):
-        for x in ('modification_state_changed', 'word_ignored', 'link_clicked', 'smart_highlighting_updated'):
+        for x in ('modification_state_changed', 'word_ignored', 'link_clicked', 'class_clicked', 'smart_highlighting_updated'):
             try:
                 getattr(self, x).disconnect()
             except TypeError:
@@ -441,6 +448,7 @@ class Editor(QMainWindow):
         self.editor.copyAvailable.disconnect()
         self.editor.cursorPositionChanged.disconnect()
         self.editor.link_clicked.disconnect()
+        self.editor.class_clicked.disconnect()
         self.editor.smart_highlighting_updated.disconnect()
         self.editor.setPlainText('')
         self.editor.smarts = None
@@ -572,6 +580,12 @@ class Editor(QMainWindow):
         if origr is not None and origr.format.property(LINK_PROPERTY):
             href = self.editor.text_for_range(origc.block(), origr)
             m.addAction(_('Open %s') % href, partial(self.link_clicked.emit, href))
+
+        if origr is not None and origr.format.property(CLASS_ATTRIBUTE_PROPERTY):
+            cls = self.editor.class_for_position(pos)
+            if cls:
+                class_name = cls['class']
+                m.addAction(_('Rename the class {}').format(class_name), partial(self.rename_class.emit, class_name))
 
         if origr is not None and (origr.format.property(TAG_NAME_PROPERTY) or origr.format.property(CSS_PROPERTY)):
             word = self.editor.text_for_range(origc.block(), origr)

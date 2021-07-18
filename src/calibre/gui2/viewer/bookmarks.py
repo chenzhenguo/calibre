@@ -5,7 +5,7 @@
 
 import json
 from operator import itemgetter
-from PyQt5.Qt import (
+from qt.core import (
     QAction, QComboBox, QGridLayout, QHBoxLayout, QIcon, QInputDialog,
     QItemSelectionModel, QLabel, QListWidget, QListWidgetItem, QPushButton, Qt,
     QWidget, pyqtSignal
@@ -16,7 +16,7 @@ from calibre.gui2.dialogs.confirm_delete import confirm
 from calibre.gui2.viewer.shortcuts import get_shortcut_for
 from calibre.gui2.viewer.web_view import vprefs
 from calibre.utils.date import EPOCH, utcnow
-from calibre.utils.icu import sort_key
+from calibre.utils.icu import primary_sort_key
 from polyglot.builtins import range, unicode_type
 
 
@@ -92,6 +92,7 @@ class BookmarkManager(QWidget):
         self.l = l = QGridLayout(self)
         l.setContentsMargins(0, 0, 0, 0)
         self.setLayout(l)
+        self.toc = parent.toc
 
         self.bookmarks_list = bl = BookmarksList(self)
         bl.itemChanged.connect(self.item_changed)
@@ -162,8 +163,8 @@ class BookmarkManager(QWidget):
 
     def set_bookmarks(self, bookmarks=()):
         csb = self.current_sort_by
-        if csb == 'name':
-            sk = lambda x: sort_key(x['title'])
+        if csb in ('name', 'title'):
+            sk = lambda x: primary_sort_key(x['title'])
         elif csb == 'timestamp':
             sk = itemgetter('timestamp')
         else:
@@ -340,7 +341,7 @@ class BookmarkManager(QWidget):
                 import_current_bookmarks(imported)
 
     def create_new_bookmark(self, pos_data):
-        base_default_title = _('Bookmark')
+        base_default_title = self.toc.model().title_for_current_node or _('Bookmark')
         all_titles = {bm['title'] for bm in self.get_bookmarks()}
         c = 0
         while True:

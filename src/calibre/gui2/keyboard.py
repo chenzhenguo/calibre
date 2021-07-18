@@ -9,14 +9,10 @@ __docformat__ = 'restructuredtext en'
 from collections import OrderedDict
 from functools import partial
 
-from PyQt5.Qt import (QObject, QKeySequence, QAbstractItemModel, QModelIndex, QItemSelectionModel,
-        Qt, QStyledItemDelegate, QTextDocument, QStyle, pyqtSignal, QFrame, QAbstractItemView,
+from qt.core import (QObject, QKeySequence, QAbstractItemModel, QModelIndex, QItemSelectionModel,
+        Qt, QStyledItemDelegate, QTextDocument, QStyle, pyqtSignal, QFrame, QAbstractItemView, QMenu,
         QApplication, QSize, QRectF, QWidget, QTreeView, QHBoxLayout, QVBoxLayout, QAbstractItemDelegate,
-        QGridLayout, QLabel, QRadioButton, QPushButton, QToolButton, QIcon, QEvent)
-try:
-    from PyQt5 import sip
-except ImportError:
-    import sip
+        QGridLayout, QLabel, QRadioButton, QPushButton, QToolButton, QIcon, QEvent, sip)
 
 from calibre.utils.config import JSONConfig
 from calibre.constants import DEBUG
@@ -662,6 +658,8 @@ class ShortcutConfig(QWidget):  # {{{
         self.view.setAlternatingRowColors(True)
         self.view.setHeaderHidden(True)
         self.view.setAnimated(True)
+        self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self.show_context_menu)
         l.addWidget(self.view)
         self.delegate = Delegate()
         self.view.setItemDelegate(self.delegate)
@@ -681,6 +679,12 @@ class ShortcutConfig(QWidget):  # {{{
         self.pb.clicked.connect(self.find_previous)
         h.addWidget(self.nb), h.addWidget(self.pb)
         h.setStretch(0, 100)
+
+    def show_context_menu(self, pos):
+        menu = QMenu(self)
+        menu.addAction(_('Expand all'), self.view.expandAll)
+        menu.addAction(_('Collapse all'), self.view.collapseAll)
+        menu.exec_(self.view.mapToGlobal(pos))
 
     def restore_defaults(self):
         self._model.restore_defaults()

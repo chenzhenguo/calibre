@@ -8,7 +8,7 @@ __copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
 import textwrap
 from math import ceil
 
-from PyQt5.Qt import (
+from qt.core import (
     QWidget, Qt, QStaticText, QTextOption, QSize, QPainter, QTimer, QPalette, QEvent, QTextCursor)
 
 from calibre import prints, prepare_string_for_xml
@@ -276,7 +276,7 @@ class CompletionPopup(ChoosePopupWidget):
             prints(result.traceback)
             if not self.completion_error_shown:
                 error_dialog(self, _('Completion failed'), _(
-                    'Failed to get completions, click "Show Details" for more information.'
+                    'Failed to get completions, click "Show details" for more information.'
                     ' Future errors during completion will be suppressed.'), det_msg=result.traceback, show=True)
                 self.completion_error_shown = True
             self.hide()

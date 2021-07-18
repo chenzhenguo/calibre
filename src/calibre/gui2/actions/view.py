@@ -10,7 +10,7 @@ import json
 import os
 import time
 from functools import partial
-from PyQt5.Qt import QAction, QIcon, Qt, pyqtSignal, QDialog
+from qt.core import QAction, QIcon, Qt, pyqtSignal, QDialog
 
 from calibre.constants import ismacos, iswindows
 from calibre.gui2 import (
@@ -22,6 +22,16 @@ from calibre.gui2.dialogs.choose_format import ChooseFormatDialog
 from calibre.ptempfile import PersistentTemporaryFile
 from calibre.utils.config import prefs, tweaks
 from polyglot.builtins import as_bytes, unicode_type
+
+
+def preferred_format(formats):
+    formats = tuple(x.upper() for x in formats if x)
+    fmt = formats[0]
+    for format in prefs['input_format_order']:
+        if format in formats:
+            fmt = format
+            break
+    return fmt
 
 
 class HistoryAction(QAction):
@@ -303,19 +313,13 @@ class ViewAction(InterfaceAction):
                 self.update_history([], remove={id_})
                 continue
 
-            formats = db.formats(id_, index_is_id=True)
+            formats = db.new_api.formats(id_, verify_formats=True)
             if not formats:
                 error_dialog(self.gui, _('Cannot view'),
                     _('%s has no available formats.')%(title,), show=True)
                 continue
 
-            formats = formats.upper().split(',')
-
-            fmt = formats[0]
-            for format in prefs['input_format_order']:
-                if format in formats:
-                    fmt = format
-                    break
+            fmt = preferred_format(formats)
             views.append((id_, title))
             self.view_format_by_id(id_, fmt)
 

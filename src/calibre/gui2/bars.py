@@ -7,13 +7,9 @@ __copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
 from functools import partial
-from PyQt5.Qt import (
-    Qt, QAction, QMenu, QObject, QToolBar, QToolButton, QSize, pyqtSignal, QKeySequence,
-    QTimer, QPropertyAnimation, QEasingCurve, pyqtProperty, QPainter, QWidget, QPalette)
-try:
-    from PyQt5 import sip
-except ImportError:
-    import sip
+from qt.core import (
+    Qt, QAction, QMenu, QObject, QToolBar, QToolButton, QSize, pyqtSignal, QKeySequence, QMenuBar,
+    QTimer, QPropertyAnimation, QEasingCurve, pyqtProperty, QPainter, QWidget, QPalette, sip)
 
 from calibre.constants import ismacos
 from calibre.gui2 import gprefs, native_menubar_defaults, config
@@ -59,7 +55,7 @@ class RevealBar(QWidget):  # {{{
             painter = QPainter(self)
             pal = self.palette()
             col = pal.color(QPalette.ColorRole.Button)
-            rect.setLeft(rect.left() + (rect.width() * self._animated_size))
+            rect.setLeft(rect.left() + int(rect.width() * self._animated_size))
             painter.setClipRect(rect)
             painter.fillRect(self.rect(), col)
 # }}}
@@ -537,17 +533,15 @@ else:
                     ac = ia.shortcut_action_for_context_menu
                 m.addAction(ac)
 
-    from calibre.gui2.dbus_export.widgets import factory
-
     class MenuBar(QObject):
 
         is_native_menubar = False
 
         def __init__(self, location_manager, parent):
             QObject.__init__(self, parent)
-            f = factory(app_id='com.calibre-ebook.gui')
-            self.menu_bar = f.create_window_menubar(parent)
-            self.is_native_menubar = self.menu_bar.is_native_menubar
+            self.menu_bar = QMenuBar(parent)
+            self.menu_bar.is_native_menubar = False
+            parent.setMenuBar(self.menu_bar)
             self.gui = parent
 
             self.location_manager = location_manager

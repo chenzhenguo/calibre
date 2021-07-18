@@ -14,11 +14,12 @@ from collections import namedtuple
 from html5_parser import parse
 from io import BytesIO
 from itertools import count, repeat
-from PyQt5.Qt import (
-    QApplication, QMarginsF, QObject, QPageLayout, Qt, QTimer, QUrl, pyqtSignal
+from qt.core import (
+    QApplication, QMarginsF, QObject, QPageLayout, Qt, QTimer, QUrl, pyqtSignal, sip
 )
-from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
-from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineProfile
+from qt.webengine import (
+    QWebEnginePage, QWebEngineProfile, QWebEngineUrlRequestInterceptor
+)
 
 from calibre import detect_ncpus, human_readable, prepare_string_for_xml
 from calibre.constants import __version__, iswindows
@@ -226,7 +227,8 @@ class Renderer(QWebEnginePage):
 
     def printing_done(self, pdf_data):
         self.working = False
-        self.work_done.emit(self, bytes(pdf_data))
+        if not sip.isdeleted(self):
+            self.work_done.emit(self, bytes(pdf_data))
 
     def convert_html_file(self, path, page_layout, settle_time=0, wait_for_title=None):
         self.working = True
@@ -444,7 +446,8 @@ def add_anchors_markup(root, uuid, anchors):
         num = next(c)
         a = div.makeelement(
             XHTML('a'), href='#' + anchor,
-            style='min-width: 10px !important; min-height: 10px !important; border: solid 1px !important;'
+            style='min-width: 10px !important; min-height: 10px !important;'
+            ' border: solid 1px rgba(0, 0, 0, 0) !important; text-decoration: none !important'
         )
         a.text = a.tail = ' '
         if num % 8 == 0:

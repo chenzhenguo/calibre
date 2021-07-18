@@ -12,7 +12,7 @@ import shutil
 import textwrap
 import weakref
 from datetime import date, datetime
-from PyQt5.Qt import (
+from qt.core import (
     QAction, QApplication, QDateTime, QDialog, QDialogButtonBox, QDoubleSpinBox, QAbstractItemView,
     QGridLayout, QIcon, QKeySequence, QLabel, QLineEdit, QListWidgetItem, QMenu,
     QMessageBox, QPixmap, QPlainTextEdit, QSize, QSizePolicy, Qt, QToolButton, QComboBox,
@@ -341,6 +341,7 @@ class AuthorsEdit(EditWithComplete, ToMetadataMixin):
         self.dialog = parent
         self.books_to_refresh = set()
         EditWithComplete.__init__(self, parent)
+        self.set_clear_button_enabled(False)
         self.setToolTip(self.TOOLTIP)
         self.setWhatsThis(self.TOOLTIP)
         self.setEditable(True)
@@ -598,6 +599,7 @@ class SeriesEdit(EditWithComplete, ToMetadataMixin):
 
     def __init__(self, parent):
         EditWithComplete.__init__(self, parent)
+        self.set_clear_button_enabled(False)
         self.set_separator(None)
         self.dialog = parent
         self.setSizeAdjustPolicy(
@@ -1379,6 +1381,8 @@ class TagsEdit(EditWithComplete, ToMetadataMixin):  # {{{
 
     def __init__(self, parent):
         EditWithComplete.__init__(self, parent)
+        self.set_clear_button_enabled(False)
+        self.set_elide_mode(Qt.TextElideMode.ElideMiddle)
         self.currentTextChanged.connect(self.data_changed)
         self.lineEdit().setMaxLength(655360)  # see https://bugs.launchpad.net/bugs/1630944
         self.books_to_refresh = set()
@@ -1403,12 +1407,15 @@ class TagsEdit(EditWithComplete, ToMetadataMixin):  # {{{
         self.current_val = tags
         self.update_items_cache(db.new_api.all_field_names('tags'))
         self.original_val = self.current_val
+        self.db = db
 
     @property
     def changed(self):
         return self.current_val != self.original_val
 
     def edit(self, db, id_):
+        ctrl_or_shift_pressed = (QApplication.keyboardModifiers() &
+                (Qt.KeyboardModifier.ControlModifier + Qt.KeyboardModifier.ShiftModifier))
         if self.changed:
             d = save_dialog(self, _('Tags changed'),
                     _('You have changed the tags. In order to use the tags'
@@ -1422,10 +1429,16 @@ class TagsEdit(EditWithComplete, ToMetadataMixin):  # {{{
                 self.original_val = self.current_val
             else:
                 self.current_val = self.original_val
-        d = TagEditor(self, db, id_)
-        if d.exec_() == QDialog.DialogCode.Accepted:
-            self.current_val = d.tags
-            self.update_items_cache(db.new_api.all_field_names('tags'))
+        if ctrl_or_shift_pressed:
+            from calibre.gui2.ui import get_gui
+            get_gui().do_tags_list_edit(None, 'tags')
+            self.update_items_cache(self.db.new_api.all_field_names('tags'))
+            self.initialize(self.db, id_)
+        else:
+            d = TagEditor(self, db, id_)
+            if d.exec_() == QDialog.DialogCode.Accepted:
+                self.current_val = d.tags
+                self.update_items_cache(db.new_api.all_field_names('tags'))
 
     def commit(self, db, id_):
         self.books_to_refresh |= db.set_tags(
@@ -1452,6 +1465,7 @@ class LanguagesEdit(LE, ToMetadataMixin):  # {{{
 
     def __init__(self, *args, **kwargs):
         LE.__init__(self, *args, **kwargs)
+        self.set_clear_button_enabled(False)
         self.textChanged.connect(self.data_changed)
         self.setToolTip(self.TOOLTIP)
 
@@ -1678,6 +1692,8 @@ class IdentifiersEdit(QLineEdit, ToMetadataMixin):
                 for name, template in rule:
                     try:
                         url_pattern = formatter.safe_format(template, vals, '', vals)
+                        if url_pattern.startswith('http:') or url_pattern.startswith('https:'):
+                            url_pattern = '(?:http|https):' + url_pattern.partition(':')[2]
                         new_id = re.compile(url_pattern)
                         new_id = new_id.search(text).group('new_id')
                         if new_id:
@@ -1767,6 +1783,7 @@ class PublisherEdit(EditWithComplete, ToMetadataMixin):  # {{{
 
     def __init__(self, parent):
         EditWithComplete.__init__(self, parent)
+        self.set_clear_button_enabled(False)
         self.currentTextChanged.connect(self.data_changed)
         self.set_separator(None)
         self.setSizeAdjustPolicy(

@@ -11,17 +11,13 @@ from io import BytesIO
 from threading import Thread, Event
 from multiprocessing.pool import ThreadPool
 
-from PyQt5.Qt import (
+from qt.core import (
     QImageReader, QFormLayout, QVBoxLayout, QSplitter, QGroupBox, QListWidget,
     QLineEdit, QSpinBox, QTextEdit, QSize, QListWidgetItem, QIcon, QImage,
     pyqtSignal, QStackedLayout, QWidget, QLabel, Qt, QComboBox, QPixmap, QDialog,
-    QGridLayout, QStyledItemDelegate, QApplication, QStaticText,
+    QGridLayout, QStyledItemDelegate, QApplication, QStaticText, sip,
     QStyle, QPen, QProgressDialog, QAbstractItemView, QDialogButtonBox
 )
-try:
-    from PyQt5 import sip
-except ImportError:
-    import sip
 
 from calibre import walk, fit_image, human_readable, detect_ncpus as cpu_count
 from calibre.constants import cache_dir, config_dir
@@ -710,7 +706,7 @@ class ChooseTheme(Dialog):
         self.end_spinner()
         if not isinstance(self.themes, list):
             error_dialog(self, _('Failed to download list of themes'), _(
-                'Failed to download list of themes, click "Show Details" for more information'),
+                'Failed to download list of themes, click "Show details" for more information'),
                          det_msg=self.themes, show=True)
             self.reject()
             return
@@ -787,7 +783,7 @@ class ChooseTheme(Dialog):
 
         if self.downloaded_theme and not isinstance(self.downloaded_theme, BytesIO):
             return error_dialog(self, _('Download failed'), _(
-                'Failed to download icon theme, click "Show Details" for more information.'), show=True, det_msg=self.downloaded_theme)
+                'Failed to download icon theme, click "Show details" for more information.'), show=True, det_msg=self.downloaded_theme)
         if ret == QDialog.DialogCode.Rejected or not self.keep_downloading or d.canceled or self.downloaded_theme is None:
             return
         dt = self.downloaded_theme

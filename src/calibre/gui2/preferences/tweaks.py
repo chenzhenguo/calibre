@@ -8,7 +8,7 @@ from collections import OrderedDict
 from functools import partial
 from operator import attrgetter
 
-from PyQt5.Qt import (
+from qt.core import (
     QAbstractListModel, QApplication, QDialog, QDialogButtonBox, QFont, QGridLayout,
     QGroupBox, QIcon, QLabel, QListView, QMenu, QModelIndex, QPlainTextEdit, QComboBox,
     QPushButton, QSizePolicy, QSplitter, QStyle, QStyledItemDelegate, QAbstractItemView, QItemSelectionModel,
@@ -46,7 +46,10 @@ def format_doc(doc):
             default_indent = indent
         current_indent = indent
         if indent == default_indent:
-            lines[-1] += ' ' + line
+            if lines and lines[-1]:
+                lines[-1] += ' ' + line
+            else:
+                lines.append(line)
         else:
             lines.append('    ' + line.strip())
     return '\n'.join(lines).lstrip()
@@ -410,6 +413,7 @@ class ConfigWidget(ConfigWidgetBase):
         sb.sizePolicy().setHorizontalStretch(10)
         sb.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLength)
         sb.setMinimumContentsLength(10)
+        g.setColumnStretch(0, 100)
         g.addWidget(self.search, 0, 0, 1, 1)
         self.next_button = b = QPushButton(self)
         b.setIcon(QIcon(I("arrow-down.png")))

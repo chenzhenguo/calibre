@@ -8,7 +8,7 @@ __docformat__ = 'restructuredtext en'
 
 import textwrap
 
-from PyQt5.Qt import (QWidget, pyqtSignal, QCheckBox, QAbstractSpinBox, QApplication,
+from qt.core import (QWidget, pyqtSignal, QCheckBox, QAbstractSpinBox, QApplication,
     QLineEdit, QComboBox, Qt, QIcon, QDialog, QVBoxLayout,
     QDialogButtonBox)
 
@@ -20,6 +20,10 @@ from polyglot.builtins import unicode_type, string_or_bytes
 
 
 class AbortCommit(Exception):
+    pass
+
+
+class AbortInitialize(Exception):
     pass
 
 
@@ -59,7 +63,8 @@ class ConfigWidgetInterface(object):
     def initialize(self):
         '''
         Should set all config values to their initial values (the values
-        stored in the config files).
+        stored in the config files). A "return" statement is optional. Return
+        False if the dialog is not to be shown.
         '''
         raise NotImplementedError()
 
@@ -331,7 +336,7 @@ def init_gui():
     actions = tuple(Main.create_application_menubar())
     db = db()
     gui = Main(opts)
-    gui.initialize(db.library_path, db, None, actions, show_gui=False)
+    gui.initialize(db.library_path, db, actions, show_gui=False)
     return gui
 
 
@@ -405,7 +410,7 @@ def test_widget(category, name, gui=None):
 
 
 def test_all():
-    from PyQt5.Qt import QApplication
+    from qt.core import QApplication
     app = QApplication([])
     app
     gui = init_gui()

@@ -9,7 +9,7 @@ __docformat__ = 'restructuredtext en'
 import os, re, traceback
 from functools import partial
 
-from PyQt5.Qt import (
+from qt.core import (
     QStyledItemDelegate, Qt, QTreeView, pyqtSignal, QSize, QIcon, QApplication, QStyle, QAbstractItemView,
     QMenu, QPoint, QToolTip, QCursor, QDrag, QRect, QModelIndex,
     QLinearGradient, QPalette, QColor, QPen, QBrush, QFont, QTimer
@@ -172,13 +172,15 @@ class TagsView(QTreeView):  # {{{
     tag_item_renamed        = pyqtSignal()
     search_item_renamed     = pyqtSignal()
     drag_drop_finished      = pyqtSignal(object)
-    restriction_error       = pyqtSignal()
+    restriction_error       = pyqtSignal(object)
     tag_item_delete         = pyqtSignal(object, object, object, object, object)
+    tag_identifier_delete   = pyqtSignal(object, object)
     apply_tag_to_selected   = pyqtSignal(object, object, object)
     edit_enum_values        = pyqtSignal(object, object, object)
 
     def __init__(self, parent=None):
         QTreeView.__init__(self, parent=None)
+        self.possible_drag_start = None
         self.setProperty('frame_for_focus', True)
         self.setMouseTracking(True)
         self.alter_tb = None
@@ -383,7 +385,12 @@ class TagsView(QTreeView):  # {{{
 
     def mousePressEvent(self, event):
         if event.buttons() & Qt.MouseButton.LeftButton:
-            self.possible_drag_start = event.pos()
+            # Only remember a possible drag start if the item is drag enabled
+            dex = self.indexAt(event.pos())
+            if self._model.flags(dex) & Qt.ItemFlag.ItemIsDragEnabled:
+                self.possible_drag_start = event.pos()
+            else:
+                self.possible_drag_start = None
         return QTreeView.mousePressEvent(self, event)
 
     def mouseMoveEvent(self, event):
@@ -398,7 +405,8 @@ class TagsView(QTreeView):  # {{{
             QTreeView.mouseMoveEvent(self, event)
             return
         # don't start drag/drop until the mouse has moved a bit.
-        if ((event.pos() - self.possible_drag_start).manhattanLength() <
+        if (self.possible_drag_start is None or
+            (event.pos() - self.possible_drag_start).manhattanLength() <
                                     QApplication.startDragDistance()):
             QTreeView.mouseMoveEvent(self, event)
             return
@@ -529,6 +537,12 @@ class TagsView(QTreeView):  # {{{
                 children = index.child_tags()
                 self.tag_item_delete.emit(key, id_, tag.original_name,
                                           None, children)
+                return
+            if action == 'delete_identifier':
+                self.tag_identifier_delete.emit(index.tag.name, False)
+                return
+            if action == 'delete_identifier_in_vl':
+                self.tag_identifier_delete.emit(index.tag.name, True)
                 return
             if action == 'open_editor':
                 self.tags_list_edit.emit(category, key, is_first_letter)
@@ -766,6 +780,20 @@ class TagsView(QTreeView):  # {{{
                                 _('Delete Saved search %s')%display_name(tag),
                                 partial(self.context_menu_handler,
                                         action='delete_search', key=tag.original_name))
+                    elif key == 'identifiers':
+                        if self.model().get_in_vl():
+                            self.context_menu.addAction(self.delete_icon,
+                                    _('Delete %s in Virtual Library')%display_name(tag),
+                                    partial(self.context_menu_handler,
+                                            action='delete_identifier_in_vl',
+                                            key=key, index=tag_item))
+                        else:
+                            self.context_menu.addAction(self.delete_icon,
+                                    _('Delete %s')%display_name(tag),
+                                    partial(self.context_menu_handler,
+                                            action='delete_identifier',
+                                            key=key, index=tag_item))
+
                     if key.startswith('@') and not item.is_gst:
                         self.context_menu.addAction(self.user_category_icon,
                             _('Remove %(item)s from category %(cat)s')%
@@ -970,6 +998,20 @@ class TagsView(QTreeView):  # {{{
             m.addAction(self.minus_icon,
                         _("Collapse {0}").format(p[0]), partial(self.collapse_node, p[1]))
         m.addAction(self.minus_icon, _('Collapse all'), self.collapseAll)
+
+        # Ask plugins if they have any actions to add to the context menu
+        from calibre.gui2.ui import get_gui
+        first = True
+        for ac in get_gui().iactions.values():
+            try:
+                for context_action in ac.tag_browser_context_action(index):
+                    if first:
+                        self.context_menu.addSeparator()
+                        first = False
+                    self.context_menu.addAction(context_action)
+            except Exception:
+                import traceback
+                traceback.print_exc()
 
         if not self.context_menu.isEmpty():
             self.context_menu.popup(self.mapToGlobal(point))

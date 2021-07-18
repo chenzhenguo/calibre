@@ -10,7 +10,6 @@ __docformat__ = 'restructuredtext en'
 '''The main GUI'''
 
 import apsw
-import collections
 import errno
 import gc
 import os
@@ -18,9 +17,9 @@ import re
 import sys
 import textwrap
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from io import BytesIO
-from PyQt5.Qt import (
+from qt.core import (
     QAction, QApplication, QDialog, QFont, QIcon, QMenu, QSystemTrayIcon, Qt, QTimer,
     QUrl, pyqtSignal
 )
@@ -29,6 +28,7 @@ from calibre import detect_ncpus, force_unicode, prints
 from calibre.constants import (
     DEBUG, __appname__, config_dir, filesystem_encoding, ismacos, iswindows
 )
+from calibre.customize import PluginInstallationType
 from calibre.customize.ui import available_store_plugins, interface_actions
 from calibre.db.legacy import LibraryDatabase
 from calibre.gui2 import (
@@ -38,7 +38,6 @@ from calibre.gui2 import (
 from calibre.gui2.auto_add import AutoAdder
 from calibre.gui2.changes import handle_changes
 from calibre.gui2.cover_flow import CoverFlowMixin
-from calibre.gui2.dbus_export.widgets import factory
 from calibre.gui2.device import DeviceMixin
 from calibre.gui2.dialogs.message_box import JobError
 from calibre.gui2.ebook_download import EbookDownloadMixin
@@ -128,7 +127,8 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
         self.iactions = OrderedDict()
         # Actions
         for action in interface_actions():
-            if opts.ignore_plugins and action.plugin_path is not None:
+            if opts.ignore_plugins \
+                    and action.installation_type is not PluginInstallationType.BUILTIN:
                 continue
             try:
                 ac = self.init_iaction(action)
@@ -140,7 +140,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
                 except Exception:
                     if action.plugin_path:
                         print('Failed to load Interface Action plugin:', action.plugin_path, file=sys.stderr)
-                if action.plugin_path is None:
+                if action.installation_type is PluginInstallationType.BUILTIN:
                     raise
                 continue
             ac.plugin_path = action.plugin_path
@@ -152,6 +152,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
         ac = action.load_actual_plugin(self)
         ac.plugin_path = action.plugin_path
         ac.interface_action_base_plugin = action
+        ac.installation_type = action.installation_type
         action.actual_iaction_plugin_loaded = True
         return ac
 
@@ -167,7 +168,8 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
         from calibre.gui2.store.loader import Stores
         self.istores = Stores()
         for store in available_store_plugins():
-            if self.opts.ignore_plugins and store.plugin_path is not None:
+            if self.opts.ignore_plugins \
+                    and store.installation_type is not PluginInstallationType.BUILTIN:
                 continue
             try:
                 st = self.init_istore(store)
@@ -176,7 +178,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
                 # Ignore errors in loading user supplied plugins
                 import traceback
                 traceback.print_exc()
-                if store.plugin_path is None:
+                if store.installation_type is PluginInstallationType.BUILTIN:
                     raise
                 continue
         self.istores.builtins_loaded()
@@ -184,6 +186,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
     def init_istore(self, store):
         st = store.load_actual_plugin(self)
         st.plugin_path = store.plugin_path
+        st.installation_type = store.installation_type
         st.base_plugin = store
         store.actual_istore_plugin_loaded = True
         return st
@@ -215,7 +218,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
                 # Ignore errors in third party plugins
                 import traceback
                 traceback.print_exc()
-                if getattr(ac, 'plugin_path', None) is None:
+                if getattr(ac, 'installation_type', None) is PluginInstallationType.BUILTIN:
                     raise
         self.donate_action = QAction(QIcon(I('donate.png')),
                 _('&Donate to support calibre'), self)
@@ -241,12 +244,11 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
         self.metadata_dialogs = []
         self.default_thumbnail = None
         self.tb_wrapper = textwrap.TextWrapper(width=40)
-        self.viewers = collections.deque()
+        self.viewers = deque()
         self.system_tray_icon = None
         do_systray = config['systray_icon'] or opts.start_in_tray
-        if do_systray:
-            self.system_tray_icon = factory(app_id='com.calibre-ebook.gui').create_system_tray_icon(parent=self, title='calibre')
-        if self.system_tray_icon is not None:
+        if do_systray and QSystemTrayIcon.isSystemTrayAvailable():
+            self.system_tray_icon = QSystemTrayIcon(self)
             self.system_tray_icon.setIcon(QIcon(I('lt.png', allow_user_override=False)))
             if not (iswindows or ismacos):
                 self.system_tray_icon.setIcon(QIcon.fromTheme('calibre-tray', self.system_tray_icon.icon()))
@@ -255,7 +257,8 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
             self.jobs_button.tray_tooltip_updated.connect(self.system_tray_icon.setToolTip)
         elif do_systray:
             prints('Failed to create system tray icon, your desktop environment probably'
-                   ' does not support the StatusNotifier spec https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/')
+                   ' does not support the StatusNotifier spec https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/',
+                   file=sys.stderr, flush=True)
         self.system_tray_menu = QMenu(self)
         self.toggle_to_tray_action = self.system_tray_menu.addAction(QIcon(I('page.png')), '')
         self.toggle_to_tray_action.triggered.connect(self.system_tray_icon_activated)
@@ -370,7 +373,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
             except:
                 import traceback
                 traceback.print_exc()
-                if ac.plugin_path is None:
+                if ac.installation_type is PluginInstallationType.BUILTIN:
                     raise
 
         if config['autolaunch_server']:
@@ -390,7 +393,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
             except:
                 import traceback
                 traceback.print_exc()
-                if ac.plugin_path is None:
+                if ac.installation_type is PluginInstallationType.BUILTIN:
                     raise
         self.set_current_library_information(current_library_name(), db.library_id,
                                              db.field_metadata)
@@ -484,7 +487,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
                 except EnvironmentError:
                     pass
                 warning_dialog(self, _('Content server changed!'), _(
-                    'calibre 3 comes with a completely re-written content server.'
+                    'calibre 3 comes with a completely re-written Content server.'
                     ' As such any custom configuration you have for the content'
                     ' server no longer applies. You should check and refresh your'
                     ' settings in Preferences->Sharing->Sharing over the net'), show=True)
@@ -907,7 +910,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
             font.setBold(True)
             font.setItalic(True)
         self.virtual_library.setFont(font)
-        title = '{0} - || {1}{2} ||'.format(
+        title = '{0} — || {1}{2} ||'.format(
                 __appname__, self.iactions['Choose Library'].library_name(), restrictions)
         self.setWindowTitle(title)
 
@@ -972,7 +975,7 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
                 your e-book reader may have trouble with the EPUB.
                         ''')
                 if not minz:
-                    d = error_dialog(self, _('Conversion Failed'), msg,
+                    d = error_dialog(self, _('Conversion failed'), msg,
                             det_msg=job.details)
                     d.setModal(False)
                     d.show()
@@ -1087,8 +1090,8 @@ class Main(MainWindow, MainWindowMixin, DeviceMixin, EmailMixin,  # {{{
 
         from calibre.db.delete_service import has_jobs
         if has_jobs():
-            msg = _('Some deleted books are still being moved to the Recycle '
-                    'Bin, if you quit now, they will be left behind. Are you '
+            msg = _('Some deleted books are still being moved to the recycle '
+                    'bin, if you quit now, they will be left behind. Are you '
                     'sure you want to quit?')
             if not question_dialog(self, _('Active jobs'), msg):
                 return False

@@ -8,10 +8,10 @@ __copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
 import os
 from functools import partial
 from itertools import product
-from PyQt5.Qt import (
+from qt.core import (
     QAction, QApplication, QColor, QDockWidget, QEvent, QHBoxLayout, QIcon, QImage,
     QLabel, QMenu, QPalette, QPixmap, QSize, QStackedWidget, Qt, QTabWidget, QTimer,
-    QUrl, QVBoxLayout, QWidget, pyqtSignal
+    QUrl, QVBoxLayout, QWidget, pyqtSignal, QMenuBar
 )
 
 from calibre import prepare_string_for_xml, prints
@@ -21,7 +21,6 @@ from calibre.constants import (
 )
 from calibre.customize.ui import find_plugin
 from calibre.gui2 import elided_text, open_url
-from calibre.gui2.dbus_export.widgets import factory
 from calibre.gui2.keyboard import Manager as KeyboardManager
 from calibre.gui2.main_window import MainWindow
 from calibre.gui2.throbber import ThrobbingButton
@@ -377,8 +376,8 @@ class Main(MainWindow):
         g = QApplication.instance().desktop().availableGeometry(self)
         self.resize(g.width()-50, g.height()-50)
 
-        self.restore_state()
         self.apply_settings()
+        QTimer.singleShot(0, self.restore_state)
 
     def apply_settings(self):
         self.keyboard.finalize()
@@ -618,8 +617,9 @@ class Main(MainWindow):
             p, q = self.create_application_menubar()
             q.triggered.connect(self.action_quit.trigger)
             p.triggered.connect(self.action_preferences.trigger)
-        f = factory(app_id='com.calibre-ebook.EditBook-%d' % os.getpid())
-        b = f.create_window_menubar(self)
+        b = QMenuBar(self)
+        self.setMenuBar(b)
+        b.is_native_menubar = False
 
         f = b.addMenu(_('&File'))
         f.addAction(self.action_new_file)

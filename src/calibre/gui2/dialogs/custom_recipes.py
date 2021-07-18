@@ -7,7 +7,7 @@ __copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
 
 import os, re, textwrap, time
 
-from PyQt5.Qt import (
+from qt.core import (
     QVBoxLayout, QStackedWidget, QSize, QPushButton, QIcon, QWidget, QListView, QItemSelectionModel,
     QHBoxLayout, QAbstractListModel, Qt, QLabel, QSizePolicy, pyqtSignal, QSortFilterProxyModel,
     QFormLayout, QSpinBox, QLineEdit, QGroupBox, QListWidget, QListWidgetItem,
@@ -271,10 +271,11 @@ class RecipeList(QWidget):  # {{{
     def remove(self):
         idx = self.view.currentIndex()
         if idx.isValid():
-            self.model.remove((idx.row(),))
-            self.select_row()
-            if self.model.rowCount() == 0:
-                self.stacks.setCurrentIndex(0)
+            if confirm_delete(_('Are you sure you want to permanently remove this recipe?'), 'remove-custom-recipe', parent=self):
+                self.model.remove((idx.row(),))
+                self.select_row()
+                if self.model.rowCount() == 0:
+                    self.stacks.setCurrentIndex(0)
 
     def download(self):
         idx = self.view.currentIndex()

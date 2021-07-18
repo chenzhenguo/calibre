@@ -7,13 +7,13 @@ __copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
 import functools
-from PyQt5.Qt import (
-    QAction, QApplication, QIcon, QLabel, QMenu, QPainter, QSizePolicy, QSplitter,
-    QStackedWidget, QStatusBar, QStyle, QStyleOption, Qt, QTabBar, QTimer,
-    QToolButton, QVBoxLayout, QWidget, QDialog, QEvent
+from qt.core import (
+    QAction, QApplication, QDialog, QEvent, QIcon, QLabel, QMenu, QPainter,
+    QSizePolicy, QSplitter, QStackedWidget, QStatusBar, QStyle, QStyleOption, Qt,
+    QTabBar, QTimer, QToolButton, QVBoxLayout, QWidget
 )
 
-from calibre.constants import __appname__, get_version, ismacos
+from calibre.constants import get_appname_for_display, get_version, ismacos
 from calibre.customize.ui import find_plugin
 from calibre.gui2 import (
     config, error_dialog, gprefs, is_widescreen, open_local_file, open_url
@@ -48,7 +48,7 @@ class LibraryViewMixin(object):  # {{{
         self.library_view.files_dropped.connect(self.iactions['Add Books'].files_dropped, type=Qt.ConnectionType.QueuedConnection)
         self.library_view.books_dropped.connect(self.iactions['Edit Metadata'].books_dropped, type=Qt.ConnectionType.QueuedConnection)
         self.library_view.add_column_signal.connect(partial(self.iactions['Preferences'].do_config,
-            initial_plugin=('Interface', 'Custom Columns')),
+            initial_plugin=('Interface', 'Custom Columns'), close_after_initial=True),
                 type=Qt.ConnectionType.QueuedConnection)
         for func, args in [
                              ('connect_to_search_box', (self.search,
@@ -266,7 +266,7 @@ class StatusBar(QStatusBar):  # {{{
     def __init__(self, parent=None):
         QStatusBar.__init__(self, parent)
         self.version = get_version()
-        self.base_msg = '%s %s' % (__appname__, self.version)
+        self.base_msg = f'{get_appname_for_display()} {self.version}'
         self.device_string = ''
         self.update_label = UpdateLabel('')
         self.total = self.current = self.selected = self.library_total = 0
@@ -664,7 +664,7 @@ class LayoutMixin(object):  # {{{
                 type=Qt.ConnectionType.QueuedConnection)
         self.book_details.open_containing_folder.connect(self.iactions['View'].view_folder_for_id)
         self.book_details.view_specific_format.connect(self.iactions['View'].view_format_by_id)
-        self.book_details.search_requested.connect(self.search.set_search_string)
+        self.book_details.search_requested.connect(self.set_search_string_with_append)
         self.book_details.remove_specific_format.connect(
                 self.iactions['Remove Books'].remove_format_by_id)
         self.book_details.remove_metadata_item.connect(
@@ -690,6 +690,14 @@ class LayoutMixin(object):  # {{{
             m.current_changed(self.library_view.currentIndex(),
                     self.library_view.currentIndex())
         self.library_view.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def set_search_string_with_append(self, expression, append=''):
+        current = self.search.text().strip()
+        if append:
+            expr = f'{current} {append} {expression}' if current else expression
+        else:
+            expr = expression
+        self.search.set_search_string(expr)
 
     def edit_identifiers_triggerred(self):
         book_id = self.library_view.current_book

@@ -1,18 +1,19 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
-
-import time, random
+import random
+import time
 from threading import Thread
+from typing import TYPE_CHECKING
+
+from calibre.db.locking import LockingError, RWLockWrapper, SHLock
 from calibre.db.tests.base import BaseTest
-from calibre.db.locking import SHLock, RWLockWrapper, LockingError
-from polyglot.builtins import range
+
+if TYPE_CHECKING:
+    import unittest
 
 
-def wait_for(period):
+def wait_for(period: float) -> None:
     # time.sleep() is not useful for very small values on windows because the
     # default timer has a resolutions of about 16ms see
     # https://stackoverflow.com/questions/40594587/why-time-sleep-is-so-slow-in-windows
@@ -22,9 +23,9 @@ def wait_for(period):
 
 
 class TestLock(BaseTest):
-    """Tests for db locking """
+    """Tests for db locking"""
 
-    def test_owns_locks(self):
+    def test_owns_locks(self) -> None:
         lock = SHLock()
         self.assertFalse(lock.owns_lock())
         lock.acquire(shared=True)
@@ -38,9 +39,10 @@ class TestLock(BaseTest):
 
         done = []
 
-        def test():
+        def test() -> None:
             if not lock.owns_lock():
                 done.append(True)
+
         lock.acquire()
         t = Thread(target=test)
         t.daemon = True
@@ -49,21 +51,22 @@ class TestLock(BaseTest):
         self.assertEqual(len(done), 1)
         lock.release()
 
-    def test_multithread_deadlock(self):
+    def test_multithread_deadlock(self) -> None:
         lock = SHLock()
 
-        def two_shared():
+        def two_shared() -> None:
             r = RWLockWrapper(lock)
             with r:
                 time.sleep(0.2)
                 with r:
                     pass
 
-        def one_exclusive():
+        def one_exclusive() -> None:
             time.sleep(0.1)
             w = RWLockWrapper(lock, is_shared=False)
             with w:
                 pass
+
         threads = [Thread(target=two_shared), Thread(target=one_exclusive)]
         for t in threads:
             t.daemon = True
@@ -73,19 +76,19 @@ class TestLock(BaseTest):
         live = [t for t in threads if t.is_alive()]
         self.assertListEqual(live, [], 'ShLock hung')
 
-    def test_upgrade(self):
+    def test_upgrade(self) -> None:
         lock = SHLock()
         lock.acquire(shared=True)
         self.assertRaises(LockingError, lock.acquire, shared=False)
         lock.release()
 
-    def test_downgrade(self):
+    def test_downgrade(self) -> None:
         lock = SHLock()
         lock.acquire(shared=False)
         self.assertRaises(LockingError, lock.acquire, shared=True)
         lock.release()
 
-    def test_recursive(self):
+    def test_recursive(self) -> None:
         lock = SHLock()
         lock.acquire(shared=True)
         lock.acquire(shared=True)
@@ -100,17 +103,16 @@ class TestLock(BaseTest):
         lock.release()
         self.assertFalse(lock.is_exclusive)
 
-    def test_release(self):
+    def test_release(self) -> None:
         lock = SHLock()
         self.assertRaises(LockingError, lock.release)
 
-        def get_lock(shared):
+        def get_lock(shared: bool) -> None:
             lock.acquire(shared=shared)
             time.sleep(1)
             lock.release()
 
-        threads = [Thread(target=get_lock, args=(x,)) for x in (True,
-            False)]
+        threads = [Thread(target=get_lock, args=(x,)) for x in (True, False)]
         for t in threads:
             t.daemon = True
             t.start()
@@ -120,10 +122,10 @@ class TestLock(BaseTest):
         self.assertFalse(lock.is_shared)
         self.assertFalse(lock.is_exclusive)
 
-    def test_acquire(self):
+    def test_acquire(self) -> None:
         lock = SHLock()
 
-        def get_lock(shared):
+        def get_lock(shared: bool) -> None:
             lock.acquire(shared=shared)
             time.sleep(1)
             lock.release()
@@ -159,13 +161,13 @@ class TestLock(BaseTest):
         self.assertFalse(lock.is_shared)
         self.assertFalse(lock.is_exclusive)
 
-    def test_contention(self):
+    def test_contention(self) -> None:
         lock = SHLock()
         done = []
 
-        def lots_of_acquires():
+        def lots_of_acquires() -> None:
             for _ in range(1000):
-                shared = random.choice([True,False])
+                shared = random.choice([True, False])
                 lock.acquire(shared=shared)
                 lock.acquire(shared=shared)
                 wait_for(random.random() * 0.0001)
@@ -176,6 +178,7 @@ class TestLock(BaseTest):
                 lock.release()
                 lock.release()
             done.append(True)
+
         threads = [Thread(target=lots_of_acquires) for _ in range(2)]
         for t in threads:
             t.daemon = True
@@ -187,17 +190,20 @@ class TestLock(BaseTest):
                 break
             t.join(left)
         live = [t for t in threads if t.is_alive()]
-        self.assertEqual(len(live), 0, 'ShLock hung or very slow, {} threads alive'.format(len(live)))
+        self.assertEqual(len(live), 0, f'ShLock hung or very slow, {len(live)} threads alive')
         self.assertEqual(len(done), len(threads), 'SHLock locking failed')
         self.assertFalse(lock.is_shared)
         self.assertFalse(lock.is_exclusive)
 
 
-def find_tests():
+def find_tests() -> unittest.TestSuite:
+
     import unittest
+
     return unittest.defaultTestLoader.loadTestsFromTestCase(TestLock)
 
 
-def run_tests():
+def run_tests() -> None:
     from calibre.utils.run_tests import run_tests
+
     run_tests(find_tests)

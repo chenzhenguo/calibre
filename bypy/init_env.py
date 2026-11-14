@@ -1,17 +1,16 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPL v3 Copyright: 2019, Kovid Goyal <kovid at kovidgoyal.net>
 
+import ast
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
-from bypy.constants import (
-    LIBDIR, PREFIX, PYTHON, SRC as CALIBRE_DIR, build_dir, islinux, ismacos,
-    iswindows, worker_env
-)
+from bypy.constants import LIBDIR, PREFIX, PYTHON, build_dir, islinux, ismacos, worker_env
+from bypy.constants import SRC as CALIBRE_DIR
 from bypy.utils import run_shell
 
 dlls = [
@@ -20,48 +19,52 @@ dlls = [
     'Gui',
     'Network',
     # 'NetworkAuth',
-    'Location',
     'PrintSupport',
     'WebChannel',
     # 'WebSockets',
     # 'WebView',
     'Positioning',
-    'PositioningQuick',
     'Sensors',
+    'SpatialAudio',
     'Sql',
     'Svg',
+    'TextToSpeech',
+    'WebChannel',
     'WebEngineCore',
-    'WebEngine',
     'WebEngineWidgets',
     'Widgets',
-    # 'Multimedia',
+    'Multimedia',
+    'MultimediaWidgets',
     'OpenGL',
+    'OpenGLWidgets',
     'Quick',
     'QuickWidgets',
     'Qml',
+    'QmlMeta',
     'QmlModels',
-    # 'MultimediaWidgets',
+    'QmlWorkerScript',
     'Xml',
     # 'XmlPatterns',
 ]
 
 if islinux:
-    dlls += ['X11Extras', 'XcbQpa', 'WaylandClient', 'DBus']
+    dlls += ['XcbQpa', 'WaylandClient', 'DBus']
 elif ismacos:
-    dlls += ['MacExtras', 'DBus']
-elif iswindows:
-    dlls += ['WinExtras']
+    dlls += ['DBus']
 
+QT_MAJOR = 6
 QT_DLLS = frozenset(
-    'Qt5' + x for x in dlls
+    f'Qt{QT_MAJOR}' + x for x in dlls
 )
 
 QT_PLUGINS = [
     'imageformats',
     'iconengines',
+    'tls',
+    'multimedia',
+    'texttospeech',
     # 'mediaservice',
     'platforms',
-    'platformthemes',
     # 'playlistformats',
     'sqldrivers',
     # 'webview',
@@ -70,7 +73,9 @@ QT_PLUGINS = [
 
 if islinux:
     QT_PLUGINS += [
+        'egldeviceintegrations',
         'platforminputcontexts',
+        'platformthemes',
         'wayland-decoration-client',
         'wayland-graphics-integration-client',
         'wayland-shell-integration',
@@ -84,20 +89,20 @@ PYQT_MODULES = (
     'QtCore',
     'QtGui',
     'QtNetwork',
-    # 'QtMultimedia', 'QtMultimediaWidgets',
+    'QtMultimedia', 'QtMultimediaWidgets',
+    'QtTextToSpeech',
     'QtPrintSupport',
     'QtSensors',
     'QtSvg',
     'QtWidgets',
+    'QtOpenGL',
+    'QtOpenGLWidgets',
     'QtWebEngine',
     'QtWebEngineCore',
     'QtWebEngineWidgets',
     'QtWebChannel',
 )
 del dlls
-
-if iswindows:
-    PYQT_MODULES += ('QtWinExtras',)
 
 
 def read_cal_file(name):
@@ -109,26 +114,43 @@ def initialize_constants():
     calibre_constants = {}
     src = read_cal_file('constants.py')
     nv = re.search(r'numeric_version\s+=\s+\((\d+), (\d+), (\d+)\)', src)
+    assert nv is not None
     calibre_constants['version'
                       ] = '%s.%s.%s' % (nv.group(1), nv.group(2), nv.group(3))
-    calibre_constants['appname'] = re.search(
-        r'__appname__\s+=\s+(u{0,1})[\'"]([^\'"]+)[\'"]', src
-    ).group(2)
-    epsrc = re.compile(r'entry_points = (\{.*?\})',
-                       re.DOTALL).search(read_cal_file('linux.py')).group(1)
-    entry_points = eval(epsrc, {'__appname__': calibre_constants['appname']})
+    def get_str_assign(which):
+        pat = r'__appname__\s+=\s+(u{0,1})[\'"]([^\'"]+)[\'"]'.replace('__appname__', which)
+        m = re.search(pat, src)
+        assert m is not None
+        return m.group(2)
+
+    calibre_constants['appname'] = get_str_assign('__appname__')
+    calibre_constants['MAIN_APP_UID'] = get_str_assign('MAIN_APP_UID')
+    calibre_constants['VIEWER_APP_UID'] = get_str_assign('VIEWER_APP_UID')
+    calibre_constants['EDITOR_APP_UID'] = get_str_assign('EDITOR_APP_UID')
+    ep_match = re.compile(r'entry_points = (\{.*?\})',
+                          re.DOTALL).search(read_cal_file('linux.py'))
+    assert ep_match is not None
+    epsrc = ep_match.group(1)
+    epsrc = epsrc.replace('__appname__ +', repr(calibre_constants['appname']))
+    try:
+        entry_points = ast.literal_eval(epsrc)
+    except Exception as e:
+        raise ValueError(f'could not evaluate {epsrc}') from e
 
     def e2b(ep):
-        return re.search(r'\s*(.*?)\s*=', ep).group(1).strip()
+        m = re.search(r'\s*(.*?)\s*=', ep)
+        assert m is not None
+        return m.group(1).strip()
 
     def e2s(ep, base='src'):
-        return (
-            base + os.path.sep +
-            re.search(r'.*=\s*(.*?):', ep).group(1).replace('.', '/') + '.py'
-        ).strip()
+        m = re.search(r'.*=\s*(.*?):', ep)
+        assert m is not None
+        return (base + os.path.sep + m.group(1).replace('.', '/') + '.py').strip()
 
     def e2m(ep):
-        return re.search(r'.*=\s*(.*?)\s*:', ep).group(1).strip()
+        m = re.search(r'.*=\s*(.*?)\s*:', ep)
+        assert m is not None
+        return m.group(1).strip()
 
     def e2f(ep):
         return ep[ep.rindex(':') + 1:].strip()
@@ -145,14 +167,16 @@ def initialize_constants():
         scripts[x] = list(map(e2s, entry_points[y]))
 
     src = read_cal_file('ebooks/__init__.py')
-    be = re.search(
+    be_match = re.search(
         r'^BOOK_EXTENSIONS\s*=\s*(\[.+?\])', src, flags=re.DOTALL | re.MULTILINE
-    ).group(1)
-    calibre_constants['book_extensions'] = json.loads(be.replace("'", '"'))
+    )
+    assert be_match is not None
+    be = be_match.group(1)
+    calibre_constants['book_extensions'] = ast.literal_eval(be)
     return calibre_constants
 
 
-def run(*args, **extra_env):
+def worker_environ(**extra_env):
     env = os.environ.copy()
     env.update(worker_env)
     env.update(extra_env)
@@ -160,7 +184,42 @@ def run(*args, **extra_env):
     env['LD_LIBRARY_PATH'] = LIBDIR
     env['SIP_BIN'] = os.path.join(PREFIX, 'bin', 'sip')
     env['QMAKE'] = os.path.join(PREFIX, 'qt', 'bin', 'qmake')
-    return subprocess.call(list(args), env=env, cwd=CALIBRE_DIR)
+    return env
+
+
+def run(*args, **extra_env):
+    return subprocess.call(list(args), env=worker_environ(**extra_env), cwd=CALIBRE_DIR)
+
+
+def copy_langtool_resources(dest):
+    '''
+    Copy the data files langtool needs at runtime (rules, the precompiled
+    .ltrt rule tables and the package manifest) into dest, using the freezing
+    support in langtool. The files must be real files, not frozen, as the rule
+    tables are memory mapped. Returns the list of copied files as paths
+    relative to dest, which are also the paths relative to the langtool
+    package directory. At runtime, LANGTOOL_RESOURCE_DIR is set to point to
+    dest by site.py.
+    '''
+    script = 'import json, sys; from langtool.freeze import copy_resources; json.dump(copy_resources(sys.argv[-1]), sys.stdout)'
+    try:
+        raw = subprocess.check_output([PYTHON, '-c', script, dest], env=worker_environ(), cwd=CALIBRE_DIR)
+    except subprocess.CalledProcessError as err:
+        raise SystemExit(f'Copying langtool resources to {dest} failed with return code: {err.returncode}')
+    copied = json.loads(raw)
+    if not any(x.endswith('.ltrt') for x in copied):
+        raise SystemExit(f'No precompiled langtool rule tables found, copied files: {copied}')
+    return copied
+
+
+def remove_langtool_resources(package_dir, copied):
+    ' Remove the langtool data files copied by copy_langtool_resources() from the langtool package in package_dir so they are not frozen '
+    for top in {x.split('/')[0] for x in copied}:
+        path = os.path.join(package_dir, top)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        elif os.path.exists(path):
+            os.remove(path)
 
 
 def build_c_extensions(ext_dir, args):
@@ -171,8 +230,9 @@ def build_c_extensions(ext_dir, args):
     ]
     if args.build_only:
         cmd.extend(('--only', args.build_only))
-    if run(*cmd, COMPILER_CWD=bdir) != 0:
-        print('Building of calibre C extensions failed', file=sys.stderr)
+    rc = run(*cmd, COMPILER_CWD=bdir)
+    if rc != 0:
+        print('Building of calibre C extensions failed, returncode:', rc, 'Failing cmd:', cmd, file=sys.stderr)
         os.chdir(CALIBRE_DIR)
         run_shell()
         raise SystemExit('Building of calibre C extensions failed')

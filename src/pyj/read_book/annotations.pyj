@@ -3,6 +3,7 @@
 from __python__ import bound_methods, hash_literals
 
 from gettext import gettext as _
+
 from read_book.cfi import create_cfi_cmp, cfi_sort_key
 from read_book.globals import ui_operations
 
@@ -13,12 +14,15 @@ no_cfi = '/99999999'
 def bookmark_get_cfi(b):
     if b.pos_type is 'epubcfi':
         return b.pos[8:-1]
+    return no_cfi
 
 
 def highlight_get_cfi(hl):
     cfi = hl.start_cfi
     if cfi:
-        return cfi[8:-1]
+        si = f'/{hl.spine_index}' if hl.spine_index? else no_cfi
+        return si + cfi
+    return no_cfi
 
 
 def sort_annot_list(annots, get_cfi_func):
@@ -29,8 +33,8 @@ def sort_annot_list(annots, get_cfi_func):
             key_map[cfi] = cfi_sort_key(cfi)
     cfi_cmp = create_cfi_cmp(key_map)
     annots.sort(def (a, b):
-        acfi = get_cfi_func(a) or no_cfi
-        bcfi = get_cfi_func(b) or no_cfi
+        acfi = get_cfi_func(a)
+        bcfi = get_cfi_func(b)
         return cfi_cmp(acfi, bcfi)
     )
 
@@ -46,12 +50,12 @@ def merge_annots_with_identical_field(annots_a, annots_b, field, cfi_getter_func
     for a in all_annots:
         q = title_groups[a[field]]
         if not q:
-            q = title_groups[a[field]] = v'[]'
+            q = title_groups[a[field]] = []
         q.push(a)
     for tg in Object.values(title_groups):
         tg.sort(annots_descending_cmp)
     seen = {}
-    ans = v'[]'
+    ans = []
     for a in all_annots:
         title = a[field]
         if not seen[title]:
@@ -82,8 +86,8 @@ def merge_annotation_maps(a, b):
     updated = False
     ans = {}
     for field in field_map:
-        a_items = a[field] or v'[]'
-        b_items = b[field] or v'[]'
+        a_items = a[field] or []
+        b_items = b[field] or []
         if not a_items.length:
             ans[field] = b_items
             updated = True
@@ -98,9 +102,7 @@ def merge_annotation_maps(a, b):
     return updated, ans
 
 
-
 class AnnotationsManager:  # {{{
-
     def __init__(self, view):
         self.view = view
         self.set_highlights()
@@ -116,7 +118,7 @@ class AnnotationsManager:  # {{{
             ui_operations.annots_changed(amap)
 
     def set_bookmarks(self, bookmarks):
-        bookmarks = bookmarks or v'[]'
+        bookmarks = bookmarks or []
         self.bookmarks = list(bookmarks)
 
     def all_bookmarks(self):
@@ -147,9 +149,28 @@ class AnnotationsManager:  # {{{
             self.sync_annots_to_server('bookmarks')
         return changed
 
-    def default_bookmark_title(self):
-        all_titles = {bm.title:True for bm in self.bookmarks if not bm.removed}
-        base_default_title = _('Bookmark')
+    def edit_bookmark(self, title, new_title):
+        # Bookmarks are merged by title when syncing, so a rename is a removal
+        # of the old title plus a bookmark with the new title. Changing the
+        # title in place would leave the old title alive in other copies.
+        renamed = [b for b in self.bookmarks if b.title is title and not b.removed]
+        if not renamed.length or new_title is title:
+            return False
+        now = Date().toISOString()
+        # As in add_bookmark(), drop removed bookmarks that have the new title
+        self.bookmarks = [b for b in self.bookmarks if b.title is not new_title]
+        for b in renamed:
+            nb = Object.assign({}, b)
+            nb.title, nb.timestamp = new_title, now
+            b.removed, b.timestamp = True, now
+            self.bookmarks.push(nb)
+        sort_annot_list(self.bookmarks, bookmark_get_cfi)
+        self.sync_annots_to_server('bookmarks')
+        return True
+
+    def default_bookmark_title(self, base_default_title):
+        all_titles = {bm.title: True for bm in self.bookmarks if not bm.removed}
+        base_default_title = base_default_title or _('Bookmark')
         c = 0
         while True:
             c += 1
@@ -158,7 +179,7 @@ class AnnotationsManager:  # {{{
                 return default_title
 
     def set_highlights(self, highlights):
-        highlights = highlights or v'[]'
+        highlights = highlights or []
         self.highlights = {h.uuid: h for h in highlights}
 
     def all_highlights(self):
@@ -167,7 +188,7 @@ class AnnotationsManager:  # {{{
         return ans
 
     def merge_highlights(self, highlights):
-        highlights = highlights or v'[]'
+        highlights = highlights or []
         updated = False
         if highlights.length:
             base = {'highlight': Object.values(self.highlights)}
@@ -201,6 +222,11 @@ class AnnotationsManager:  # {{{
         if h:
             return h.notes
 
+    def text_for_highlight(self, uuid):
+        h = self.highlights[uuid] if uuid else None
+        if h:
+            return h.highlighted_text
+
     def set_notes_for_highlight(self, uuid, notes):
         h = self.highlights[uuid]
         if h:
@@ -211,6 +237,19 @@ class AnnotationsManager:  # {{{
             self.sync_annots_to_server('highlights')
             return True
         return False
+
+    def set_style_for_highlights(self, updates):
+        now = Date().toISOString()
+        changed = False
+        for item in updates:
+            h = self.highlights[item.uuid]
+            if h:
+                h.style = item.style
+                h.timestamp = now
+                changed = True
+        if changed:
+            self.sync_annots_to_server('highlights')
+        return changed
 
     def style_for_highlight(self, uuid):
         h = self.highlights[uuid]
@@ -257,7 +296,7 @@ class AnnotationsManager:  # {{{
         if notes:
             annot.notes = notes
         if toc_family?.length:
-            toc_family_titles = v'[]'
+            toc_family_titles = []
             for x in toc_family:
                 if x.title:
                     toc_family_titles.push(x.title)
@@ -266,9 +305,9 @@ class AnnotationsManager:  # {{{
 
     def highlights_for_currently_showing(self):
         name = self.view.currently_showing.name
-        ans = v'[]'
+        ans = []
         for h in Object.values(self.highlights):
             if h.spine_name is name and not h.removed and h.start_cfi:
                 ans.push(h)
         return ans
-# }}}
+        # }}}

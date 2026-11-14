@@ -1,15 +1,12 @@
-# -*- coding: utf-8 -*-
-
-
-__license__ = 'GPL 3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
 
 import re
-from polyglot.builtins import int_to_byte, range
+from typing import IO
+
+from polyglot.builtins import int_to_byte
 
 
-class TCRCompressor(object):
+class TCRCompressor:
     '''
     TCR compression takes the form header+code_dict+coded_text.
     The header is always "!!8-Bit!!". The code dict is a list of 256 strings.
@@ -19,22 +16,22 @@ class TCRCompressor(object):
     value 81 which corresponds to the string in the code list at position 81.
     '''
 
-    def _reset(self):
+    def _reset(self) -> None:
         # List of indexes in the codes list that are empty and can hold new codes
-        self.unused_codes = set()
+        self.unused_codes: set[int] = set()
         self.coded_txt = b''
         # Generate initial codes from text.
         # The index of the list will be the code that represents the characters at that location
         # in the list
-        self.codes = []
+        self.codes: list[bytes] = []
 
-    def _combine_codes(self):
-        '''
+    def _combine_codes(self) -> None:
+        """
         Combine two codes that always appear in pair into a single code.
         The intent is to create more unused codes.
-        '''
+        """
         possible_codes = []
-        a_code = set(re.findall(b'(?ms).', self.coded_txt))
+        a_code = set(re.findall(rb'(?ms).', self.coded_txt))
 
         for code in a_code:
             single_code = set(re.findall(b'(?ms)%s.' % re.escape(code), self.coded_txt))
@@ -45,21 +42,21 @@ class TCRCompressor(object):
             self.coded_txt = self.coded_txt.replace(code, code[0:1])
             self.codes[code[0]] = b'%s%s' % (self.codes[code[0]], self.codes[code[1]])
 
-    def _free_unused_codes(self):
-        '''
+    def _free_unused_codes(self) -> None:
+        """
         Look for codes that do no not appear in the coded text and add them to
         the list of free codes.
-        '''
+        """
         for i in range(256):
             if i not in self.unused_codes:
                 if int_to_byte(i) not in self.coded_txt:
                     self.unused_codes.add(i)
 
-    def _new_codes(self):
-        '''
+    def _new_codes(self) -> list[bytes]:
+        """
         Create new codes from codes that occur in pairs often.
-        '''
-        possible_new_codes = list(set(re.findall(b'(?ms)..', self.coded_txt)))
+        """
+        possible_new_codes = list(set(re.findall(rb'(?ms)..', self.coded_txt)))
         new_codes_count = []
 
         for c in possible_new_codes:
@@ -73,10 +70,10 @@ class TCRCompressor(object):
 
         return possible_new_codes
 
-    def compress(self, txt):
+    def compress(self, txt: bytes) -> bytes:
         self._reset()
 
-        self.codes = list(set(re.findall(b'(?ms).', txt)))
+        self.codes = list(set(re.findall(rb'(?ms).', txt)))
 
         # Replace the text with their corresponding code
         # FIXME: python3 is native bytearray, but all we want are bytes
@@ -107,21 +104,21 @@ class TCRCompressor(object):
 
         # Generate the code dictionary.
         code_dict = []
-        for i in range(0, 256):
+        for i in range(256):
             if i in self.unused_codes:
                 code_dict.append(b'\0')
             else:
                 code_dict.append(int_to_byte(len(self.codes[i])) + self.codes[i])
 
         # Join the identifier with the dictionary and coded text.
-        return b'!!8-Bit!!'+b''.join(code_dict)+self.coded_txt
+        return b'!!8-Bit!!' + b''.join(code_dict) + self.coded_txt
 
 
-def decompress(stream):
+def decompress(stream: IO[bytes]) -> bytes:
     txt = []
     stream.seek(0)
     if stream.read(9) != b'!!8-Bit!!':
-        raise ValueError('File %s contains an invalid TCR header.' % stream.name)
+        raise ValueError(f'File {stream.name} contains an invalid TCR header.')
 
     # Codes that the file contents are broken down into.
     entries = []
@@ -138,6 +135,6 @@ def decompress(stream):
     return b''.join(txt)
 
 
-def compress(txt):
+def compress(txt: bytes) -> bytes:
     t = TCRCompressor()
     return t.compress(txt)

@@ -1,17 +1,20 @@
-# -*- coding: utf-8 -*-
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
+
+from typing import TYPE_CHECKING, ClassVar, cast
+
+from calibre.utils.config_base import Config, ConfigProxy, OptionValues
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from qt.core import QCheckBox, QComboBox, QLineEdit, QWidget
+
+    from calibre.gui2.device_drivers.configwidget import ConfigWidget
 
 
-__license__ = 'GPL 3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+class DeviceConfig:
+    FORMATS: ClassVar[list[str]]
 
-from calibre.utils.config_base import Config, ConfigProxy
-from polyglot.builtins import unicode_type
-
-
-class DeviceConfig(object):
-
-    HELP_MESSAGE = _('Configure Device')
+    HELP_MESSAGE = _('Configure device')
 
     #: Can be None, a string or a list of strings. When it is a string
     #: that string is used for the help text and the actual customization value
@@ -48,104 +51,112 @@ class DeviceConfig(object):
     USER_CAN_ADD_NEW_FORMATS = True
 
     @classmethod
-    def _default_save_template(cls):
+    def _default_save_template(cls) -> str:
         from calibre.library.save_to_disk import config
-        return cls.SAVE_TEMPLATE if cls.SAVE_TEMPLATE else \
-            config().parse().send_template
+
+        return cls.SAVE_TEMPLATE or config().parse().send_template
 
     @classmethod
-    def _config_base_name(cls):
+    def _config_base_name(cls) -> str:
         klass = cls if isinstance(cls, type) else cls.__class__
         return klass.__name__
 
     @classmethod
-    def _config(cls):
+    def _config(cls) -> Config:
         name = cls._config_base_name()
-        c = Config('device_drivers_%s' % name, _('settings for device drivers'))
-        c.add_opt('format_map', default=cls.FORMATS,
-                help=_('Ordered list of formats the device will accept'))
-        c.add_opt('use_subdirs', default=cls.SUPPORTS_SUB_DIRS_DEFAULT,
-                help=_('Place files in sub-directories if the device supports them'))
-        c.add_opt('read_metadata', default=True,
-                help=_('Read metadata from files on device'))
-        c.add_opt('use_author_sort', default=False,
-                help=_('Use author sort instead of author'))
-        c.add_opt('save_template', default=cls._default_save_template(),
-                help=_('Template to control how books are saved'))
-        c.add_opt('extra_customization',
-                default=cls.EXTRA_CUSTOMIZATION_DEFAULT,
-                help=_('Extra customization'))
+        c = Config(f'device_drivers_{name}', _('settings for device drivers'))
+        c.add_opt('format_map', default=cls.FORMATS, help=_('Ordered list of formats the device will accept'))
+        c.add_opt(
+            'use_subdirs',
+            default=cls.SUPPORTS_SUB_DIRS_DEFAULT,
+            help=_('Place files in sub-folders if the device supports them'),
+        )
+        c.add_opt('read_metadata', default=True, help=_('Read metadata from files on device'))
+        c.add_opt('use_author_sort', default=False, help=_('Use author sort instead of author'))
+        c.add_opt('save_template', default=cls._default_save_template(), help=_('Template to control how books are saved'))
+        c.add_opt('extra_customization', default=cls.EXTRA_CUSTOMIZATION_DEFAULT, help=_('Extra customization'))
         return c
 
     @classmethod
-    def _configProxy(cls):
+    def _configProxy(cls) -> ConfigProxy:
         return ConfigProxy(cls._config())
 
-    @classmethod
-    def config_widget(cls):
+    def config_widget(self) -> QWidget:
         from calibre.gui2.device_drivers.configwidget import ConfigWidget
-        cw = ConfigWidget(cls.settings(), cls.FORMATS, cls.SUPPORTS_SUB_DIRS,
-            cls.MUST_READ_METADATA, cls.SUPPORTS_USE_AUTHOR_SORT,
-            cls.EXTRA_CUSTOMIZATION_MESSAGE, cls, extra_customization_choices=cls.EXTRA_CUSTOMIZATION_CHOICES)
+
+        cw = ConfigWidget(
+            self.settings(),
+            self.FORMATS,
+            self.SUPPORTS_SUB_DIRS,
+            self.MUST_READ_METADATA,
+            self.SUPPORTS_USE_AUTHOR_SORT,
+            self.EXTRA_CUSTOMIZATION_MESSAGE,
+            self,
+            extra_customization_choices=self.EXTRA_CUSTOMIZATION_CHOICES,
+        )
         return cw
 
-    @classmethod
-    def save_settings(cls, config_widget):
-        proxy = cls._configProxy()
-        proxy['format_map'] = config_widget.format_map()
-        if cls.SUPPORTS_SUB_DIRS:
-            proxy['use_subdirs'] = config_widget.use_subdirs()
-        if not cls.MUST_READ_METADATA:
-            proxy['read_metadata'] = config_widget.read_metadata()
-        if cls.SUPPORTS_USE_AUTHOR_SORT:
-            proxy['use_author_sort'] = config_widget.use_author_sort()
-        if cls.EXTRA_CUSTOMIZATION_MESSAGE:
-            if isinstance(cls.EXTRA_CUSTOMIZATION_MESSAGE, list):
+    def save_settings(self, config_widget: QWidget) -> None:
+        # config_widget is the widget created by config_widget()
+        cw = cast('ConfigWidget', config_widget)
+        proxy = self._configProxy()
+        proxy['format_map'] = cw.format_map()
+        if self.SUPPORTS_SUB_DIRS:
+            proxy['use_subdirs'] = cw.use_subdirs()
+        if not self.MUST_READ_METADATA:
+            proxy['read_metadata'] = cw.read_metadata()
+        if self.SUPPORTS_USE_AUTHOR_SORT:
+            proxy['use_author_sort'] = cw.use_author_sort()
+        if self.EXTRA_CUSTOMIZATION_MESSAGE:
+            ec: list[bool | str | None] | str | None
+            if isinstance(self.EXTRA_CUSTOMIZATION_MESSAGE, list):
                 ec = []
-                for i in range(0, len(cls.EXTRA_CUSTOMIZATION_MESSAGE)):
-                    if config_widget.opt_extra_customization[i] is None:
+                # When EXTRA_CUSTOMIZATION_MESSAGE is a list, the config widget creates a list of widgets
+                widgets = cast('list[QCheckBox | QComboBox | QLineEdit | None]', cw.opt_extra_customization)
+                for i in range(len(self.EXTRA_CUSTOMIZATION_MESSAGE)):
+                    w = widgets[i]
+                    if w is None:
                         ec.append(None)
                         continue
-                    if hasattr(config_widget.opt_extra_customization[i], 'isChecked'):
-                        ec.append(config_widget.opt_extra_customization[i].isChecked())
-                    elif hasattr(config_widget.opt_extra_customization[i], 'currentText'):
-                        ec.append(unicode_type(config_widget.opt_extra_customization[i].currentText()).strip())
+                    if hasattr(w, 'isChecked'):
+                        ec.append(cast('QCheckBox', w).isChecked())
+                    elif hasattr(w, 'currentText'):
+                        ec.append(str(cast('QComboBox', w).currentText()).strip())
                     else:
-                        ec.append(unicode_type(config_widget.opt_extra_customization[i].text()).strip())
+                        ec.append(str(cast('QLineEdit', w).text()).strip())
             else:
-                ec = unicode_type(config_widget.opt_extra_customization.text()).strip()
+                ec = str(cast('QLineEdit', cw.opt_extra_customization).text()).strip()
                 if not ec:
                     ec = None
             proxy['extra_customization'] = ec
-        st = unicode_type(config_widget.opt_save_template.text())
+        st = str(cw.opt_save_template.text())
         proxy['save_template'] = st
 
     @classmethod
-    def migrate_extra_customization(cls, vals):
+    def migrate_extra_customization(cls, vals: list[object]) -> list[object]:
         return vals
 
     @classmethod
-    def settings(cls):
+    def settings(cls) -> OptionValues:
         opts = cls._config().parse()
         if isinstance(cls.EXTRA_CUSTOMIZATION_DEFAULT, list):
             if opts.extra_customization is None:
                 opts.extra_customization = []
             if not isinstance(opts.extra_customization, list):
                 opts.extra_customization = [opts.extra_customization]
-            for i,d in enumerate(cls.EXTRA_CUSTOMIZATION_DEFAULT):
+            for i, d in enumerate(cls.EXTRA_CUSTOMIZATION_DEFAULT):
                 if i >= len(opts.extra_customization):
                     opts.extra_customization.append(d)
             opts.extra_customization = cls.migrate_extra_customization(opts.extra_customization)
         return opts
 
     @classmethod
-    def save_template(cls):
+    def save_template(cls) -> str:
         st = cls.settings().save_template
         if st:
             return st
         else:
             return cls._default_save_template()
 
-    @classmethod
-    def customization_help(cls, gui=False):
-        return cls.HELP_MESSAGE
+    def customization_help(self, gui: bool = False) -> str:
+        return self.HELP_MESSAGE

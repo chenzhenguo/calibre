@@ -1,19 +1,21 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-import codecs, zlib, numbers
-from io import BytesIO
+import codecs
+import numbers
+from compression import zlib
 from datetime import datetime
+from io import BytesIO
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from calibre.utils.logging import default_log
-from polyglot.builtins import iteritems, unicode_type, codepoint_to_chr
-from polyglot.binary import as_hex_bytes
 from calibre_extensions.speedup import pdf_float
+from polyglot.binary import as_hex_bytes
+
+if TYPE_CHECKING:
+    from collections.abc import Buffer
+
+    from calibre.utils.logging import Log
 
 EOL = b'\n'
 
@@ -25,81 +27,88 @@ pica = 12.0
 didot = 0.375 * mm
 cicero = 12 * didot
 
-_W, _H = (21*cm, 29.7*cm)
+_W, _H = (21 * cm, 29.7 * cm)
 
-A6 = (_W*.5, _H*.5)
-A5 = (_H*.5, _W)
+A6 = (_W * 0.5, _H * 0.5)
+A5 = (_H * 0.5, _W)
 A4 = (_W, _H)
-A3 = (_H, _W*2)
-A2 = (_W*2, _H*2)
-A1 = (_H*2, _W*4)
-A0 = (_W*4, _H*4)
+A3 = (_H, _W * 2)
+A2 = (_W * 2, _H * 2)
+A1 = (_H * 2, _W * 4)
+A0 = (_W * 4, _H * 4)
 
-LETTER = (8.5*inch, 11*inch)
-LEGAL = (8.5*inch, 14*inch)
-ELEVENSEVENTEEN = (11*inch, 17*inch)
+LETTER = (8.5 * inch, 11 * inch)
+LEGAL = (8.5 * inch, 14 * inch)
+ELEVENSEVENTEEN = (11 * inch, 17 * inch)
 
-_BW, _BH = (25*cm, 35.3*cm)
-B6 = (_BW*.5, _BH*.5)
-B5 = (_BH*.5, _BW)
+_BW, _BH = (25 * cm, 35.3 * cm)
+B6 = (_BW * 0.5, _BH * 0.5)
+B5 = (_BH * 0.5, _BW)
 B4 = (_BW, _BH)
-B3 = (_BH*2, _BW)
-B2 = (_BW*2, _BH*2)
-B1 = (_BH*4, _BW*2)
-B0 = (_BW*4, _BH*4)
+B3 = (_BH * 2, _BW)
+B2 = (_BW * 2, _BH * 2)
+B1 = (_BH * 4, _BW * 2)
+B0 = (_BW * 4, _BH * 4)
 
-PAPER_SIZES = {k:globals()[k.upper()] for k in ('a0 a1 a2 a3 a4 a5 a6 b0 b1 b2'
-               ' b3 b4 b5 b6 letter legal').split()}
+PAPER_SIZES = {k: globals()[k.upper()] for k in ('a0 a1 a2 a3 a4 a5 a6 b0 b1 b2 b3 b4 b5 b6 letter legal').split()}
 
 # }}}
 
 
-def fmtnum(o):
+class PDFOutputStream(Protocol):
+    def write(self, raw: bytes | str, /) -> object: ...
+
+    def write_raw(self, raw: bytes, /) -> object: ...
+
+
+class PDFSerializable(Protocol):
+    def pdf_serialize(self, stream: PDFOutputStream) -> None: ...
+
+
+def fmtnum(o: object) -> str:
     if isinstance(o, float):
         return pdf_float(o)
-    return unicode_type(o)
+    return str(o)
 
 
-def serialize(o, stream):
+def serialize(o: object, stream: PDFOutputStream) -> None:
     if isinstance(o, float):
         stream.write_raw(pdf_float(o).encode('ascii'))
     elif isinstance(o, bool):
         # Must check bool before int as bools are subclasses of int
         stream.write_raw(b'true' if o else b'false')
     elif isinstance(o, numbers.Integral):
-        stream.write_raw(unicode_type(o).encode('ascii'))
+        stream.write_raw(str(o).encode('ascii'))
     elif hasattr(o, 'pdf_serialize'):
-        o.pdf_serialize(stream)
+        # hasattr() above guarantees this is one of the PDF object classes below
+        cast('PDFSerializable', o).pdf_serialize(stream)
     elif o is None:
         stream.write_raw(b'null')
     elif isinstance(o, datetime):
-        val = o.strftime("D:%Y%m%d%H%M%%02d%z")%min(59, o.second)
+        val = o.strftime('D:%Y%m%d%H%M%%02d%z') % min(59, o.second)
         if datetime.tzinfo is not None:
-            val = "(%s'%s')"%(val[:-2], val[-2:])
+            val = f"({val[:-2]}'{val[-2:]}')"
         stream.write(val.encode('ascii'))
     else:
-        raise ValueError('Unknown object: %r'%o)
+        raise ValueError(f'Unknown object: {o!r}')
 
 
-class Name(unicode_type):
-
-    def pdf_serialize(self, stream):
+class Name(str):
+    def pdf_serialize(self, stream: PDFOutputStream) -> None:
         raw = self.encode('ascii')
         if len(raw) > 126:
-            raise ValueError('Name too long: %r'%self)
+            raise ValueError(f'Name too long: {self!r}')
         raw = bytearray(raw)
         sharp = ord(b'#')
-        buf = (
-            codepoint_to_chr(x).encode('ascii') if 33 < x < 126 and x != sharp else
-            '#{:x}'.format(x).encode('ascii') for x in raw)
-        stream.write(b'/'+b''.join(buf))
+        buf = (chr(x).encode('ascii') if 33 < x < 126 and x != sharp else f'#{x:x}'.encode('ascii') for x in raw)
+        stream.write(b'/' + b''.join(buf))
 
 
-def escape_pdf_string(bytestring):
-    indices = []
-    bad = []
+def escape_pdf_string(bytestring: bytes) -> bytes:
+    indices: list[tuple[int, int]] = []
+    bad: list[tuple[int, int]] = []
     ba = bytearray(bytestring)
-    bad_map = {10:ord('n'), 13:ord('r'), 12:ord('f'), 8:ord('b'), 9:ord('\t'), 92:ord('\\')}
+    bad_map = {10: ord('n'), 13: ord('r'), 12: ord('f'), 8: ord('b'), 9: ord('\t'), 92: ord('\\')}
     for i, num in enumerate(ba):
         if num == 40:  # (
             indices.append((i, 40))
@@ -114,41 +123,36 @@ def escape_pdf_string(bytestring):
     if not bad:
         return bytestring
     for i, repl in bad:
-        ba[i:i+1] = (92, repl)  # 92 = ord('\')
+        ba[i : i + 1] = (92, repl)  # 92 = ord('\')
     return bytes(ba)
 
 
-class String(unicode_type):
-
-    def pdf_serialize(self, stream):
+class String(str):
+    def pdf_serialize(self, stream: PDFOutputStream) -> None:
         try:
             raw = self.encode('latin1')
             if raw.startswith(codecs.BOM_UTF16_BE):
                 raw = codecs.BOM_UTF16_BE + self.encode('utf-16-be')
         except UnicodeEncodeError:
             raw = codecs.BOM_UTF16_BE + self.encode('utf-16-be')
-        stream.write(b'('+escape_pdf_string(raw)+b')')
+        stream.write(b'(' + escape_pdf_string(raw) + b')')
 
 
-class UTF16String(unicode_type):
-
-    def pdf_serialize(self, stream):
+class UTF16String(str):
+    def pdf_serialize(self, stream: PDFOutputStream) -> None:
         raw = codecs.BOM_UTF16_BE + self.encode('utf-16-be')
         if False:
             # Disabled as the parentheses based strings give easier to debug
             # PDF files
             stream.write(b'<' + as_hex_bytes(raw) + b'>')
         else:
-            stream.write(b'('+escape_pdf_string(raw)+b')')
+            stream.write(b'(' + escape_pdf_string(raw) + b')')
 
 
 class Dictionary(dict):
-
-    def pdf_serialize(self, stream):
+    def pdf_serialize(self, stream: PDFOutputStream) -> None:
         stream.write(b'<<' + EOL)
-        sorted_keys = sorted(self,
-                             key=lambda x:({'Type':'1', 'Subtype':'2'}.get(
-                                 x, x)+x))
+        sorted_keys = sorted(self, key=lambda x: {'Type': '1', 'Subtype': '2'}.get(x, x) + x)
         for k in sorted_keys:
             serialize(Name(k), stream)
             stream.write(b' ')
@@ -158,10 +162,9 @@ class Dictionary(dict):
 
 
 class InlineDictionary(Dictionary):
-
-    def pdf_serialize(self, stream):
+    def pdf_serialize(self, stream: PDFOutputStream) -> None:
         stream.write(b'<< ')
-        for k, v in iteritems(self):
+        for k, v in self.items():
             serialize(Name(k), stream)
             stream.write(b' ')
             serialize(v, stream)
@@ -170,8 +173,7 @@ class InlineDictionary(Dictionary):
 
 
 class Array(list):
-
-    def pdf_serialize(self, stream):
+    def pdf_serialize(self, stream: PDFOutputStream) -> None:
         stream.write(b'[')
         for i, o in enumerate(self):
             if i != 0:
@@ -181,16 +183,15 @@ class Array(list):
 
 
 class Stream(BytesIO):
-
-    def __init__(self, compress=False):
+    def __init__(self, compress: bool = False) -> None:
         BytesIO.__init__(self)
         self.compress = compress
         self.filters = Array()
 
-    def add_extra_keys(self, d):
+    def add_extra_keys(self, d: Dictionary) -> None:
         pass
 
-    def pdf_serialize(self, stream):
+    def pdf_serialize(self, stream: PDFOutputStream) -> None:
         raw = self.getvalue()
         dl = len(raw)
         filters = self.filters
@@ -198,48 +199,49 @@ class Stream(BytesIO):
             filters.append(Name('FlateDecode'))
             raw = zlib.compress(raw)
 
-        d = InlineDictionary({'Length':len(raw), 'DL':dl})
+        d = InlineDictionary({'Length': len(raw), 'DL': dl})
         self.add_extra_keys(d)
         if filters:
             d['Filter'] = filters
         serialize(d, stream)
-        stream.write(EOL+b'stream'+EOL)
+        stream.write(EOL + b'stream' + EOL)
         stream.write(raw)
-        stream.write(EOL+b'endstream'+EOL)
+        stream.write(EOL + b'endstream' + EOL)
 
-    def write_line(self, raw=b''):
+    def write_line(self, raw: bytes | str = b'') -> None:
         self.write(raw if isinstance(raw, bytes) else raw.encode('ascii'))
         self.write(EOL)
 
-    def write(self, raw):
-        super(Stream, self).write(raw if isinstance(raw, bytes) else
-                                  raw.encode('ascii'))
+    def write(self, raw: Buffer | str) -> int:
+        return super().write(raw.encode('ascii') if isinstance(raw, str) else raw)
 
-    def write_raw(self, raw):
+    def write_raw(self, raw: bytes) -> None:
         BytesIO.write(self, raw)
 
 
-class Reference(object):
+class Reference[T]:
+    def __init__(self, num: int, obj: T) -> None:
+        self.num: Final = num
+        self.obj: Final = obj
 
-    def __init__(self, num, obj):
-        self.num, self.obj = num, obj
-
-    def pdf_serialize(self, stream):
-        raw = '%d 0 R'%self.num
+    def pdf_serialize(self, stream: PDFOutputStream) -> None:
+        raw = f'{self.num} 0 R'
         stream.write(raw.encode('ascii'))
 
-    def __repr__(self):
-        return '%d 0 R'%self.num
+    def __repr__(self) -> str:
+        return f'{self.num} 0 R'
 
-    def __str__(self):
+    def __str__(self) -> str:
         return repr(self)
+
+
 # }}}
 
+_current_log_ans: Log | None = None
 
-def current_log(newlog=None):
+
+def current_log(newlog: Log | None = None) -> Log:
+    global _current_log_ans
     if newlog:
-        current_log.ans = newlog
-    return current_log.ans or default_log
-
-
-current_log.ans = None
+        _current_log_ans = newlog
+    return _current_log_ans or default_log

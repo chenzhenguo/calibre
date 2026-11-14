@@ -1,13 +1,23 @@
-__license__ = 'GPL 3'
-__copyright__ = '2009, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
 
-import socket, time, atexit
+import atexit
+import socket
+import time
 from collections import defaultdict
 from threading import Thread
+from typing import TYPE_CHECKING
 
-from calibre.utils.filenames import ascii_text
 from calibre import force_unicode
+from calibre.utils.filenames import ascii_text
+
+if TYPE_CHECKING:
+    from typing import Protocol
+
+    from zeroconf import ServiceInfo, Zeroconf
+
+    class Joinable(Protocol):
+        def __call__(self, timeout: float | None = None) -> None: ...
+
 
 _server = None
 
@@ -15,12 +25,12 @@ _all_ip_addresses = {}
 
 
 class AllIpAddressesGetter(Thread):
-
-    def get_all_ips(self):
-        ''' Return a mapping of interface names to the configuration of the
+    def get_all_ips(self) -> dict[str, list[dict[str, str]]]:
+        """Return a mapping of interface names to the configuration of the
         interface, which includes the ip address, netmask and broadcast addresses
-        '''
-        import netifaces
+        """
+        import netifaces  # type: ignore
+
         all_ips = defaultdict(list)
         if hasattr(netifaces, 'AF_INET'):
             for x in netifaces.interfaces():
@@ -29,26 +39,27 @@ class AllIpAddressesGetter(Thread):
                         all_ips[x].append(c)
                 except ValueError:
                     from calibre import prints
+
                     prints('Failed to get IP addresses for interface', x)
                     import traceback
+
                     traceback.print_exc()
         return dict(all_ips)
 
-    def run(self):
+    def run(self) -> None:
         global _all_ip_addresses
-#        print 'sleeping'
-#        time.sleep(15)
-#        print 'slept'
+        # print('sleeping')
+        # time.sleep(15)
+        # print('slept')
         _all_ip_addresses = self.get_all_ips()
 
 
 _ip_address_getter_thread = None
 
 
-def get_all_ips(reinitialize=False):
+def get_all_ips(reinitialize: bool = False) -> dict[str, list[dict[str, str]]]:
     global _all_ip_addresses, _ip_address_getter_thread
-    if not _ip_address_getter_thread or (reinitialize and not
-                                         _ip_address_getter_thread.is_alive()):
+    if not _ip_address_getter_thread or (reinitialize and not _ip_address_getter_thread.is_alive()):
         _all_ip_addresses = {}
         _ip_address_getter_thread = AllIpAddressesGetter()
         _ip_address_getter_thread.daemon = True
@@ -56,8 +67,8 @@ def get_all_ips(reinitialize=False):
     return _all_ip_addresses
 
 
-def _get_external_ip():
-    'Get IP address of interface used to connect to the outside world'
+def _get_external_ip() -> str:
+    "Get IP address of interface used to connect to the outside world"
     try:
         ipaddr = socket.gethostbyname(socket.gethostname())
     except Exception:
@@ -70,33 +81,38 @@ def _get_external_ip():
                 ipaddr = s.getsockname()[0]
                 if not ipaddr.startswith('127.'):
                     break
-            except:
+            except Exception:
                 time.sleep(0.3)
-    # print 'ipaddr: %s' % ipaddr
+    # print('ipaddr: %s' % ipaddr)
     return ipaddr
-
-
-def verify_ipV4_address(ip_address):
-    result = None
-    if ip_address != '0.0.0.0' and ip_address != '::':
-        # do some more sanity checks on the address
-        try:
-            socket.inet_aton(ip_address)
-            if len(ip_address.split('.')) == 4:
-                result = ip_address
-        except (socket.error, OSError):
-            # Not legal ip address
-            pass
-    return result
 
 
 _ext_ip = None
 
 
-def get_external_ip():
+def verify_ip_address(addr: str | None) -> str:
+    result = ''
+    if addr and addr not in ('0.0.0.0', '::'):
+        try:
+            socket.inet_pton(socket.AF_INET6, addr)
+        except Exception:
+            try:
+                socket.inet_pton(socket.AF_INET, addr)
+            except Exception:
+                pass
+            else:
+                if len(addr.split('.')) == 4:
+                    result = addr
+        else:
+            result = addr
+    return result
+
+
+def get_external_ip() -> str:
     global _ext_ip
     if _ext_ip is None:
         from calibre.utils.ip_routing import get_default_route_src_address
+
         try:
             _ext_ip = get_default_route_src_address() or _get_external_ip()
         except Exception:
@@ -104,10 +120,11 @@ def get_external_ip():
     return _ext_ip
 
 
-def start_server():
+def start_server() -> Zeroconf:
     global _server
     if _server is None:
         from zeroconf import Zeroconf
+
         try:
             _server = Zeroconf()
         except Exception:
@@ -119,20 +136,34 @@ def start_server():
     return _server
 
 
-def create_service(desc, service_type, port, properties, add_hostname, use_ip_address=None):
+def inet_aton(addr: str) -> bytes:
+    try:
+        return socket.inet_pton(socket.AF_INET6, addr)
+    except Exception:
+        return socket.inet_pton(socket.AF_INET, addr)
+
+
+def create_service(
+    desc: str,
+    service_type: str,
+    port: int | str,
+    properties: dict[str, str] | None,
+    add_hostname: bool,
+    use_ip_address: str | None = None,
+) -> ServiceInfo:
     port = int(port)
     try:
         hostname = ascii_text(force_unicode(socket.gethostname())).partition('.')[0]
-    except:
+    except Exception:
         hostname = 'Unknown'
 
     if add_hostname:
         try:
-            desc += ' (on %s port %d)'%(hostname, port)
-        except:
+            desc += f' (on {hostname} port {port})'
+        except Exception:
             try:
-                desc += ' (on %s)'%hostname
-            except:
+                desc += f' (on {hostname})'
+            except Exception:
                 pass
 
     if use_ip_address:
@@ -141,21 +172,33 @@ def create_service(desc, service_type, port, properties, add_hostname, use_ip_ad
         local_ip = get_external_ip()
     if not local_ip:
         raise ValueError('Failed to determine local IP address to advertise via BonJour')
-    service_type = service_type+'.local.'
+    service_type = service_type + '.local.'
     service_name = desc + '.' + service_type
-    server_name = hostname+'.local.'
+    server_name = hostname + '.local.'
     from zeroconf import ServiceInfo
 
     return ServiceInfo(
-        service_type, service_name,
-        addresses=[socket.inet_aton(local_ip),],
+        service_type,
+        service_name,
+        addresses=[
+            inet_aton(local_ip),
+        ],
         port=port,
-        properties=properties,
-        server=server_name)
+        properties=b'' if properties is None else properties,
+        server=server_name,
+    )
 
 
-def publish(desc, service_type, port, properties=None, add_hostname=True, use_ip_address=None):
-    '''
+def publish(
+    desc: str,
+    service_type: str,
+    port: int | str,
+    properties: dict[str, str] | None = None,
+    add_hostname: bool = True,
+    use_ip_address: str | None = None,
+    strict: bool = True,
+) -> ServiceInfo:
+    """
     Publish a service.
 
     :param desc: Description of service
@@ -163,28 +206,35 @@ def publish(desc, service_type, port, properties=None, add_hostname=True, use_ip
     :param port: Port the service listens on
     :param properties: An optional dictionary whose keys and values will be put
                        into the TXT record.
-    '''
+    """
     server = start_server()
-    service = create_service(desc, service_type, port, properties, add_hostname,
-                             use_ip_address)
-    server.register_service(service)
+    service = create_service(desc, service_type, port, properties, add_hostname, use_ip_address)
+    server.register_service(service, strict=strict)
     return service
 
 
-def unpublish(desc, service_type, port, properties=None, add_hostname=True, wait_for_stop=True):
-    '''
+def unpublish(
+    desc: str,
+    service_type: str,
+    port: int | str,
+    properties: dict[str, str] | None = None,
+    add_hostname: bool = True,
+    wait_for_stop: bool | float = True,
+) -> None:
+    """
     Unpublish a service.
 
     The parameters must be the same as used in the corresponding call to publish
-    '''
+    """
     server = start_server()
     service = create_service(desc, service_type, port, properties, add_hostname)
+    num_services = len(server.registry.async_get_service_infos())
     server.unregister_service(service)
-    if len(server.services) == 0:
+    if num_services < 2:
         stop_server(wait_for_stop=wait_for_stop)
 
 
-def stop_server(wait_for_stop=True):
+def stop_server(wait_for_stop: bool | float = True) -> None:
     global _server
     srv = _server
     _server = None
@@ -197,3 +247,21 @@ def stop_server(wait_for_stop=True):
                 t.join()
             else:
                 t.join(wait_for_stop)
+
+
+def stop_server_with_joinable() -> Joinable:
+    global _server
+    srv, _server = _server, None
+    if srv is None:
+
+        def fake_join(timeout: float | None = None) -> None:
+            pass
+
+        return fake_join
+
+    def shutdown() -> None:
+        srv.close()
+
+    t = Thread(target=shutdown, name='CloseMDNSServer', daemon=True)
+    t.start()
+    return t.join

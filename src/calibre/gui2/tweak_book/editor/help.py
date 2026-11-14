@@ -1,23 +1,18 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
 import json
 from functools import partial
 
-from lxml import html
-
 from calibre import browser
 from calibre.ebooks.oeb.polish.container import OEB_DOCS
 from calibre.ebooks.oeb.polish.utils import guess_type
+from calibre.utils.resources import get_path as P
+from calibre.utils.xml_parse import safe_html_fromstring
 
 
-class URLMap(object):
-
-    def __init__(self):
+class URLMap:
+    def __init__(self) -> None:
         self.cache = {}
 
     def __getitem__(self, key):
@@ -25,9 +20,9 @@ class URLMap(object):
             return self.cache[key]
         except KeyError:
             try:
-                self.cache[key] = ans = json.loads(P('editor-help/%s.json' % key, data=True))
-            except EnvironmentError:
-                raise KeyError('The mapping %s is not available' % key)
+                self.cache[key] = ans = json.loads(P(f'editor-help/{key}.json', data=True))
+            except OSError:
+                raise KeyError(f'The mapping {key} is not available')
             return ans
 
 
@@ -68,17 +63,17 @@ def help_url(item, item_type, doc_name, extra_data=None):
 
 
 def get_mdn_tag_index(category):
-    url = 'https://developer.mozilla.org/docs/Web/%s/Element' % category
+    url = f'https://developer.mozilla.org/docs/Web/{category}/Element'
     if category == 'CSS':
         url = url.replace('Element', 'Reference')
     br = browser()
     raw = br.open(url).read()
-    root = html.fromstring(raw)
+    root = safe_html_fromstring(raw)
     ans = {}
     if category == 'CSS':
         xpath = '//div[@class="index"]/descendant::a[contains(@href, "/Web/CSS/")]/@href'
     else:
-        xpath = '//a[contains(@href, "/%s/Element/")]/@href' % category
+        xpath = f'//a[contains(@href, "/{category}/Element/")]/@href'
     for href in root.xpath(xpath):
         href = href.replace('/en-US/', '/')
         ans[href.rpartition('/')[-1].lower()] = 'https://developer.mozilla.org' + href
@@ -89,16 +84,40 @@ def get_opf2_tag_index():
     base = 'http://www.idpf.org/epub/20/spec/OPF_2.0.1_draft.htm#'
     ans = {}
     for i, tag in enumerate(('package', 'metadata', 'manifest', 'spine', 'tours', 'guide')):
-        ans[tag] = base + 'Section2.%d' % (i + 1)
+        ans[tag] = base + f'Section2.{i + 1}'
     for i, tag in enumerate((
-            'title', 'creator', 'subject', 'description', 'publisher',
-            'contributor', 'date', 'type', 'format', 'identifier', 'source',
-            'language', 'relation', 'coverage', 'rights')):
-        ans[tag] = base + 'Section2.2.%d' % (i + 1)
+        'title',
+        'creator',
+        'subject',
+        'description',
+        'publisher',
+        'contributor',
+        'date',
+        'type',
+        'format',
+        'identifier',
+        'source',
+        'language',
+        'relation',
+        'coverage',
+        'rights',
+    )):
+        ans[tag] = base + f'Section2.2.{i + 1}'
     ans['item'] = ans['manifest']
     ans['itemref'] = ans['spine']
     ans['reference'] = ans['guide']
-    for tag in ('ncx', 'docTitle', 'docAuthor', 'navMap', 'navPoint', 'navLabel', 'text', 'content', 'pageList', 'pageTarget'):
+    for tag in (
+        'ncx',
+        'docTitle',
+        'docAuthor',
+        'navMap',
+        'navPoint',
+        'navLabel',
+        'text',
+        'content',
+        'pageList',
+        'pageTarget',
+    ):
         ans[tag.lower()] = base + 'Section2.4.1.2'
     return ans
 
@@ -107,29 +126,48 @@ def get_opf3_tag_index():
     base = 'http://www.idpf.org/epub/301/spec/epub-publications.html#'
     ans = {}
     for tag in (
-            'package', 'metadata', 'identifier', 'title', 'language', 'meta',
-            'link', 'manifest', 'item', 'spine', 'itemref', 'guide',
-            'bindings', 'mediaType', 'collection'):
-        ans[tag.lower()] = base + 'sec-%s-elem' % tag
-    for tag in ('contributor', 'creator', 'date', 'source', 'type',):
+        'package',
+        'metadata',
+        'identifier',
+        'title',
+        'language',
+        'meta',
+        'link',
+        'manifest',
+        'item',
+        'spine',
+        'itemref',
+        'guide',
+        'bindings',
+        'mediaType',
+        'collection',
+    ):
+        ans[tag.lower()] = base + f'sec-{tag}-elem'
+    for tag in (
+        'contributor',
+        'creator',
+        'date',
+        'source',
+        'type',
+    ):
         ans[tag.lower()] = base + 'sec-opf-dc' + tag
     return ans
 
 
-def write_tag_help():
+def write_tag_help() -> None:
     base = 'editor-help/%s.json'
     dump = partial(json.dumps, indent=2, sort_keys=True)
 
     for category in ('HTML', 'SVG', 'MathML', 'CSS'):
         data = get_mdn_tag_index(category)
         with open(P(base % category.lower()), 'wb') as f:
-            f.write(dump(data))
+            f.write(dump(data).encode())
 
     with open(P(base % 'opf2'), 'wb') as f:
-        f.write(dump(get_opf2_tag_index()))
+        f.write(dump(get_opf2_tag_index()).encode())
 
     with open(P(base % 'opf3'), 'wb') as f:
-        f.write(dump(get_opf3_tag_index()))
+        f.write(dump(get_opf3_tag_index()).encode())
 
 
 if __name__ == '__main__':

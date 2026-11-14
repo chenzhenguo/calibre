@@ -1,24 +1,17 @@
 #!/usr/bin/env python
+# License: GPLv3 Copyright: 2008, Kovid Goyal kovid@kovidgoyal.net
 
+from qt.core import QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QIcon, QLabel, QLineEdit, QSpinBox, QToolButton
 
-__copyright__ = '2008, Kovid Goyal kovid@kovidgoyal.net'
-__docformat__ = 'restructuredtext en'
-__license__   = 'GPL v3'
-
-
-from PyQt5.Qt import (
-    QDialog, QGridLayout, QLabel, QDialogButtonBox,  QApplication, QSpinBox,
-    QToolButton, QIcon, QLineEdit, QComboBox, QCheckBox)
 from calibre.ebooks.metadata import string_to_authors
+from calibre.gui2 import gprefs
 from calibre.gui2.complete2 import EditWithComplete
 from calibre.utils.config import tweaks
-from calibre.gui2 import gprefs
-from polyglot.builtins import unicode_type
+from calibre.utils.localization import _
 
 
 class AddEmptyBookDialog(QDialog):
-
-    def __init__(self, parent, db, author, series=None, title=None, dup_title=None):
+    def __init__(self, parent, db, author, series=None, title=None, dup_title=None) -> None:
         QDialog.__init__(self, parent)
         self.db = db
 
@@ -39,14 +32,13 @@ class AddEmptyBookDialog(QDialog):
         self._layout.addWidget(self.author_label, 2, 0, 1, 2)
 
         self.authors_combo = EditWithComplete(self)
-        self.authors_combo.setSizeAdjustPolicy(
-                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.authors_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.authors_combo.setEditable(True)
         self._layout.addWidget(self.authors_combo, 3, 0, 1, 1)
         self.initialize_authors(db, author)
 
         self.clear_button = QToolButton(self)
-        self.clear_button.setIcon(QIcon(I('trash.png')))
+        self.clear_button.setIcon(QIcon.ic('trash.png'))
         self.clear_button.setToolTip(_('Reset author to Unknown'))
         self.clear_button.clicked.connect(self.reset_author)
         self._layout.addWidget(self.clear_button, 3, 1, 1, 1)
@@ -55,14 +47,13 @@ class AddEmptyBookDialog(QDialog):
         self._layout.addWidget(self.series_label, 4, 0, 1, 2)
 
         self.series_combo = EditWithComplete(self)
-        self.series_combo.setSizeAdjustPolicy(
-                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.series_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.series_combo.setEditable(True)
         self._layout.addWidget(self.series_combo, 5, 0, 1, 1)
         self.initialize_series(db, series)
 
         self.sclear_button = QToolButton(self)
-        self.sclear_button.setIcon(QIcon(I('trash.png')))
+        self.sclear_button.setIcon(QIcon.ic('trash.png'))
         self.sclear_button.setToolTip(_('Reset series'))
         self.sclear_button.clicked.connect(self.reset_series)
         self._layout.addWidget(self.sclear_button, 5, 1, 1, 1)
@@ -75,7 +66,7 @@ class AddEmptyBookDialog(QDialog):
         self._layout.addWidget(self.title_edit, 7, 0, 1, 1)
 
         self.tclear_button = QToolButton(self)
-        self.tclear_button.setIcon(QIcon(I('trash.png')))
+        self.tclear_button.setIcon(QIcon.ic('trash.png'))
         self.tclear_button.setToolTip(_('Reset title'))
         self.tclear_button.clicked.connect(self.title_edit.clear)
         self._layout.addWidget(self.tclear_button, 7, 1, 1, 1)
@@ -84,6 +75,7 @@ class AddEmptyBookDialog(QDialog):
         self._layout.addWidget(self.format_label, 8, 0, 1, 2)
         c = self.format_value = QComboBox(self)
         from calibre.ebooks.oeb.polish.create import valid_empty_formats
+
         possible_formats = [''] + sorted(x.upper() for x in valid_empty_formats)
         c.addItems(possible_formats)
         c.setToolTip(_('Also create an empty book format file that you can subsequently edit'))
@@ -99,9 +91,7 @@ class AddEmptyBookDialog(QDialog):
         self._layout.addWidget(c, 9, 0, 1, 1)
 
         self.copy_formats = cf = QCheckBox(_('Also copy book &formats when duplicating a book'), self)
-        cf.setToolTip(_(
-            'Also copy all e-book files into the newly created duplicate'
-            ' books.'))
+        cf.setToolTip(_('Also copy all e-book files into the newly created duplicate books.'))
         cf.setChecked(gprefs.get('create_empty_copy_dup_formats', False))
         self._layout.addWidget(cf, 10, 0, 1, -1)
 
@@ -111,16 +101,14 @@ class AddEmptyBookDialog(QDialog):
         self._layout.addWidget(button_box, 11, 0, 1, -1)
         if dup_title:
             self.dup_button = b = button_box.addButton(_('&Duplicate current book'), QDialogButtonBox.ButtonRole.ActionRole)
+            assert b is not None
             b.clicked.connect(self.do_duplicate_book)
-            b.setIcon(QIcon(I('edit-copy.png')))
-            b.setToolTip(_(
-                'Make the new empty book records exact duplicates\n'
-                'of the current book "%s", with all metadata identical'
-            ) % dup_title)
+            b.setIcon(QIcon.ic('edit-copy.png'))
+            b.setToolTip(_('Make the new empty book records exact duplicates\nof the current book "%s", with all metadata identical') % dup_title)
         self.resize(self.sizeHint())
         self.duplicate_current_book = False
 
-    def do_duplicate_book(self):
+    def do_duplicate_book(self) -> None:
         self.duplicate_current_book = True
         self.accept()
 
@@ -128,7 +116,7 @@ class AddEmptyBookDialog(QDialog):
         self.save_settings()
         return QDialog.accept(self)
 
-    def save_settings(self):
+    def save_settings(self) -> None:
         gprefs['create_empty_format_file'] = self.format_value.currentText().lower()
         gprefs['create_empty_copy_dup_formats'] = self.copy_formats.isChecked()
 
@@ -136,13 +124,13 @@ class AddEmptyBookDialog(QDialog):
         self.save_settings()
         return QDialog.reject(self)
 
-    def reset_author(self, *args):
+    def reset_author(self, *args) -> None:
         self.authors_combo.setEditText(_('Unknown'))
 
-    def reset_series(self):
+    def reset_series(self) -> None:
         self.series_combo.setEditText('')
 
-    def initialize_authors(self, db, author):
+    def initialize_authors(self, db, author) -> None:
         au = author
         if not au:
             au = _('Unknown')
@@ -153,7 +141,7 @@ class AddEmptyBookDialog(QDialog):
         self.authors_combo.set_add_separator(tweaks['authors_completer_append_separator'])
         self.authors_combo.update_items_cache(db.all_author_names())
 
-    def initialize_series(self, db, series):
+    def initialize_series(self, db, series) -> None:
         self.series_combo.show_initial_value(series or '')
         self.series_combo.update_items_cache(db.all_series_names())
         self.series_combo.set_separator(None)
@@ -164,11 +152,11 @@ class AddEmptyBookDialog(QDialog):
 
     @property
     def selected_authors(self):
-        return string_to_authors(unicode_type(self.authors_combo.text()))
+        return string_to_authors(str(self.authors_combo.text()))
 
     @property
     def selected_series(self):
-        return unicode_type(self.series_combo.text())
+        return str(self.series_combo.text())
 
     @property
     def selected_title(self):
@@ -177,7 +165,8 @@ class AddEmptyBookDialog(QDialog):
 
 if __name__ == '__main__':
     from calibre.library import db
+
     db = db()
     app = QApplication([])
     d = AddEmptyBookDialog(None, db, 'Test Author')
-    d.exec_()
+    d.exec()

@@ -1,36 +1,98 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
 # License: GPLv3 Copyright: 2010, Kovid Goyal <kovid at kovidgoyal.net>
-
 
 import os
 import re
+import sys
 import weakref
 from collections import defaultdict
 from contextlib import contextmanager
+from functools import partial
+from threading import Thread
+from typing import TYPE_CHECKING, cast
 
 from html5_parser import parse
 from lxml import html
-from PyQt5.Qt import (
-    QAction, QApplication, QBrush, QByteArray, QCheckBox, QColor, QColorDialog,
-    QDialog, QDialogButtonBox, QFont, QFontInfo, QFontMetrics, QFormLayout,
-    QHBoxLayout, QIcon, QKeySequence, QLabel, QLineEdit, QMenu, QPalette,
-    QPlainTextEdit, QPushButton, QSize, QSyntaxHighlighter, Qt, QTabWidget,
-    QTextBlockFormat, QTextCharFormat, QTextCursor, QTextEdit, QTextListFormat,
-    QToolBar, QUrl, QVBoxLayout, QWidget, pyqtSignal, pyqtSlot, QToolButton, QTextFormat
+from qt.core import (
+    QAction,
+    QBrush,
+    QByteArray,
+    QCheckBox,
+    QColor,
+    QColorDialog,
+    QDialog,
+    QDialogButtonBox,
+    QFont,
+    QFontInfo,
+    QFontMetrics,
+    QFormLayout,
+    QHBoxLayout,
+    QIcon,
+    QKeySequence,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QPalette,
+    QPointF,
+    QPushButton,
+    QSize,
+    QSpinBox,
+    QSyntaxHighlighter,
+    Qt,
+    QTabWidget,
+    QTextBlockFormat,
+    QTextCharFormat,
+    QTextCursor,
+    QTextDocument,
+    QTextEdit,
+    QTextFormat,
+    QTextFrameFormat,
+    QTextImageFormat,
+    QTextListFormat,
+    QTimer,
+    QToolButton,
+    QUrl,
+    QVBoxLayout,
+    QWidget,
+    pyqtSignal,
+    pyqtSlot,
 )
 
-from calibre import xml_replace_entities
+from calibre import browser, fit_image, xml_replace_entities
+from calibre.db.constants import DATA_DIR_NAME
 from calibre.ebooks.chardet import xml_to_unicode
-from calibre.gui2 import NO_URL_FORMATTING, choose_files, error_dialog, gprefs, is_dark_theme
-from calibre.gui2.book_details import css
+from calibre.gui2 import (
+    NO_URL_FORMATTING,
+    FunctionDispatcher,
+    choose_dir,
+    choose_files,
+    error_dialog,
+    gprefs,
+    is_dark_theme,
+    local_path_for_resource,
+    qapplication_or_fail,
+    question_dialog,
+    safe_open_url,
+)
+from calibre.gui2.book_details import resolved_css
+from calibre.gui2.dialogs.progress import ProgressDialog
+from calibre.gui2.flow_toolbar import create_flow_toolbar
+from calibre.gui2.tweak_book.widgets import PlainTextEdit
 from calibre.gui2.widgets import LineEditECM
 from calibre.gui2.widgets2 import to_plain_text
+from calibre.startup import connect_lambda
+from calibre.utils.cleantext import clean_xml_chars
 from calibre.utils.config import tweaks
+from calibre.utils.filenames import make_long_path_useable
 from calibre.utils.imghdr import what
-from polyglot.builtins import filter, iteritems, itervalues, unicode_type
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
 
 # Cleanup Qt markup {{{
+
+OBJECT_REPLACEMENT_CHAR = '\ufffc'
 
 
 def parse_style(style):
@@ -48,19 +110,21 @@ def parse_style(style):
 liftable_props = ('font-style', 'font-weight', 'font-family', 'font-size')
 
 
-def lift_styles(tag, style_map):
+def lift_styles(tag, style_map) -> None:
     common_props = None
     has_text = bool(tag.text)
     child_styles = []
     for child in tag.iterchildren('*'):
-        if child.tail:
+        if child.tail and child.tail.strip():
             has_text = True
         style = style_map[child]
         child_styles.append(style)
+        if not child.text and len(child) == 0:
+            continue
         if common_props is None:
             common_props = style.copy()
         else:
-            for k, v in tuple(iteritems(common_props)):
+            for k, v in tuple(common_props.items()):
                 if style.get(k) != v:
                     del common_props[k]
     if not has_text and common_props:
@@ -73,41 +137,41 @@ def lift_styles(tag, style_map):
         if lifted_props:
             for style in child_styles:
                 for k in lifted_props:
-                    del style[k]
+                    style.pop(k, None)
 
 
-def filter_qt_styles(style):
+def filter_qt_styles(style) -> None:
     for k in tuple(style):
         # -qt-paragraph-type is a hack used by Qt for empty paragraphs
         if k.startswith('-qt-'):
             del style[k]
 
 
-def remove_margins(tag, style):
+def remove_margins(tag, style) -> None:
     ml, mr, mt, mb = (style.pop('margin-' + k, None) for k in 'left right top bottom'.split())
     is_blockquote = ml == mr and ml and ml != '0px' and (ml != mt or ml != mb)
     if is_blockquote:
         tag.tag = 'blockquote'
 
 
-def remove_zero_indents(style):
+def remove_zero_indents(style) -> None:
     ti = style.get('text-indent')
     if ti == '0px':
         del style['text-indent']
 
 
-def remove_heading_font_styles(tag, style):
+def remove_heading_font_styles(tag, style) -> None:
     lvl = int(tag.tag[1:])
     expected_size = (None, 'xx-large', 'x-large', 'large', None, 'small', 'x-small')[lvl]
     if style.get('font-size', 1) == expected_size:
         del style['font-size']
-    if style.get('font-weight') == '600':
+    if style.get('font-weight') in ('0', '600', '700', 'bold'):
         del style['font-weight']
 
 
-def use_implicit_styling_for_span(span, style):
+def use_implicit_styling_for_span(span, style) -> None:
     is_italic = style.get('font-style') == 'italic'
-    is_bold = style.get('font-weight') == '600'
+    is_bold = style.get('font-weight') in ('600', '700', 'bold')
     if is_italic and not is_bold:
         del style['font-style']
         span.tag = 'em'
@@ -124,7 +188,7 @@ def use_implicit_styling_for_span(span, style):
         span.tag = 'sub' if style.pop('vertical-align') == 'sub' else 'sup'
 
 
-def use_implicit_styling_for_a(a, style_map):
+def use_implicit_styling_for_a(a, style_map) -> None:
     for span in a.iterchildren('span'):
         style = style_map[span]
         if style.get('text-decoration') == 'underline':
@@ -134,13 +198,13 @@ def use_implicit_styling_for_a(a, style_map):
         break
 
 
-def merge_contiguous_links(root):
+def merge_contiguous_links(root) -> None:
     all_hrefs = set(root.xpath('//a/@href'))
     for href in all_hrefs:
-        tags = root.xpath('//a[@href="{}"]'.format(href))
+        tags = root.xpath('//a[@href=$h]', h=href)
         processed = set()
 
-        def insert_tag(parent, child):
+        def insert_tag(parent, child) -> None:
             parent.tail = child.tail
             if child.text:
                 children = parent.getchildren()
@@ -166,7 +230,7 @@ def merge_contiguous_links(root):
                 n.getparent().remove(n)
 
 
-def convert_anchors_to_ids(root):
+def convert_anchors_to_ids(root) -> None:
     anchors = root.xpath('//a[@name]')
     for a in anchors:
         p = a.getparent()
@@ -176,11 +240,13 @@ def convert_anchors_to_ids(root):
             p.remove(a)
 
 
-def cleanup_qt_markup(root):
+def cleanup_qt_markup(root) -> None:
     from calibre.ebooks.docx.cleanup import lift
+
     style_map = defaultdict(dict)
     for tag in root.xpath('//*[@style]'):
         style_map[tag] = parse_style(tag.get('style'))
+    convert_anchors_to_ids(root)
     block_tags = root.xpath('//body/*')
     for tag in block_tags:
         lift_styles(tag, style_map)
@@ -202,31 +268,127 @@ def cleanup_qt_markup(root):
                 if ts:
                     remove_margins(li, ts)
                     remove_zero_indents(ts)
-    for style in itervalues(style_map):
+    for img in root.xpath('//img[@style]'):
+        s = style_map.get(img)
+        if s:
+            if s == {'float': 'left'}:
+                s['margin-right'] = '0.5em'
+            elif s == {'float': 'right'}:
+                s['margin-left'] = '0.5em'
+    for style in style_map.values():
         filter_qt_styles(style)
-    for tag, style in iteritems(style_map):
+        fw = style.get('font-weight')
+        if fw in ('600', '700'):
+            style['font-weight'] = 'bold'
+    for tag, style in style_map.items():
         if style:
-            tag.set('style', '; '.join('{}: {}'.format(k, v) for k, v in iteritems(style)))
+            tag.set('style', '; '.join(f'{k}: {v}' for k, v in style.items()))
         else:
             tag.attrib.pop('style', None)
     for span in root.xpath('//span[not(@style)]'):
         lift(span)
 
     merge_contiguous_links(root)
-    convert_anchors_to_ids(root)
+
+
 # }}}
 
 
-class EditorWidget(QTextEdit, LineEditECM):  # {{{
+def fix_html(original_html, original_txt, remove_comments=True, callback=None):
+    raw = original_html
+    raw = xml_to_unicode(raw, strip_encoding_pats=True, resolve_entities=True)[0]
+    if remove_comments:
+        comments_pat = re.compile(r'<!--.*?-->', re.DOTALL)
+        raw = comments_pat.sub('', raw)
+    if not original_txt and '<img' not in raw.lower():
+        return ''
 
+    try:
+        root = parse(raw, maybe_xhtml=False, sanitize_names=True)
+    except Exception:
+        root = parse(clean_xml_chars(raw), maybe_xhtml=False, sanitize_names=True)
+    if root.xpath('//meta[@name="calibre-dont-sanitize"]'):
+        # Bypass cleanup if special meta tag exists
+        return original_html
+
+    try:
+        cleanup_qt_markup(root)
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+    if callback is not None:
+        callback(root, original_txt)
+    elems = []
+    for body in root.xpath('//body'):
+        if body.text:
+            elems.append(body.text)
+        elems += [html.tostring(x, encoding='unicode') for x in body if x.tag not in ('script', 'style')]
+
+    if len(elems) > 1:
+        ans = '<div>{}</div>'.format(''.join(elems))
+    else:
+        ans = ''.join(elems)
+        if not ans.startswith('<'):
+            ans = f'<p>{ans}</p>'
+    return xml_replace_entities(ans)
+
+
+class BlockAction(QAction):
+    block_name: str = ''
+
+
+class EditorWidget(QTextEdit, LineEditECM):  # {{{
     data_changed = pyqtSignal()
+    insert_images_separately = False
+    can_store_images = False
+
+    action_bold: QAction
+    action_italic: QAction
+    action_underline: QAction
+    action_strikethrough: QAction
+    action_superscript: QAction
+    action_subscript: QAction
+    action_ordered_list: QAction
+    action_unordered_list: QAction
+    action_align_left: QAction
+    action_align_center: QAction
+    action_align_right: QAction
+    action_align_justified: QAction
+    action_undo: QAction
+    action_redo: QAction
+    action_remove_format: QAction
+    action_copy: QAction
+    action_paste: QAction
+    action_paste_and_match_style: QAction
+    action_cut: QAction
+    action_indent: QAction
+    action_outdent: QAction
+    action_select_all: QAction
+    action_color: QAction
+    action_background: QAction
+    action_insert_link: QAction
+    action_insert_image: QAction
+    action_insert_hr: QAction
+    action_clear: QAction
+    action_upper_case: QAction
+    action_lower_case: QAction
+    action_capitalize: QAction
+    action_swap_case: QAction
+    action_title_case: QAction
+    action_block_style: QAction
+
+    # allow plugins to extend the actions in the toolbar and the "Advanced" submenu
+    # each function take the EditorWidget and the QMenu as arguments and return a single or list of QAction
+    # inside a list of QAction, use None to add separator
+    plugin_actions: set[Callable[[EditorWidget], QAction | Iterable[QAction | None]]] = set()
 
     @property
     def readonly(self):
         return self.isReadOnly()
 
     @readonly.setter
-    def readonly(self, val):
+    def readonly(self, val) -> None:
         self.setReadOnly(bool(val))
 
     @contextmanager
@@ -239,65 +401,89 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
             self.setTextCursor(c)
         self.focus_self()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QTextEdit.__init__(self, parent)
         self.setTabChangesFocus(True)
-        self.document().setDefaultStyleSheet(css() + '\n\nli { margin-top: 0.5ex; margin-bottom: 0.5ex; }')
+        doc = self.document()
+        assert doc is not None
+        doc.setDefaultStyleSheet(resolved_css() + '\n\nli { margin-top: 0.5ex; margin-bottom: 0.5ex; }')
         font = self.font()
         f = QFontInfo(font)
         delta = tweaks['change_book_details_font_size_by'] + 1
         if delta:
-            font.setPixelSize(f.pixelSize() + delta)
+            font.setPixelSize(int(f.pixelSize() + delta))
             self.setFont(font)
         f = QFontMetrics(self.font())
         self.em_size = f.horizontalAdvance('m')
         self.base_url = None
         self._parent = weakref.ref(parent)
-        self.comments_pat = re.compile(r'<!--.*?-->', re.DOTALL)
+        self.shortcut_map = {}
+        self.plugin_actions_items: list[list[QAction | None]] = []
 
-        for rec in (
-            ('bold', 'format-text-bold', _('Bold'), True),
-            ('italic', 'format-text-italic', _('Italic'), True),
-            ('underline', 'format-text-underline', _('Underline'), True),
-            ('strikethrough', 'format-text-strikethrough', _('Strikethrough'), True),
-            ('superscript', 'format-text-superscript', _('Superscript'), True),
-            ('subscript', 'format-text-subscript', _('Subscript'), True),
-            ('ordered_list', 'format-list-ordered', _('Ordered list'), True),
-            ('unordered_list', 'format-list-unordered', _('Unordered list'), True),
-
-            ('align_left', 'format-justify-left', _('Align left'), True),
-            ('align_center', 'format-justify-center', _('Align center'), True),
-            ('align_right', 'format-justify-right', _('Align right'), True),
-            ('align_justified', 'format-justify-fill', _('Align justified'), True),
-            ('undo', 'edit-undo', _('Undo'), ),
-            ('redo', 'edit-redo', _('Redo'), ),
-            ('remove_format', 'edit-clear', _('Remove formatting'), ),
-            ('copy', 'edit-copy', _('Copy'), ),
-            ('paste', 'edit-paste', _('Paste'), ),
-            ('paste_and_match_style', 'edit-paste', _('Paste and match style'), ),
-            ('cut', 'edit-cut', _('Cut'), ),
-            ('indent', 'format-indent-more', _('Increase indentation'), ),
-            ('outdent', 'format-indent-less', _('Decrease indentation'), ),
-            ('select_all', 'edit-select-all', _('Select all'), ),
-
-            ('color', 'format-text-color', _('Foreground color')),
-            ('background', 'format-fill-color', _('Background color')),
-            ('insert_link', 'insert-link', _('Insert link or image'),),
-            ('insert_hr', 'format-text-hr', _('Insert separator'),),
-            ('clear', 'trash', _('Clear')),
-        ):
-            name, icon, text = rec[:3]
-            checkable = len(rec) == 4
-            ac = QAction(QIcon(I(icon + '.png')), text, self)
+        def r(name, icon, text, checkable=False, shortcut=None, callback=None) -> None:
+            ac = QAction(QIcon.ic(icon + '.png'), text, self) if icon else QAction(text, self)
+            ac.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             if checkable:
                 ac.setCheckable(checkable)
-            setattr(self, 'action_'+name, ac)
-            ac.triggered.connect(getattr(self, 'do_' + name))
+            setattr(self, 'action_' + name, ac)
+            callback = callback or getattr(self, 'do_' + name)
+            ac.triggered.connect(callback)
+            if shortcut is not None:
+                if isinstance(shortcut, str):
+                    shortcut = QKeySequence(shortcut, QKeySequence.SequenceFormat.PortableText)
+                self.shortcut_map[shortcut] = ac
+                sc = shortcut if isinstance(shortcut, QKeySequence) else QKeySequence(shortcut)
+                ac.setShortcut(sc)
+                ac.setToolTip(text + f' [{sc.toString(QKeySequence.SequenceFormat.NativeText)}]')
+            self.addAction(ac)
 
-        self.action_block_style = QAction(QIcon(I('format-text-heading.png')),
-                _('Style text block'), self)
-        self.action_block_style.setToolTip(
-                _('Style the selected text block'))
+        r('bold', 'format-text-bold', _('Bold'), True, QKeySequence.StandardKey.Bold)
+        r('italic', 'format-text-italic', _('Italic'), True, QKeySequence.StandardKey.Italic)
+        r('underline', 'format-text-underline', _('Underline'), True, QKeySequence.StandardKey.Underline)
+        r('strikethrough', 'format-text-strikethrough', _('Strikethrough'), True)
+        r('superscript', 'format-text-superscript', _('Superscript'), True)
+        r('subscript', 'format-text-subscript', _('Subscript'), True)
+        r('ordered_list', 'format-list-ordered', _('Ordered list'), True)
+        r('unordered_list', 'format-list-unordered', _('Unordered list'), True)
+
+        r('align_left', 'format-justify-left', _('Align left'), True)
+        r('align_center', 'format-justify-center', _('Align center'), True)
+        r('align_right', 'format-justify-right', _('Align right'), True)
+        r('align_justified', 'format-justify-fill', _('Align justified'), True)
+        r('undo', 'edit-undo', _('Undo'), shortcut=QKeySequence.StandardKey.Undo)
+        r('redo', 'edit-redo', _('Redo'), shortcut=QKeySequence.StandardKey.Redo)
+        r('remove_format', 'edit-clear', _('Remove formatting'))
+        r('copy', 'edit-copy', _('Copy'), shortcut=QKeySequence.StandardKey.Copy)
+        r('paste', 'edit-paste', _('Paste'), shortcut=QKeySequence.StandardKey.Paste)
+        r('paste_and_match_style', 'edit-paste', _('Paste and match style'), shortcut='ctrl+shift+v')
+        r('cut', 'edit-cut', _('Cut'), shortcut=QKeySequence.StandardKey.Cut)
+        r('indent', 'format-indent-more', _('Increase indentation'))
+        r('outdent', 'format-indent-less', _('Decrease indentation'))
+        r('select_all', 'edit-select-all', _('Select all'), shortcut=QKeySequence.StandardKey.SelectAll)
+
+        r('color', 'format-text-color', _('Foreground color'))
+        r('background', 'format-fill-color', _('Background color'))
+        r(
+            'insert_link',
+            'insert-link',
+            _('Insert link') if self.insert_images_separately else _('Insert link or image'),
+            shortcut='Ctrl+l',
+        )
+        r('insert_image', 'view-image', _('Insert image'), shortcut='Ctrl+p')
+        r(
+            'insert_hr',
+            'format-text-hr',
+            _('Insert separator'),
+        )
+        r('clear', 'trash', _('Clear'))
+        r('upper_case', '', _('Upper case'), shortcut='Ctrl+alt+u', callback=self.upper_case)
+        r('lower_case', '', _('Lower case'), shortcut='Ctrl+alt+l', callback=self.lower_case)
+        r('capitalize', '', _('Capitalize'), shortcut='Ctrl+alt+c', callback=self.capitalize)
+        r('swap_case', '', _('Swap case'), shortcut='Ctrl+alt+s', callback=self.swap_case)
+        r('title_case', '', _('Title case'), shortcut='Ctrl+alt+t', callback=self.title_case)
+
+        self.action_block_style = QAction(QIcon.ic('format-text-heading.png'), _('Style text block'), self)
+        self.action_block_style.setToolTip(_('Style the selected text block'))
         self.block_style_menu = QMenu(self)
         self.action_block_style.setMenu(self.block_style_menu)
         self.block_style_actions = []
@@ -312,12 +498,23 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
             (h.format(6), 'h6'),
             (_('Blockquote'), 'blockquote'),
         ):
-            ac = QAction(text, self)
+            ac = BlockAction(text, self)
             self.block_style_menu.addAction(ac)
             ac.block_name = name
             ac.setCheckable(True)
             self.block_style_actions.append(ac)
             ac.triggered.connect(self.do_format_block)
+
+        for f in self.plugin_actions:
+            if not (lst := f(self)):
+                continue
+            if isinstance(lst, QAction):
+                lst = [lst]
+            else:
+                lst = list(lst)
+            self.plugin_actions_items.append(lst)  # type: ignore
+            for ac in filter(None, lst):
+                self.addAction(ac)
 
         self.setHtml('')
         self.copyAvailable.connect(self.update_clipboard_actions)
@@ -332,34 +529,19 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
         self.textChanged.connect(self.data_changed)
         self.update_cursor_position_actions()
 
-    def keyPressEvent(self, ev):
-        if ev.matches(QKeySequence.StandardKey.Bold):
-            ev.accept()
-            self.action_bold.toggle(), self.action_bold.trigger()
-            return
-        if ev.matches(QKeySequence.StandardKey.Italic):
-            ev.accept()
-            self.action_italic.toggle(), self.action_italic.trigger()
-            return
-        if ev.matches(QKeySequence.StandardKey.Underline):
-            ev.accept()
-            self.action_underline.toggle(), self.action_underline.trigger()
-            return
-        return QTextEdit.keyPressEvent(self, ev)
-
-    def update_clipboard_actions(self, copy_available):
+    def update_clipboard_actions(self, copy_available) -> None:
         self.action_copy.setEnabled(copy_available)
         self.action_cut.setEnabled(copy_available)
 
-    def update_selection_based_actions(self):
+    def update_selection_based_actions(self) -> None:
         pass
 
-    def update_cursor_position_actions(self):
+    def update_cursor_position_actions(self) -> None:
         c = self.textCursor()
+        tcf = c.charFormat()
         ls = c.currentList()
         self.action_ordered_list.setChecked(ls is not None and ls.format().style() == QTextListFormat.Style.ListDecimal)
         self.action_unordered_list.setChecked(ls is not None and ls.format().style() == QTextListFormat.Style.ListDisc)
-        tcf = c.charFormat()
         vert = tcf.verticalAlignment()
         self.action_superscript.setChecked(vert == QTextCharFormat.VerticalAlignment.AlignSuperScript)
         self.action_subscript.setChecked(vert == QTextCharFormat.VerticalAlignment.AlignSubScript)
@@ -379,17 +561,17 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
             if bf.leftMargin() == bf.rightMargin() and bf.leftMargin() > 0:
                 name = 'blockquote'
         else:
-            name = 'h{}'.format(lvl)
+            name = f'h{lvl}'
         for ac in self.block_style_actions:
             ac.setChecked(ac.block_name == name)
 
-    def set_readonly(self, what):
+    def set_readonly(self, what) -> None:
         self.readonly = what
 
-    def focus_self(self):
+    def focus_self(self) -> None:
         self.setFocus(Qt.FocusReason.TabFocusReason)
 
-    def do_clear(self, *args):
+    def do_clear(self, *args) -> None:
         c = self.textCursor()
         c.beginEditBlock()
         c.movePosition(QTextCursor.MoveOperation.Start, QTextCursor.MoveMode.MoveAnchor)
@@ -397,46 +579,51 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
         c.removeSelectedText()
         c.endEditBlock()
         self.focus_self()
+
     clear_text = do_clear
 
-    def do_bold(self):
+    def do_bold(self) -> None:
         with self.editing_cursor() as c:
             fmt = QTextCharFormat()
-            fmt.setFontWeight(
-                QFont.Weight.Bold if c.charFormat().fontWeight() != QFont.Weight.Bold else QFont.Weight.Normal)
+            fmt.setFontWeight(QFont.Weight.Bold if c.charFormat().fontWeight() != QFont.Weight.Bold else QFont.Weight.Normal)
             c.mergeCharFormat(fmt)
+        self.update_cursor_position_actions()
 
-    def do_italic(self):
+    def do_italic(self) -> None:
         with self.editing_cursor() as c:
             fmt = QTextCharFormat()
             fmt.setFontItalic(not c.charFormat().fontItalic())
             c.mergeCharFormat(fmt)
+        self.update_cursor_position_actions()
 
-    def do_underline(self):
+    def do_underline(self) -> None:
         with self.editing_cursor() as c:
             fmt = QTextCharFormat()
             fmt.setFontUnderline(not c.charFormat().fontUnderline())
             c.mergeCharFormat(fmt)
+        self.update_cursor_position_actions()
 
-    def do_strikethrough(self):
+    def do_strikethrough(self) -> None:
         with self.editing_cursor() as c:
             fmt = QTextCharFormat()
             fmt.setFontStrikeOut(not c.charFormat().fontStrikeOut())
             c.mergeCharFormat(fmt)
+        self.update_cursor_position_actions()
 
-    def do_vertical_align(self, which):
+    def do_vertical_align(self, which) -> None:
         with self.editing_cursor() as c:
             fmt = QTextCharFormat()
             fmt.setVerticalAlignment(which)
             c.mergeCharFormat(fmt)
+        self.update_cursor_position_actions()
 
-    def do_superscript(self):
+    def do_superscript(self) -> None:
         self.do_vertical_align(QTextCharFormat.VerticalAlignment.AlignSuperScript)
 
-    def do_subscript(self):
+    def do_subscript(self) -> None:
         self.do_vertical_align(QTextCharFormat.VerticalAlignment.AlignSubScript)
 
-    def do_list(self, fmt):
+    def do_list(self, fmt) -> None:
         with self.editing_cursor() as c:
             ls = c.currentList()
             if ls is not None:
@@ -448,74 +635,176 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
                     ls.setFormat(lf)
             else:
                 ls = c.createList(fmt)
+        self.update_cursor_position_actions()
 
-    def do_ordered_list(self):
+    def do_ordered_list(self) -> None:
         self.do_list(QTextListFormat.Style.ListDecimal)
 
-    def do_unordered_list(self):
+    def do_unordered_list(self) -> None:
         self.do_list(QTextListFormat.Style.ListDisc)
 
-    def do_alignment(self, which):
+    def do_alignment(self, which) -> None:
         with self.editing_cursor() as c:
+            c = self.textCursor()
             fmt = QTextBlockFormat()
             fmt.setAlignment(which)
-            c.setBlockFormat(fmt)
+            c.mergeBlockFormat(fmt)
+        self.update_cursor_position_actions()
 
-    def do_align_left(self):
+    def do_align_left(self) -> None:
         self.do_alignment(Qt.AlignmentFlag.AlignLeft)
 
-    def do_align_center(self):
+    def do_align_center(self) -> None:
         self.do_alignment(Qt.AlignmentFlag.AlignHCenter)
 
-    def do_align_right(self):
+    def do_align_right(self) -> None:
         self.do_alignment(Qt.AlignmentFlag.AlignRight)
 
-    def do_align_justified(self):
+    def do_align_justified(self) -> None:
         self.do_alignment(Qt.AlignmentFlag.AlignJustify)
 
-    def do_undo(self):
+    def do_undo(self) -> None:
         self.undo()
         self.focus_self()
 
-    def do_redo(self):
+    def do_redo(self) -> None:
         self.redo()
         self.focus_self()
 
-    def do_remove_format(self):
+    def do_remove_format(self) -> None:
         with self.editing_cursor() as c:
             c.setBlockFormat(QTextBlockFormat())
             c.setCharFormat(QTextCharFormat())
+        self.update_cursor_position_actions()
 
-    def do_copy(self):
+    def keyPressEvent(self, e):
+        for sc, ac in self.shortcut_map.items():
+            if isinstance(sc, QKeySequence.StandardKey) and e.matches(sc):
+                ac.trigger()
+                return
+        return super().keyPressEvent(e)
+
+    def do_copy(self) -> None:
         self.copy()
         self.focus_self()
 
-    def do_paste(self):
+    def do_paste(self) -> None:
+        images_before = set()
+        doc = self.document()
+        assert doc is not None
+        for fmt in doc.allFormats():
+            if fmt.isImageFormat():
+                images_before.add(fmt.toImageFormat().name())
         self.paste()
+        if self.can_store_images:
+            added = set()
+            for fmt in doc.allFormats():
+                if fmt.isImageFormat():
+                    name = fmt.toImageFormat().name()
+                    if name not in images_before and name.partition(':')[0] in ('https', 'http'):
+                        added.add(name)
+            if added and question_dialog(self, _('Download images'), _('Download all remote images in the pasted content?')):
+                self.download_images(added)
         self.focus_self()
 
-    def do_paste_and_match_style(self):
-        text = QApplication.instance().clipboard().text()
+    def commit_downloaded_image(self, data: bytes, suggested_filename: str) -> str:
+        raise NotImplementedError
+
+    def download_images(self, urls) -> None:
+        from calibre.web import get_download_filename_from_response
+
+        br = browser()
+        d = self.document()
+        assert d is not None
+        c = self.textCursor()
+        c.setPosition(0)
+        pos_map = {}
+        while True:
+            c = d.find(OBJECT_REPLACEMENT_CHAR, c, QTextDocument.FindFlag.FindCaseSensitively)
+            if c.isNull():
+                break
+            fmt = c.charFormat()
+            if fmt.isImageFormat():
+                name = fmt.toImageFormat().name()
+                if name in urls:
+                    pos_map[name] = c.position()
+
+        pd = ProgressDialog(title=_('Downloading images...'), min=0, max=0, parent=self)
+        pd.canceled_signal.connect(pd.accept)
+        data_map = {}
+        error_map = {}
+        set_msg = FunctionDispatcher(pd.set_msg, parent=pd)
+        accept = FunctionDispatcher(pd.accept, parent=pd)
+
+        def do_download() -> None:
+            for url, pos in pos_map.items():
+                if pd.canceled:
+                    return
+                set_msg(_('Downloading {}...').format(url))
+                try:
+                    res = br.open_novisit(url, timeout=30)
+                    fname = get_download_filename_from_response(res)
+                    data = res.read()
+                except Exception as err:
+                    error_map[url] = err
+                else:
+                    data_map[url] = fname, data
+            accept()
+
+        Thread(target=do_download, daemon=True).start()
+        pd.exec()
+        if pd.canceled:
+            return
+
+        for url, pos in pos_map.items():
+            fname, data = data_map[url]
+            newname = self.commit_downloaded_image(data, fname)
+            c = self.textCursor()
+            c.setPosition(pos)
+            alignment = QTextFrameFormat.Position.InFlow
+            f = self.frame_for_cursor(c)
+            if f is not None:
+                alignment = f.frameFormat().position()
+            fmt = c.charFormat()
+            i = fmt.toImageFormat()
+            i.setName(newname)
+            c.deletePreviousChar()
+            c.insertImage(i, alignment)
+        if error_map:
+            m = '\n'.join(_('Could not download {0} with error:').format(url) + '\n\t' + str(err) + '\n\n' for url, err in error_map.items())
+            error_dialog(
+                self,
+                _('Failed to download some images'),
+                _('Some images could not be downloaded, click "Show details" to see which ones'),
+                det_msg=m,
+                show=True,
+            )
+
+    def do_paste_and_match_style(self) -> None:
+        clipboard = qapplication_or_fail().clipboard()
+        assert clipboard is not None
+        text = clipboard.text()
         if text:
             self.setText(text)
 
-    def do_cut(self):
+    def do_cut(self) -> None:
         self.cut()
         self.focus_self()
 
-    def indent_block(self, mult=1):
+    def indent_block(self, mult=1) -> None:
         with self.editing_cursor() as c:
             bf = c.blockFormat()
             bf.setTextIndent(bf.textIndent() + 2 * self.em_size * mult)
             c.setBlockFormat(bf)
+        self.update_cursor_position_actions()
 
-    def do_indent(self):
+    def do_indent(self) -> None:
         self.indent_block()
 
-    def do_outdent(self):
+    def do_outdent(self) -> None:
         self.indent_block(-1)
 
-    def do_select_all(self):
+    def do_select_all(self) -> None:
         with self.editing_cursor() as c:
             c.movePosition(QTextCursor.MoveOperation.Start, QTextCursor.MoveMode.MoveAnchor)
             c.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
@@ -525,14 +814,16 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
             return 0
         return {q: i for i, q in enumerate('p h1 h2 h3 h4 h5 h6'.split())}[name]
 
-    def do_format_block(self):
-        name = self.sender().block_name
+    def do_format_block(self) -> None:
+        sender = self.sender()
+        assert isinstance(sender, BlockAction)
+        name = sender.block_name
         with self.editing_cursor() as c:
             bf = QTextBlockFormat()
             cf = QTextCharFormat()
             bcf = c.blockCharFormat()
             lvl = self.level_for_block_type(name)
-            wt = QFont.Weight.Bold if lvl else None
+            wt = QFont.Weight.Bold if lvl else QFont.Weight.Normal
             adjust = (0, 3, 2, 1, 0, -1, -1)[lvl]
             pos = None
             if not c.hasSelection():
@@ -557,48 +848,57 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
             bf.setLeftMargin(hmargin), bf.setRightMargin(hmargin)
             bf.setTopMargin(tmargin), bf.setBottomMargin(bmargin)
             bf.setHeadingLevel(lvl)
-            if adjust:
-                bcf.setProperty(QTextFormat.Property.FontSizeAdjustment, adjust)
-                cf.setProperty(QTextFormat.Property.FontSizeAdjustment, adjust)
-            if wt:
-                bcf.setProperty(QTextFormat.Property.FontWeight, wt)
-                cf.setProperty(QTextFormat.Property.FontWeight, wt)
+            bcf.setProperty(QTextFormat.Property.FontSizeAdjustment, adjust)
+            cf.setProperty(QTextFormat.Property.FontSizeAdjustment, adjust)
+            bcf.setFontWeight(wt)
+            cf.setFontWeight(wt)
             c.setBlockCharFormat(bcf)
             c.mergeCharFormat(cf)
             c.mergeBlockFormat(bf)
             if pos is not None:
                 c.setPosition(pos)
+        self.update_cursor_position_actions()
 
-    def do_color(self):
-        col = QColorDialog.getColor(Qt.GlobalColor.black, self,
-                _('Choose foreground color'), QColorDialog.ColorDialogOption.ShowAlphaChannel)
+    def do_color(self) -> None:
+        col = QColorDialog.getColor(Qt.GlobalColor.black, self, _('Choose foreground color'), QColorDialog.ColorDialogOption.ShowAlphaChannel)
         if col.isValid():
             fmt = QTextCharFormat()
             fmt.setForeground(QBrush(col))
             with self.editing_cursor() as c:
                 c.mergeCharFormat(fmt)
 
-    def do_background(self):
-        col = QColorDialog.getColor(Qt.GlobalColor.white, self,
-                _('Choose background color'), QColorDialog.ColorDialogOption.ShowAlphaChannel)
+    def do_background(self) -> None:
+        col = QColorDialog.getColor(Qt.GlobalColor.white, self, _('Choose background color'), QColorDialog.ColorDialogOption.ShowAlphaChannel)
         if col.isValid():
             fmt = QTextCharFormat()
             fmt.setBackground(QBrush(col))
             with self.editing_cursor() as c:
                 c.mergeCharFormat(fmt)
 
-    def do_insert_hr(self, *args):
+    def do_insert_hr(self, *args) -> None:
         with self.editing_cursor() as c:
             c.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.MoveAnchor)
             c.insertHtml('<hr>')
 
-    def do_insert_link(self, *args):
+    def do_insert_image(self) -> None:
+        from calibre.gui2 import choose_images
+
+        files = choose_images(self, 'choose-image-for-comments-editor', _('Choose image'), formats='png jpeg jpg gif svg webp'.split())
+        if files:
+            self.focus_self()
+            with self.editing_cursor() as c:
+                c.insertImage(files[0])
+
+    def do_insert_link(self, *args) -> None:
         link, name, is_image = self.ask_link()
         if not link:
             return
         url = self.parse_link(link)
         if url.isValid():
-            url = unicode_type(url.toString(NO_URL_FORMATTING))
+            if url.isLocalFile() and not os.path.isabs(url.toLocalFile()):
+                url = url.toLocalFile()
+            else:
+                url = url.toString(NO_URL_FORMATTING)
             self.focus_self()
             with self.editing_cursor() as c:
                 if is_image:
@@ -623,20 +923,30 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
                     c.setCharFormat(oldfmt)
 
         else:
-            error_dialog(self, _('Invalid URL'),
-                         _('The url %r is invalid') % link, show=True)
+            error_dialog(self, _('Invalid URL'), _('The URL %r is invalid') % link, show=True)
 
     def ask_link(self):
 
         class Ask(QDialog):
+            url: QLineEdit
+            name: QLineEdit
+            treat_as_image: QCheckBox
+            bb: QDialogButtonBox
+            br: QPushButton
+            brdf: QPushButton
+            brd: QPushButton
+            la: QLabel
 
-            def accept(self):
+            def accept(self) -> None:
                 if self.treat_as_image.isChecked():
                     url = self.url.text()
                     if url.lower().split(':', 1)[0] in ('http', 'https'):
-                        error_dialog(self, _('Remote images not supported'), _(
-                            'You must download the image to your computer, URLs pointing'
-                            ' to remote images are not supported.'), show=True)
+                        error_dialog(
+                            self,
+                            _('Remote images not supported'),
+                            _('You must download the image to your computer, URLs pointing to remote images are not supported.'),
+                            show=True,
+                        )
                         return
                 QDialog.accept(self)
 
@@ -649,46 +959,82 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
         d.name = QLineEdit(d)
         d.treat_as_image = QCheckBox(d)
         d.setMinimumWidth(600)
-        d.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel)
-        d.br = b = QPushButton(_('&Browse'))
-        b.setIcon(QIcon(I('document_open.png')))
+        d.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        d.br = b = QPushButton(_('&File'))
+        base = os.path.dirname(self.base_url.toLocalFile()) if self.base_url else os.getcwd()
+        data_path = os.path.join(base, DATA_DIR_NAME)
+        if self.base_url:
+            os.makedirs(data_path, exist_ok=True)
 
-        def cf():
+        def cf(data_dir=False) -> None:
             filetypes = []
             if d.treat_as_image.isChecked():
                 filetypes = [(_('Images'), 'png jpeg jpg gif'.split())]
-            files = choose_files(d, 'select link file', _('Choose file'), filetypes, select_only_single_file=True)
+            if data_dir:
+                files = choose_files(
+                    d,
+                    'select link file',
+                    _('Choose file'),
+                    filetypes,
+                    select_only_single_file=True,
+                    no_save_dir=True,
+                    default_dir=data_path,
+                )
+            else:
+                files = choose_files(d, 'select link file', _('Choose file'), filetypes, select_only_single_file=True)
             if files:
                 path = files[0]
                 d.url.setText(path)
                 if path and os.path.exists(path):
-                    with lopen(path, 'rb') as f:
+                    with open(path, 'rb') as f:
                         q = what(f)
-                    is_image = q in {'jpeg', 'png', 'gif'}
+                    is_image = q in {'jpeg', 'png', 'gif', 'webp'}
                     d.treat_as_image.setChecked(is_image)
+                if data_dir:
+                    path = os.path.relpath(path, base).replace(os.sep, '/')
+                    d.url.setText(path)
 
         b.clicked.connect(cf)
-        d.la = la = QLabel(_(
-            'Enter a URL. If you check the "Treat the URL as an image" box '
-            'then the URL will be added as an image reference instead of as '
-            'a link. You can also choose to create a link to a file on '
-            'your computer. '
-            'Note that if you create a link to a file on your computer, it '
-            'will stop working if the file is moved.'))
+        d.brdf = b = QPushButton(_('&Data file'))
+        b.clicked.connect(lambda: cf(True))
+        b.setToolTip(_('A relative link to a data file associated with this book'))
+        if not os.path.exists(data_path):
+            b.setVisible(False)
+        d.brd = b = QPushButton(_('F&older'))
+
+        def cd() -> None:
+            path = choose_dir(d, 'select link folder', _('Choose folder'))
+            if path:
+                d.url.setText(path)
+
+        b.clicked.connect(cd)
+
+        d.la = la = QLabel(
+            _(
+                'Enter a URL. If you check the "Treat the URL as an image" box '
+                'then the URL will be added as an image reference instead of as '
+                'a link. You can also choose to create a link to a file on '
+                'your computer. '
+                'Note that if you create a link to a file on your computer, it '
+                'will stop working if the file is moved.'
+            )
+        )
         la.setWordWrap(True)
         la.setStyleSheet('QLabel { margin-bottom: 1.5ex }')
         l.setWidget(0, QFormLayout.ItemRole.SpanningRole, la)
         l.addRow(_('Enter &URL:'), d.url)
         l.addRow(_('Treat the URL as an &image'), d.treat_as_image)
         l.addRow(_('Enter &name (optional):'), d.name)
-        l.addRow(_('Choose a file on your computer:'), d.br)
+        h = QHBoxLayout()
+        h.addWidget(d.br), h.addWidget(d.brdf), h.addWidget(d.brd)
+        l.addRow(_('Choose a file on your computer:'), h)
         l.addRow(d.bb)
         d.bb.accepted.connect(d.accept)
         d.bb.rejected.connect(d.reject)
         d.resize(d.sizeHint())
         link, name, is_image = None, None, False
-        if d.exec_() == QDialog.DialogCode.Accepted:
-            link, name = unicode_type(d.url.text()).strip(), unicode_type(d.name.text()).strip()
+        if d.exec() == QDialog.DialogCode.Accepted:
+            link, name = str(d.url.text()).strip(), str(d.name.text()).strip()
             is_image = d.treat_as_image.isChecked()
         return link, name, is_image
 
@@ -701,6 +1047,14 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
             url = QUrl(link, QUrl.ParsingMode.TolerantMode)
             if url.isValid():
                 return url
+        else:
+            if self.base_url:
+                base = os.path.dirname(self.base_url.toLocalFile())
+            else:
+                base = os.getcwd()
+            candidate = os.path.join(base, link)
+            if os.path.exists(candidate):
+                return QUrl.fromLocalFile(link)
         if os.path.exists(link):
             return QUrl.fromLocalFile(link)
 
@@ -709,7 +1063,7 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
             prefix = 'http'
             if first == 'ftp':
                 prefix = 'ftp'
-            url = QUrl(prefix +'://'+link, QUrl.ParsingMode.TolerantMode)
+            url = QUrl(prefix + '://' + link, QUrl.ParsingMode.TolerantMode)
             if url.isValid():
                 return url
 
@@ -720,67 +1074,39 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
 
     @property
     def html(self):
-        raw = original_html = self.toHtml()
-        check = self.toPlainText().strip()
-        raw = xml_to_unicode(raw, strip_encoding_pats=True, resolve_entities=True)[0]
-        raw = self.comments_pat.sub('', raw)
-        if not check and '<img' not in raw.lower():
-            return ''
+        return fix_html(self.toHtml(), self.toPlainText().strip(), callback=self.get_html_callback)
 
-        root = parse(raw, maybe_xhtml=False, sanitize_names=True)
-        if root.xpath('//meta[@name="calibre-dont-sanitize"]'):
-            # Bypass cleanup if special meta tag exists
-            return original_html
-
-        try:
-            cleanup_qt_markup(root)
-        except Exception:
-            import traceback
-            traceback.print_exc()
-        elems = []
-        for body in root.xpath('//body'):
-            if body.text:
-                elems.append(body.text)
-            elems += [html.tostring(x, encoding='unicode') for x in body if
-                x.tag not in ('script', 'style')]
-
-        if len(elems) > 1:
-            ans = '<div>%s</div>'%(u''.join(elems))
-        else:
-            ans = ''.join(elems)
-            if not ans.startswith('<'):
-                ans = '<p>%s</p>'%ans
-        return xml_replace_entities(ans)
+    def get_html_callback(self, root, text) -> None:
+        pass
 
     @html.setter
-    def html(self, val):
+    def html(self, val) -> None:
         self.setHtml(val)
 
-    def set_base_url(self, qurl):
+    def set_base_url(self, qurl) -> None:
         self.base_url = qurl
 
     @pyqtSlot(int, 'QUrl', result='QVariant')
-    def loadResource(self, rtype, qurl):
-        if self.base_url:
-            if qurl.isRelative():
-                qurl = self.base_url.resolved(qurl)
-            if qurl.isLocalFile():
-                path = qurl.toLocalFile()
-                try:
-                    with lopen(path, 'rb') as f:
-                        data = f.read()
-                except EnvironmentError:
-                    if path.rpartition('.')[-1].lower() in {'jpg', 'jpeg', 'gif', 'png', 'bmp', 'webp'}:
-                        return QByteArray(bytearray.fromhex(
-                                    '89504e470d0a1a0a0000000d49484452'
-                                    '000000010000000108060000001f15c4'
-                                    '890000000a49444154789c6300010000'
-                                    '0500010d0a2db40000000049454e44ae'
-                                    '426082'))
-                else:
-                    return QByteArray(data)
+    def loadResource(self, type, name):
+        path = local_path_for_resource(name, base_qurl=self.base_url)
+        if path:
+            data = None
+            try:
+                with open(make_long_path_useable(path), 'rb') as f:
+                    data = f.read()
+            except OSError:
+                if path.rpartition('.')[-1].lower() in {'jpg', 'jpeg', 'gif', 'png', 'bmp', 'webp'}:
+                    data = bytearray.fromhex(
+                        '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082'
+                    )
+            if data is not None:
+                r = QByteArray(data)
+                doc = self.document()
+                assert doc is not None
+                doc.addResource(type, name, r)
+                return r
 
-    def set_html(self, val, allow_undo=True):
+    def set_html(self, val, allow_undo=True) -> None:
         if not allow_undo or self.readonly:
             self.html = val
             return
@@ -790,42 +1116,346 @@ class EditorWidget(QTextEdit, LineEditECM):  # {{{
             c.removeSelectedText()
             c.insertHtml(val)
 
-    def text(self):
+    def text(self) -> str:
         return self.textCursor().selectedText()
 
-    def setText(self, text):
-        with self.editing_cursor() as c:
-            c.insertText(text)
+    def selectedText(self) -> str:
+        return self.text()
 
-    def contextMenuEvent(self, ev):
-        menu = self.createStandardContextMenu()
-        for action in menu.actions():
-            parts = action.text().split('\t')
-            if len(parts) == 2 and QKeySequence(QKeySequence.StandardKey.Paste).toString(QKeySequence.SequenceFormat.NativeText) in parts[-1]:
-                menu.insertAction(action, self.action_paste_and_match_style)
+    def setText(self, text: str | None) -> None:  # ty: ignore[lost-keyword-for-regular-parameter]
+        with self.editing_cursor() as c:
+            c.insertText(text or '')
+
+    def insert(self, a0: str | None) -> None:
+        self.setText(a0)
+
+    def hasSelectedText(self) -> bool:
+        c = self.textCursor()
+        return c.hasSelection()
+
+    def createMimeDataFromSelection(self):
+        ans = super().createMimeDataFromSelection()
+        assert ans is not None
+        html, txt = ans.html(), ans.text()
+        html = fix_html(html, txt, remove_comments=False)
+        # Qt has a bug where copying from the start of a paragraph does not
+        # include the paragraph definition in the fragment. Try to fix that
+        # by moving the StartFragment comment to before the paragraph when
+        # the selection starts at the start of a block
+        c = self.textCursor()
+        c2 = QTextCursor(c)
+        c2.setPosition(c.selectionStart())
+        if c2.atBlockStart():
+            html = re.sub(r'(<p.*?>)(<!--StartFragment-->)', r'\2\1', html, count=1)
+        ans.setHtml(html)
+        return ans
+
+    def remove_image_at(self, cursor_pos) -> None:
+        c = self.textCursor()
+        c.clearSelection()
+        c.setPosition(cursor_pos)
+        fmt = c.charFormat()
+        if fmt.isImageFormat():
+            c.deletePreviousChar()
+
+    def resize_image_at(self, cursor_pos) -> None:
+        c = self.textCursor()
+        c.clearSelection()
+        c.setPosition(cursor_pos)
+        c.movePosition(QTextCursor.MoveOperation.PreviousCharacter, QTextCursor.MoveMode.KeepAnchor)
+        fmt = c.charFormat()
+        if not fmt.isImageFormat():
+            return
+        fmt = fmt.toImageFormat()
+        from calibre.utils.img import image_from_data
+
+        img = image_from_data(self.loadResource(QTextDocument.ResourceType.ImageResource, QUrl(fmt.name())))
+        w, h = int(fmt.width()), int(fmt.height())
+        d = QDialog(self)
+        l = QVBoxLayout(d)
+        la = QLabel(_('Shrink image to fit within:'))
+        h = QHBoxLayout()
+        l.addLayout(h)
+        la = QLabel(_('&Width:'))
+        h.addWidget(la)
+        width_spinbox = w = QSpinBox(self)
+        w.setRange(0, 10000), w.setSuffix(' px')
+        w.setValue(int(fmt.width()))
+        h.addWidget(w), la.setBuddy(w)
+        w.setSpecialValueText(' ')
+        la = QLabel(_('&Height:'))
+        h.addWidget(la)
+        height_spinbox = w = QSpinBox(self)
+        w.setRange(0, 10000), w.setSuffix(' px')
+        w.setValue(int(fmt.height()))
+        h.addWidget(w), la.setBuddy(w)
+        w.setSpecialValueText(' ')
+        h.addStretch(10)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(d.accept), bb.rejected.connect(d.reject)
+        d.setWindowTitle(_('Enter new size for image'))
+        l.addWidget(bb)
+        d.resize(d.sizeHint())
+
+        if d.exec() == QDialog.DialogCode.Accepted:
+            page_width, page_height = (width_spinbox.value() or sys.maxsize), (height_spinbox.value() or sys.maxsize)
+            w, h = int(img.width()), int(img.height())
+            resized, nw, nh = fit_image(w, h, page_width, page_height)
+            if resized:
+                fmt.setWidth(nw), fmt.setHeight(nh)
+            else:
+                f = QTextImageFormat()
+                f.setName(fmt.name())
+                fmt = f
+            c.setCharFormat(fmt)
+
+    def align_image_at(self, cursor_pos, alignment) -> None:
+        c = self.textCursor()
+        c.clearSelection()
+        c.setPosition(cursor_pos)
+        fmt = c.charFormat()
+        if fmt.isImageFormat() and c.currentFrame():
+            f = self.frame_for_cursor(c)
+            if f is not None:
+                ff = f.frameFormat()
+                ff.setPosition(alignment)
+                f.setFrameFormat(ff)
+                doc = self.document()
+                assert doc is not None
+                doc.markContentsDirty(cursor_pos - 2, 5)
+            else:
+                c.deleteChar()
+                c.insertImage(fmt.toImageFormat(), alignment)
+
+    def first_image_replacement_char_position_for(self, image_name):
+        d = self.document()
+        assert d is not None
+        c = self.textCursor()
+        c.setPosition(0)
+        while True:
+            c = d.find(OBJECT_REPLACEMENT_CHAR, c, QTextDocument.FindFlag.FindCaseSensitively)
+            if c.isNull():
                 break
-        else:
-            menu.addAction(self.action_paste_and_match_style)
+            fmt = c.charFormat()
+            if fmt.isImageFormat() and fmt.toImageFormat().name() == image_name:
+                return c.position()
+        return -1
+
+    def frame_for_cursor(self, c):
+        q = c.position()
+        for cf in c.currentFrame().childFrames():
+            a, b = cf.firstPosition(), cf.lastPosition()
+            a, b = min(a, b), max(a, b)
+            if a <= q <= b:
+                return cf
+
+    def open_link(self, link: str) -> None:
+        name = QUrl(link, QUrl.ParsingMode.TolerantMode)
+        if name.isRelative() and self.base_url:
+            name = QUrl.fromLocalFile(os.path.join(os.path.dirname(self.base_url.toLocalFile()), name.path()))
+        safe_open_url(name)
+
+    def contextMenuEvent(self, e) -> None:  # ty: ignore[lost-keyword-for-regular-parameter]
+        menu = QMenu(self)
+        doc = self.document()
+        assert doc is not None
+        doc_layout = doc.documentLayout()
+        assert doc_layout is not None
+        img_name = doc_layout.imageAt(QPointF(e.pos()))
+        if img_name:
+            pos = self.first_image_replacement_char_position_for(img_name)
+            if pos > -1:
+                c = self.textCursor()
+                c.clearSelection()
+                c.setPosition(pos)
+                pos = QTextFrameFormat.Position.InFlow
+                ff = self.frame_for_cursor(c)
+                if ff is not None:
+                    pos = ff.frameFormat().position()
+                align_menu = menu.addMenu(QIcon.ic('view-image.png'), _('Image...'))
+                assert align_menu is not None
+
+                def a(text, epos) -> None:
+                    ac = align_menu.addAction(text)
+                    ac.setCheckable(True)
+                    ac.triggered.connect(partial(self.align_image_at, c.position(), epos))
+                    if pos == epos:
+                        ac.setChecked(True)
+
+                cs = align_menu.addAction(QIcon.ic('resize.png'), _('Change size'))
+                assert cs is not None
+                cs.triggered.connect(partial(self.resize_image_at, c.position()))
+                align_menu.addSeparator()
+                a(_('Float to the left'), QTextFrameFormat.Position.FloatLeft)
+                a(_('Inline with text'), QTextFrameFormat.Position.InFlow)
+                a(_('Float to the right'), QTextFrameFormat.Position.FloatRight)
+                align_menu.addSeparator()
+                trash_action = align_menu.addAction(QIcon.ic('trash.png'), _('Remove this image'))
+                assert trash_action is not None
+                trash_action.triggered.connect(partial(self.remove_image_at, c.position()))
+        link_name = doc_layout.anchorAt(QPointF(e.pos()))
+        if link_name:
+            menu.addAction(QIcon.ic('insert-link.png'), _('Open link'), partial(self.open_link, link_name))
+        for ac in 'undo redo -- cut copy paste paste_and_match_style -- select_all'.split():
+            if ac == '--':
+                menu.addSeparator()
+            else:
+                ac = getattr(self, 'action_' + ac)
+                menu.addAction(ac)
         st = self.text()
         m = QMenu(_('Fonts'))
         m.addAction(self.action_bold), m.addAction(self.action_italic), m.addAction(self.action_underline)
         menu.addMenu(m)
 
         if st and st.strip():
-            self.create_change_case_menu(menu)
+            m = QMenu(_('Change case'), menu)
+            m.addAction(self.action_upper_case)
+            m.addAction(self.action_lower_case)
+            m.addAction(self.action_swap_case)
+            m.addAction(self.action_title_case)
+            m.addAction(self.action_capitalize)
+            menu.addMenu(m)
         parent = self._parent()
+        assert parent is not None
         if hasattr(parent, 'toolbars_visible'):
             vis = parent.toolbars_visible
             menu.addAction(_('%s toolbars') % (_('Hide') if vis else _('Show')), parent.toggle_toolbars)
         menu.addSeparator()
+        am = QMenu(_('Advanced'))
+        menu.addMenu(am)
+        am.addAction(self.action_block_style)
+        am.addAction(self.action_insert_link)
+        if self.insert_images_separately:
+            am.addAction(self.action_insert_image)
+        am.addAction(self.action_background)
+        am.addAction(self.action_color)
+
+        am.addSeparator()
+        for lst in self.plugin_actions_items:
+            for ac in lst:
+                if ac:
+                    am.addAction(ac)
+                else:
+                    am.addSeparator()
+
         menu.addAction(_('Smarten punctuation'), parent.smarten_punctuation)
-        menu.exec_(ev.globalPos())
+        menu.exec(e.globalPos())
+
+    def modify_case_operation(self, func: Callable[[str], str]) -> None:
+        cursor: QTextCursor = self.textCursor()
+        if not cursor.hasSelection():
+            cursor.select(QTextCursor.SelectionType.Document)
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        doc = self.document()
+
+        # Helper: collect blocks intersecting the selection
+        blocks = []
+
+        # Create a cursor at start to find the first block
+        sc = QTextCursor(doc)
+        sc.setPosition(start)
+        first_block = sc.block()
+
+        block = first_block
+        while block.isValid() and block.position() < end:
+            block_start = block.position()
+            block_len = block.length()  # includes block separator
+            block_end = block_start + block_len
+            seg_start = max(start, block_start)
+            seg_end = min(end, block_end)
+            if seg_start >= seg_end:
+                block = block.next()
+                continue
+
+            # record block-level formatting (block format and list format if any)
+            bf = QTextBlockFormat(block.blockFormat())
+            list_format = None
+            blist = block.textList()
+            if blist is not None:
+                list_format = QTextListFormat(blist.format())
+
+            # iterate fragments in the block and extract only the overlapped text pieces
+            fragments = []
+            fragment_text = ''
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    fpos = frag.position()
+                    flen = frag.length()
+                    fend = fpos + flen
+                    ov_start = max(seg_start, fpos)
+                    ov_end = min(seg_end, fend)
+                    if ov_start < ov_end:
+                        rel_start = ov_start - fpos
+                        rel_len = ov_end - ov_start
+                        text = frag.text()[rel_start : rel_start + rel_len]
+                        fmt = QTextCharFormat(frag.charFormat())
+                        fragments.append((len(fragment_text), len(text), fmt))
+                        fragment_text += text
+                it += 1
+
+            blocks.append({
+                'blockFormat': bf,
+                'listFormat': list_format,
+                'blockStart': block_start,
+                'fragments': fragments,
+                'fragment_text': fragment_text,
+            })
+
+            block = block.next()
+
+        if not blocks:
+            return
+
+        # Replace the selection preserving inline and block formats.
+        editcur = QTextCursor(doc)
+        editcur.setPosition(start)
+        editcur.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+
+        editcur.beginEditBlock()
+        editcur.removeSelectedText()
+        # after removal the cursor is at `start`
+        editcur.setPosition(start)
+
+        # Insert blocks and fragments. Handle first block specially to avoid unwanted new block
+        for idx, blk in enumerate(blocks):
+            blk_fmt = cast('QTextBlockFormat', blk['blockFormat'])
+            list_fmt = blk['listFormat']
+
+            # Determine if original first block was partial (selection started mid-block).
+            if idx == 0:
+                # keep and reuse the current block — apply its block format/list
+                editcur.setBlockFormat(blk_fmt)
+            else:
+                # subsequent blocks -> always insert a new block with the original format
+                editcur.insertBlock(blk_fmt)
+            if isinstance(list_fmt, QTextListFormat):
+                editcur.createList(list_fmt)
+
+            fragment_text = func(cast('str', blk['fragment_text']))
+            # insert the fragments for this block, preserving char formats
+            for start_pos, length, ch_fmt in cast('list[tuple[int, int, QTextCharFormat]]', blk['fragments']):
+                if start_pos >= len(fragment_text):
+                    break
+                # Convert selected fragment text
+                # (paragraph separators are not part of per-fragment text here)
+                editcur.insertText(fragment_text[start_pos : start_pos + length], ch_fmt)
+
+        editcur.endEditBlock()
+
+        # Reselect the replaced text so selection remains
+        new_end = editcur.position()
+        new_cursor = self.textCursor()
+        new_cursor.setPosition(start)
+        new_cursor.setPosition(new_end, QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(new_cursor)
+
 
 # }}}
 
-
 # Highlighter {{{
-
 
 State_Text = -1
 State_DocType = 0
@@ -840,35 +1470,34 @@ State_AttributeValue = 8
 
 
 class Highlighter(QSyntaxHighlighter):
-
-    def __init__(self, doc):
+    def __init__(self, doc) -> None:
         QSyntaxHighlighter.__init__(self, doc)
         self.colors = {}
-        self.colors['doctype']        = QColor(192, 192, 192)
-        self.colors['entity']         = QColor(128, 128, 128)
-        self.colors['comment']        = QColor(35, 110,  37)
+        self.colors['doctype'] = QColor(192, 192, 192)
+        self.colors['entity'] = QColor(128, 128, 128)
+        self.colors['comment'] = QColor(35, 110, 37)
         if is_dark_theme():
             from calibre.gui2.palette import dark_link_color
-            self.colors['tag']            = QColor(186,  78, 188)
-            self.colors['attrname']       = QColor(193,  119, 60)
-            self.colors['attrval']        = dark_link_color
-        else:
-            self.colors['tag']            = QColor(136,  18, 128)
-            self.colors['attrname']       = QColor(153,  69,   0)
-            self.colors['attrval']        = QColor(36,  36, 170)
 
-    def highlightBlock(self, text):
+            self.colors['tag'] = QColor(186, 78, 188)
+            self.colors['attrname'] = QColor(193, 119, 60)
+            self.colors['attrval'] = dark_link_color
+        else:
+            self.colors['tag'] = QColor(136, 18, 128)
+            self.colors['attrname'] = QColor(153, 69, 0)
+            self.colors['attrval'] = QColor(36, 36, 170)
+
+    def highlightBlock(self, text) -> None:
         state = self.previousBlockState()
         len_ = len(text)
         start = 0
         pos = 0
 
         while pos < len_:
-
             if state == State_Comment:
                 start = pos
                 while pos < len_:
-                    if text[pos:pos+3] == "-->":
+                    if text[pos : pos + 3] == '-->':
                         pos += 3
                         state = State_Text
                         break
@@ -928,7 +1557,7 @@ class Highlighter(QSyntaxHighlighter):
 
                     if ch == '>':
                         state = State_Text
-                        self.setFormat(pos-1, 1, self.colors['tag'])
+                        self.setFormat(pos - 1, 1, self.colors['tag'])
                         break
 
                     if not ch.isspace():
@@ -1025,19 +1654,17 @@ class Highlighter(QSyntaxHighlighter):
                 while pos < len_:
                     ch = text[pos]
                     if ch == '<':
-                        if text[pos:pos+4] == "<!--":
+                        if text[pos : pos + 4] == '<!--':
                             state = State_Comment
+                        elif text[pos : pos + 9].upper() == '<!DOCTYPE':
+                            state = State_DocType
                         else:
-                            if text[pos:pos+9].upper() == "<!DOCTYPE":
-                                state = State_DocType
-                            else:
-                                state = State_TagStart
+                            state = State_TagStart
                         break
                     elif ch == '&':
                         start = pos
                         while pos < len_ and text[pos] != ';':
-                            self.setFormat(start, pos - start,
-                                    self.colors['entity'])
+                            self.setFormat(start, pos - start, self.colors['entity'])
                             pos += 1
 
                     else:
@@ -1045,110 +1672,109 @@ class Highlighter(QSyntaxHighlighter):
 
         self.setCurrentBlockState(state)
 
+
 # }}}
 
 
 class Editor(QWidget):  # {{{
-
     toolbar_prefs_name = None
     data_changed = pyqtSignal()
+    editor_class = EditorWidget
 
-    def __init__(self, parent=None, one_line_toolbar=False, toolbar_prefs_name=None):
+    def __init__(self, parent=None, one_line_toolbar=False, toolbar_prefs_name=None) -> None:
         QWidget.__init__(self, parent)
         self.toolbar_prefs_name = toolbar_prefs_name or self.toolbar_prefs_name
-        self.toolbar1 = QToolBar(self)
-        self.toolbar2 = QToolBar(self)
-        self.toolbar3 = QToolBar(self)
-        for i in range(1, 4):
-            t = getattr(self, 'toolbar%d'%i)
-            t.setIconSize(QSize(18, 18))
-        self.editor = EditorWidget(self)
+        self.toolbar = create_flow_toolbar(self, restrict_to_single_line=one_line_toolbar, icon_size=18)
+        self.editor = self.editor_class(self)
         self.editor.data_changed.connect(self.data_changed)
         self.set_base_url = self.editor.set_base_url
         self.set_html = self.editor.set_html
         self.tabs = QTabWidget(self)
         self.tabs.setTabPosition(QTabWidget.TabPosition.South)
         self.wyswyg = QWidget(self.tabs)
-        self.code_edit = QPlainTextEdit(self.tabs)
+        self.code_edit = PlainTextEdit(self.tabs, use_smarten_punctuation=True)
+        self.code_edit.setTabChangesFocus(True)
         self.source_dirty = False
         self.wyswyg_dirty = True
 
         self._layout = QVBoxLayout(self)
-        self.wyswyg.layout = l = QVBoxLayout(self.wyswyg)
+        l = QVBoxLayout(self.wyswyg)
         self.setLayout(self._layout)
         l.setContentsMargins(0, 0, 0, 0)
-        if one_line_toolbar:
-            tb = QHBoxLayout()
-            l.addLayout(tb)
-        else:
-            tb = l
-        tb.addWidget(self.toolbar1)
-        tb.addWidget(self.toolbar2)
-        tb.addWidget(self.toolbar3)
+
+        l.addWidget(self.toolbar)
         l.addWidget(self.editor)
         self._layout.addWidget(self.tabs)
         self.tabs.addTab(self.wyswyg, _('&Normal view'))
         self.tabs.addTab(self.code_edit, _('&HTML source'))
         self.tabs.currentChanged[int].connect(self.change_tab)
         self.highlighter = Highlighter(self.code_edit.document())
-        self.layout().setContentsMargins(0, 0, 0, 0)
+        layout = self.layout()
+        assert layout is not None
+        layout.setContentsMargins(0, 0, 0, 0)
         if self.toolbar_prefs_name is not None:
             hidden = gprefs.get(self.toolbar_prefs_name)
             if hidden:
                 self.hide_toolbars()
 
-        # toolbar1 {{{
-        self.toolbar1.addAction(self.editor.action_undo)
-        self.toolbar1.addAction(self.editor.action_redo)
-        self.toolbar1.addAction(self.editor.action_select_all)
-        self.toolbar1.addAction(self.editor.action_remove_format)
-        self.toolbar1.addAction(self.editor.action_clear)
-        self.toolbar1.addSeparator()
+        self.toolbar.add_action(self.editor.action_undo)
+        self.toolbar.add_action(self.editor.action_redo)
+        self.toolbar.add_action(self.editor.action_select_all)
+        self.toolbar.add_action(self.editor.action_remove_format)
+        self.toolbar.add_action(self.editor.action_clear)
+        self.toolbar.add_separator()
 
         for x in ('copy', 'cut', 'paste'):
-            ac = getattr(self.editor, 'action_'+x)
-            self.toolbar1.addAction(ac)
+            ac = getattr(self.editor, 'action_' + x)
+            self.toolbar.add_action(ac)
 
-        self.toolbar1.addSeparator()
-        self.toolbar1.addAction(self.editor.action_background)
-        # }}}
+        self.toolbar.add_separator()
+        self.toolbar.add_action(self.editor.action_background)
+        self.toolbar.add_action(self.editor.action_color)
+        self.toolbar.add_separator()
 
-        # toolbar2 {{{
         for x in ('', 'un'):
-            ac = getattr(self.editor, 'action_%sordered_list'%x)
-            self.toolbar2.addAction(ac)
-        self.toolbar2.addSeparator()
+            ac = getattr(self.editor, f'action_{x}ordered_list')
+            self.toolbar.add_action(ac)
+        self.toolbar.add_separator()
         for x in ('superscript', 'subscript', 'indent', 'outdent'):
-            self.toolbar2.addAction(getattr(self.editor, 'action_' + x))
+            self.toolbar.add_action(getattr(self.editor, 'action_' + x))
             if x in ('subscript', 'outdent'):
-                self.toolbar2.addSeparator()
+                self.toolbar.add_separator()
 
-        self.toolbar2.addAction(self.editor.action_block_style)
-        w = self.toolbar2.widgetForAction(self.editor.action_block_style)
-        if hasattr(w, 'setPopupMode'):
-            w.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.toolbar2.addAction(self.editor.action_insert_link)
-        self.toolbar2.addAction(self.editor.action_insert_hr)
-        # }}}
+        self.toolbar.add_action(self.editor.action_block_style, popup_mode=QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.toolbar.add_action(self.editor.action_insert_link)
+        if self.editor.insert_images_separately:
+            self.toolbar.add_action(self.editor.action_insert_image)
+        self.toolbar.add_action(self.editor.action_insert_hr)
+        self.toolbar.add_separator()
 
-        # toolbar3 {{{
         for x in ('bold', 'italic', 'underline', 'strikethrough'):
-            ac = getattr(self.editor, 'action_'+x)
-            self.toolbar3.addAction(ac)
+            ac = getattr(self.editor, 'action_' + x)
+            self.toolbar.add_action(ac)
             self.addAction(ac)
-        self.toolbar3.addSeparator()
+        self.toolbar.add_separator()
 
         for x in ('left', 'center', 'right', 'justified'):
-            ac = getattr(self.editor, 'action_align_'+x)
-            self.toolbar3.addAction(ac)
-        self.toolbar3.addSeparator()
-        self.toolbar3.addAction(self.editor.action_color)
-        # }}}
+            ac = getattr(self.editor, 'action_align_' + x)
+            self.toolbar.add_action(ac)
+        self.toolbar.add_separator()
+
+        for lst in self.editor.plugin_actions_items:
+            for ac in lst:
+                if ac:
+                    self.toolbar.add_action(ac)
+                    self.addAction(ac)
+                else:
+                    self.toolbar.add_separator()
+            self.toolbar.add_separator()
+
+        QTimer.singleShot(0, self.toolbar.updateGeometry)
 
         self.code_edit.textChanged.connect(self.code_dirtied)
         self.editor.data_changed.connect(self.wyswyg_dirtied)
 
-    def set_minimum_height_for_editor(self, val):
+    def set_minimum_height_for_editor(self, val) -> None:
         self.editor.setMinimumHeight(val)
 
     @property
@@ -1157,12 +1783,11 @@ class Editor(QWidget):  # {{{
         return self.editor.html
 
     @html.setter
-    def html(self, v):
+    def html(self, v) -> None:
         self.editor.html = v
 
-    def change_tab(self, index):
-        # print 'reloading:', (index and self.wyswyg_dirty) or (not index and
-        #        self.source_dirty)
+    def change_tab(self, index) -> None:
+        # print('reloading:', (index and self.wyswyg_dirty) or (not index and self.source_dirty))
         if index == 1:  # changing to code view
             if self.wyswyg_dirty:
                 self.code_edit.setPlainText(self.editor.html)
@@ -1173,30 +1798,27 @@ class Editor(QWidget):  # {{{
                 self.source_dirty = False
 
     @property
-    def tab(self):
+    def tab(self) -> str:
         return 'code' if self.tabs.currentWidget() is self.code_edit else 'wyswyg'
 
     @tab.setter
-    def tab(self, val):
+    def tab(self, val) -> None:
         self.tabs.setCurrentWidget(self.code_edit if val == 'code' else self.wyswyg)
 
-    def wyswyg_dirtied(self, *args):
+    def wyswyg_dirtied(self, *args) -> None:
         self.wyswyg_dirty = True
 
-    def code_dirtied(self, *args):
+    def code_dirtied(self, *args) -> None:
         self.source_dirty = True
 
-    def hide_toolbars(self):
-        self.toolbar1.setVisible(False)
-        self.toolbar2.setVisible(False)
-        self.toolbar3.setVisible(False)
+    def hide_toolbars(self) -> None:
+        self.toolbar.setVisible(False)
 
-    def show_toolbars(self):
-        self.toolbar1.setVisible(True)
-        self.toolbar2.setVisible(True)
-        self.toolbar3.setVisible(True)
+    def show_toolbars(self) -> None:
+        self.toolbar.setVisible(True)
+        QTimer.singleShot(0, self.toolbar.updateGeometry)
 
-    def toggle_toolbars(self):
+    def toggle_toolbars(self) -> None:
         visible = self.toolbars_visible
         getattr(self, ('hide' if visible else 'show') + '_toolbars')()
         if self.toolbar_prefs_name is not None:
@@ -1204,37 +1826,51 @@ class Editor(QWidget):  # {{{
 
     @property
     def toolbars_visible(self):
-        return self.toolbar1.isVisible() or self.toolbar2.isVisible() or self.toolbar3.isVisible()
+        return self.toolbar.isVisible()
 
     @toolbars_visible.setter
-    def toolbars_visible(self, val):
+    def toolbars_visible(self, val) -> None:
         getattr(self, ('show' if val else 'hide') + '_toolbars')()
 
-    def set_readonly(self, what):
+    def set_readonly(self, what) -> None:
         self.editor.set_readonly(what)
 
-    def hide_tabs(self):
-        self.tabs.tabBar().setVisible(False)
+    def hide_tabs(self) -> None:
+        tab_bar = self.tabs.tabBar()
+        assert tab_bar is not None
+        tab_bar.setVisible(False)
 
-    def smarten_punctuation(self):
+    def smarten_punctuation(self) -> None:
         from calibre.ebooks.conversion.preprocess import smarten_punctuation
+
         html = self.html
         newhtml = smarten_punctuation(html)
         if html != newhtml:
             self.html = newhtml
 
-# }}}
 
+# }}}
 
 if __name__ == '__main__':
     from calibre.gui2 import Application
+
+    def extend_actions(e):
+        for n in ['beautify', 'bullhorn']:
+            yield QAction(QIcon.ic(n + '.png'), n, e)
+
+    EditorWidget.plugin_actions.add(extend_actions)
+
     app = Application([])
-    w = Editor()
+    w = Editor(one_line_toolbar=False)
+    w.set_base_url(QUrl.fromLocalFile(os.getcwd()))
     w.resize(800, 600)
+    w.setWindowFlag(Qt.WindowType.Dialog)
     w.show()
     w.html = '''<h1>Test Heading</h1><blockquote>Test blockquote</blockquote><p><span style="background-color: rgb(0, 255, 255); ">He hadn't
     set <u>out</u> to have an <em>affair</em>, <span style="font-style:italic; background-color:red">
     much</span> less a <s>long-term</s>, <b>devoted</b> one.</span><p>hello'''
-    w.html = '<div><p id="moo">Testing <em>a</em> link.</p><p>\xa0</p><p>ss</p></div>'
-    app.exec_()
-    # print w.html
+    i = 'file:///home/kovid/work/calibre/resources/images/'
+    w.html = f'<p>Testing <img src="{i}/donate.png"> img and another <img src="{i}/lt.png">file</p>'
+    w.html = '<div><p id="moo" align="justify">Testing&nbsp;<em>a</em> link.</p><p align="justify">&nbsp;</p><p align="justify">ss</p></div>'
+    app.exec()
+    print(repr(w.html))

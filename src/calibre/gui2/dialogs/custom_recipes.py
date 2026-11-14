@@ -1,28 +1,48 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
+import os
+import re
+import textwrap
+import time
 
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+from qt.core import (
+    QAbstractListModel,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QIcon,
+    QItemSelectionModel,
+    QLabel,
+    QLineEdit,
+    QListView,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QSize,
+    QSizePolicy,
+    QSortFilterProxyModel,
+    QSpinBox,
+    QStackedWidget,
+    Qt,
+    QToolButton,
+    QTreeView,
+    QVBoxLayout,
+    QWidget,
+    pyqtSignal,
+)
 
-import os, re, textwrap, time
-
-from PyQt5.Qt import (
-    QVBoxLayout, QStackedWidget, QSize, QPushButton, QIcon, QWidget, QListView, QItemSelectionModel,
-    QHBoxLayout, QAbstractListModel, Qt, QLabel, QSizePolicy, pyqtSignal, QSortFilterProxyModel,
-    QFormLayout, QSpinBox, QLineEdit, QGroupBox, QListWidget, QListWidgetItem,
-    QToolButton, QTreeView, QDialog, QDialogButtonBox)
-
-from calibre.gui2 import error_dialog, open_local_file, choose_files, choose_save_file
+from calibre.gui2 import choose_files, choose_save_file, error_dialog, open_local_file
 from calibre.gui2.dialogs.confirm_delete import confirm as confirm_delete
-from calibre.gui2.widgets2 import Dialog
-from calibre.web.feeds.recipes import custom_recipes, compile_recipe
-from calibre.gui2.tweak_book.editor.text import TextEdit
-from calibre.web.feeds.recipes.collection import get_builtin_recipe_by_id
-from calibre.utils.localization import localize_user_manual_link
-from polyglot.builtins import iteritems, unicode_type, range, as_unicode
 from calibre.gui2.search_box import SearchBox2
-from polyglot.builtins import as_bytes
+from calibre.gui2.tweak_book.editor.text import TextEdit
+from calibre.gui2.widgets2 import Dialog
+from calibre.utils.localization import _, localize_user_manual_link
+from calibre.web.feeds.recipes import compile_recipe, custom_recipes
+from calibre.web.feeds.recipes.collection import get_builtin_recipe_by_id
+from polyglot.builtins import as_bytes, as_unicode
 
 
 def is_basic_recipe(src):
@@ -30,8 +50,7 @@ def is_basic_recipe(src):
 
 
 class CustomRecipeModel(QAbstractListModel):  # {{{
-
-    def __init__(self, recipe_model):
+    def __init__(self, recipe_model) -> None:
         QAbstractListModel.__init__(self)
         self.recipe_model = recipe_model
 
@@ -46,10 +65,7 @@ class CustomRecipeModel(QAbstractListModel):  # {{{
             return self.recipe_model.custom_recipe_collection[row].get('id')
 
     def has_title(self, title):
-        for x in self.recipe_model.custom_recipe_collection:
-            if x.get('title', False) == title:
-                return True
-        return False
+        return any(x.get('title', False) == title for x in self.recipe_model.custom_recipe_collection)
 
     def script(self, index):
         row = index.row()
@@ -57,26 +73,26 @@ class CustomRecipeModel(QAbstractListModel):  # {{{
             urn = self.recipe_model.custom_recipe_collection[row].get('id')
             return self.recipe_model.get_recipe(urn)
 
-    def rowCount(self, *args):
+    def rowCount(self, parent=...):
         try:
             return len(self.recipe_model.custom_recipe_collection)
         except Exception:
             return 0
 
-    def data(self, index, role):
+    def data(self, index, role=...):
         if role == Qt.ItemDataRole.DisplayRole:
             return self.title(index)
 
-    def update(self, row, title, script):
+    def update(self, row, title, script) -> None:
         if row > -1 and row < self.rowCount():
             urn = self.recipe_model.custom_recipe_collection[row].get('id')
             self.beginResetModel()
             self.recipe_model.update_custom_recipe(urn, title, script)
             self.endResetModel()
 
-    def replace_many_by_title(self, scriptmap):
+    def replace_many_by_title(self, scriptmap) -> None:
         script_urn_map = {}
-        for title, script in iteritems(scriptmap):
+        for title, script in scriptmap.items():
             urn = None
             for x in self.recipe_model.custom_recipe_collection:
                 if x.get('title', False) == title:
@@ -102,22 +118,24 @@ class CustomRecipeModel(QAbstractListModel):  # {{{
                     return row
         return 0
 
-    def add_many(self, scriptmap):
+    def add_many(self, scriptmap) -> None:
         self.beginResetModel()
         self.recipe_model.add_custom_recipes(scriptmap)
         self.endResetModel()
 
-    def remove(self, rows):
+    def remove(self, rows) -> None:
         urns = []
         for r in rows:
             try:
                 urn = self.recipe_model.custom_recipe_collection[r].get('id')
                 urns.append(urn)
-            except:
+            except Exception:
                 pass
         self.beginResetModel()
         self.recipe_model.remove_custom_recipes(urns)
         self.endResetModel()
+
+
 # }}}
 
 
@@ -125,24 +143,24 @@ def py3_repr(x):
     ans = repr(x)
     if isinstance(x, bytes) and not ans.startswith('b'):
         ans = 'b' + ans
-    if isinstance(x, unicode_type) and ans.startswith('u'):
+    if isinstance(x, str) and ans.startswith('u'):
         ans = ans[1:]
     return ans
 
 
 def options_to_recipe_source(title, oldest_article, max_articles_per_feed, feeds):
-    classname = 'BasicUserRecipe%d' % int(time.time())
-    title = unicode_type(title).strip() or classname
+    classname = f'BasicUserRecipe{int(time.time())}'
+    title = str(title).strip() or classname
     indent = ' ' * 8
     if feeds:
         if len(feeds[0]) == 1:
-            feeds = '\n'.join('%s%s,' % (indent, py3_repr(url)) for url in feeds)
+            feeds = '\n'.join(f'{indent}{py3_repr(url)},' for url in feeds)
         else:
-            feeds = '\n'.join('%s(%s, %s),' % (indent, py3_repr(title), py3_repr(url)) for title, url in feeds)
+            feeds = '\n'.join(f'{indent}({py3_repr(title)}, {py3_repr(url)}),' for title, url in feeds)
     else:
         feeds = ''
     if feeds:
-        feeds = 'feeds          = [\n%s\n    ]' % feeds
+        feeds = f'feeds          = [\n{feeds}\n    ]'
     src = textwrap.dedent('''\
     #!/usr/bin/env python
     # vim:fileencoding=utf-8
@@ -155,16 +173,20 @@ def options_to_recipe_source(title, oldest_article, max_articles_per_feed, feeds
         auto_cleanup   = True
 
         {feeds}''').format(
-            classname=classname, title=py3_repr(title), oldest_article=oldest_article, feeds=feeds,
-            max_articles_per_feed=max_articles_per_feed, base='AutomaticNewsRecipe')
+        classname=classname,
+        title=py3_repr(title),
+        oldest_article=oldest_article,
+        feeds=feeds,
+        max_articles_per_feed=max_articles_per_feed,
+        base='AutomaticNewsRecipe',
+    )
     return src
 
 
 class RecipeList(QWidget):  # {{{
-
     edit_recipe = pyqtSignal(object, object)
 
-    def __init__(self, parent, model):
+    def __init__(self, parent, model) -> None:
         QWidget.__init__(self, parent)
 
         self.l = l = QHBoxLayout(self)
@@ -177,13 +199,12 @@ class RecipeList(QWidget):  # {{{
         self.stacks = s = QStackedWidget(self)
         l.addWidget(s, stretch=10, alignment=Qt.AlignmentFlag.AlignTop)
 
-        self.first_msg = la = QLabel(_(
-            'Create a new news source by clicking one of the buttons below'))
+        self.first_msg = la = QLabel(_('Create a new news source by clicking one of the buttons below'))
         la.setWordWrap(True)
         s.addWidget(la)
 
         self.w = w = QWidget(self)
-        w.l = l = QVBoxLayout(w)
+        l = QVBoxLayout(w)
         l.setContentsMargins(0, 0, 0, 0)
         s.addWidget(w)
 
@@ -192,40 +213,46 @@ class RecipeList(QWidget):  # {{{
         l.addWidget(la)
         l.setSpacing(20)
 
-        self.edit_button = b = QPushButton(QIcon(I('modified.png')), _('&Edit this recipe'), w)
+        self.edit_button = b = QPushButton(QIcon.ic('modified.png'), _('&Edit this recipe'), w)
         b.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed))
         b.clicked.connect(self.edit_requested)
         l.addWidget(b)
-        self.remove_button = b = QPushButton(QIcon(I('list_remove.png')), _('&Remove this recipe'), w)
+        self.remove_button = b = QPushButton(QIcon.ic('list_remove.png'), _('&Remove this recipe'), w)
         b.clicked.connect(self.remove)
         b.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed))
         l.addWidget(b)
-        self.export_button = b = QPushButton(QIcon(I('save.png')), _('S&ave recipe as file'), w)
+        self.export_button = b = QPushButton(QIcon.ic('save.png'), _('S&ave recipe as file'), w)
         b.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed))
         b.clicked.connect(self.save_recipe)
         l.addWidget(b)
-        self.download_button = b = QPushButton(QIcon(I('download-metadata.png')), _('&Download this recipe'), w)
+        self.download_button = b = QPushButton(QIcon.ic('download-metadata.png'), _('&Download this recipe'), w)
         b.clicked.connect(self.download)
         b.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed))
         l.addWidget(b)
 
         self.select_row()
-        v.selectionModel().currentRowChanged.connect(self.recipe_selected)
+        sel_model = v.selectionModel()
+        assert sel_model is not None
+        sel_model.currentRowChanged.connect(self.recipe_selected)
 
-    def select_row(self, row=0):
+    def select_row(self, row=0) -> None:
         v = self.view
-        if v.model().rowCount() > 0:
-            idx = v.model().index(row)
+        m = v.model()
+        assert m is not None
+        if m.rowCount() > 0:
+            idx = m.index(row, 0)
             if idx.isValid():
-                v.selectionModel().select(idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+                sel_model = v.selectionModel()
+                assert sel_model is not None
+                sel_model.select(idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
                 v.setCurrentIndex(idx)
                 self.recipe_selected(idx)
 
-    def add(self, title, src):
+    def add(self, title, src) -> None:
         row = self.model.add(title, src)
         self.select_row(row)
 
-    def update(self, row, title, src):
+    def update_recipe(self, row, title, src) -> None:
         self.model.update(row, title, src)
         self.select_row(row)
 
@@ -233,82 +260,90 @@ class RecipeList(QWidget):  # {{{
     def model(self):
         return self.view.model()
 
-    def recipe_selected(self, cur, prev=None):
+    def recipe_selected(self, cur, prev=None) -> None:
         if cur.isValid():
             self.stacks.setCurrentIndex(1)
-            self.title.setText('<h2 style="text-align:center">%s</h2>' % self.model.title(cur))
+            self.title.setText(f'<h2 style="text-align:center">{self.model.title(cur)}</h2>')
         else:
             self.stacks.setCurrentIndex(0)
 
-    def edit_requested(self):
+    def edit_requested(self) -> None:
         idx = self.view.currentIndex()
         if idx.isValid():
             src = self.model.script(idx)
             if src is not None:
                 self.edit_recipe.emit(idx.row(), src)
 
-    def save_recipe(self):
+    def save_recipe(self) -> None:
         idx = self.view.currentIndex()
         if idx.isValid():
             src = self.model.script(idx)
             if src is not None:
                 path = choose_save_file(
-                    self, 'save-custom-recipe', _('Save recipe'),
+                    self,
+                    'save-custom-recipe',
+                    _('Save recipe'),
                     filters=[(_('Recipes'), ['recipe'])],
                     all_files=False,
-                    initial_filename='{}.recipe'.format(self.model.title(idx))
+                    initial_filename=f'{self.model.title(idx)}.recipe',
                 )
                 if path:
                     with open(path, 'wb') as f:
                         f.write(as_bytes(src))
 
-    def item_activated(self, idx):
+    def item_activated(self, idx) -> None:
         if idx.isValid():
             src = self.model.script(idx)
             if src is not None:
                 self.edit_recipe.emit(idx.row(), src)
 
-    def remove(self):
+    def remove(self) -> None:
         idx = self.view.currentIndex()
         if idx.isValid():
-            self.model.remove((idx.row(),))
-            self.select_row()
-            if self.model.rowCount() == 0:
-                self.stacks.setCurrentIndex(0)
+            if confirm_delete(_('Are you sure you want to permanently remove this recipe?'), 'remove-custom-recipe', parent=self):
+                self.model.remove((idx.row(),))
+                self.select_row()
+                if self.model.rowCount() == 0:
+                    self.stacks.setCurrentIndex(0)
 
-    def download(self):
+    def download(self) -> None:
         idx = self.view.currentIndex()
         if idx.isValid():
             urn = self.model.urn(idx)
             title = self.model.title(idx)
             from calibre.gui2.ui import get_gui
-            gui = get_gui()
+
+            gui = get_gui(fail_if_absent=True)
             gui.iactions['Fetch News'].download_custom_recipe(title, urn)
 
     def has_title(self, title):
         return self.model.has_title(title)
 
-    def add_many(self, script_map):
+    def add_many(self, script_map) -> None:
         self.model.add_many(script_map)
         self.select_row()
 
-    def replace_many_by_title(self, script_map):
+    def replace_many_by_title(self, script_map) -> None:
         self.model.replace_many_by_title(script_map)
         self.select_row()
+
+
 # }}}
 
 
 class BasicRecipe(QWidget):  # {{{
-
-    def __init__(self, parent):
+    def __init__(self, parent) -> None:
         QWidget.__init__(self, parent)
         self.l = l = QFormLayout(self)
         l.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
-        self.hm = hm = QLabel(_(
-            'Create a basic news recipe, by adding RSS feeds to it.\n'
-            'For some news sources, you will have to use the "Switch to advanced mode" '
-            'button below to further customize the fetch process.'))
+        self.hm = hm = QLabel(
+            _(
+                'Create a basic news recipe, by adding RSS feeds to it.\n'
+                'For some news sources, you will have to use the "Switch to advanced mode" '
+                'button below to further customize the fetch process.'
+            )
+        )
         hm.setWordWrap(True)
         l.addRow(hm)
 
@@ -318,54 +353,54 @@ class BasicRecipe(QWidget):  # {{{
 
         self.oldest_article = o = QSpinBox(self)
         o.setSuffix(' ' + _('day(s)'))
-        o.setToolTip(_("The oldest article to download"))
+        o.setToolTip(_('The oldest article to download'))
         o.setMinimum(1), o.setMaximum(36500)
         l.addRow(_('&Oldest article:'), o)
 
         self.max_articles = m = QSpinBox(self)
         m.setMinimum(5), m.setMaximum(100)
-        m.setToolTip(_("Maximum number of articles to download per feed."))
-        l.addRow(_("&Max. number of articles per feed:"), m)
+        m.setToolTip(_('Maximum number of articles to download per feed.'))
+        l.addRow(_('&Max. number of articles per feed:'), m)
 
         self.fg = fg = QGroupBox(self)
-        fg.setTitle(_("Feeds in recipe"))
+        fg.setTitle(_('Feeds in recipe'))
         self.feeds = f = QListWidget(self)
-        fg.h = QHBoxLayout(fg)
-        fg.h.addWidget(f)
-        fg.l = QVBoxLayout()
+        fg_h = QHBoxLayout(fg)
+        fg_h.addWidget(f)
+        fg_l = QVBoxLayout()
         self.up_button = b = QToolButton(self)
-        b.setIcon(QIcon(I('arrow-up.png')))
+        b.setIcon(QIcon.ic('arrow-up.png'))
         b.setToolTip(_('Move selected feed up'))
-        fg.l.addWidget(b)
+        fg_l.addWidget(b)
         b.clicked.connect(self.move_up)
         self.remove_button = b = QToolButton(self)
-        b.setIcon(QIcon(I('list_remove.png')))
+        b.setIcon(QIcon.ic('list_remove.png'))
         b.setToolTip(_('Remove selected feed'))
-        fg.l.addWidget(b)
+        fg_l.addWidget(b)
         b.clicked.connect(self.remove_feed)
         self.down_button = b = QToolButton(self)
-        b.setIcon(QIcon(I('arrow-down.png')))
+        b.setIcon(QIcon.ic('arrow-down.png'))
         b.setToolTip(_('Move selected feed down'))
-        fg.l.addWidget(b)
+        fg_l.addWidget(b)
         b.clicked.connect(self.move_down)
-        fg.h.addLayout(fg.l)
+        fg_h.addLayout(fg_l)
         l.addRow(fg)
 
         self.afg = afg = QGroupBox(self)
         afg.setTitle(_('Add feed to recipe'))
-        afg.l = QFormLayout(afg)
-        afg.l.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        afg_l = QFormLayout(afg)
+        afg_l.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.feed_title = ft = QLineEdit(self)
-        afg.l.addRow(_('&Feed title:'), ft)
+        afg_l.addRow(_('&Feed title:'), ft)
         self.feed_url = fu = QLineEdit(self)
-        afg.l.addRow(_('Feed &URL:'), fu)
-        self.afb = b = QPushButton(QIcon(I('plus.png')), _('&Add feed'), self)
+        afg_l.addRow(_('Feed &URL:'), fu)
+        self.afb = b = QPushButton(QIcon.ic('plus.png'), _('&Add feed'), self)
         b.setToolTip(_('Add this feed to the recipe'))
         b.clicked.connect(self.add_feed)
-        afg.l.addRow(b)
+        afg_l.addRow(b)
         l.addRow(afg)
 
-    def move_up(self):
+    def move_up(self) -> None:
         items = self.feeds.selectedItems()
         if items:
             row = self.feeds.row(items[0])
@@ -373,7 +408,7 @@ class BasicRecipe(QWidget):  # {{{
                 self.feeds.insertItem(row - 1, self.feeds.takeItem(row))
                 self.feeds.setCurrentItem(items[0])
 
-    def move_down(self):
+    def move_down(self) -> None:
         items = self.feeds.selectedItems()
         if items:
             row = self.feeds.row(items[0])
@@ -381,37 +416,37 @@ class BasicRecipe(QWidget):  # {{{
                 self.feeds.insertItem(row + 1, self.feeds.takeItem(row))
                 self.feeds.setCurrentItem(items[0])
 
-    def remove_feed(self):
+    def remove_feed(self) -> None:
         for item in self.feeds.selectedItems():
             self.feeds.takeItem(self.feeds.row(item))
 
     def add_feed(self):
         title = self.feed_title.text().strip()
         if not title:
-            return error_dialog(self, _('No feed title'), _(
-                'You must specify a title for the feed'), show=True)
+            return error_dialog(self, _('No feed title'), _('You must specify a title for the feed'), show=True)
         url = self.feed_url.text().strip()
         if not title:
-            return error_dialog(self, _('No feed URL'), _(
-                'You must specify a URL for the feed'), show=True)
-        QListWidgetItem('%s - %s' % (title, url), self.feeds).setData(Qt.ItemDataRole.UserRole, (title, url))
+            return error_dialog(self, _('No feed URL'), _('You must specify a URL for the feed'), show=True)
+        QListWidgetItem(f'{title} - {url}', self.feeds).setData(Qt.ItemDataRole.UserRole, (title, url))
         self.feed_title.clear(), self.feed_url.clear()
 
-    def validate(self):
+    def validate(self) -> bool:
         title = self.title.text().strip()
         if not title:
-            error_dialog(self, _('Title required'), _(
-                'You must give your news source a title'), show=True)
+            error_dialog(self, _('Title required'), _('You must give your news source a title'), show=True)
             return False
         if self.feeds.count() < 1:
-            error_dialog(self, _('Feed required'), _(
-                'You must add at least one feed to your news source'), show=True)
+            error_dialog(self, _('Feed required'), _('You must add at least one feed to your news source'), show=True)
             return False
         try:
             compile_recipe(self.recipe_source)
         except Exception as err:
-            error_dialog(self, _('Invalid recipe'), _(
-                'Failed to compile the recipe, with syntax error: %s' % err), show=True)
+            error_dialog(
+                self,
+                _('Invalid recipe'),
+                _('Failed to compile the recipe, with syntax error: {}').format(err),
+                show=True,
+            )
             return False
         return True
 
@@ -419,11 +454,15 @@ class BasicRecipe(QWidget):  # {{{
     def recipe_source(self):
 
         title = self.title.text().strip()
-        feeds = [self.feeds.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.feeds.count())]
+        feeds = []
+        for i in range(self.feeds.count()):
+            feed_item = self.feeds.item(i)
+            assert feed_item is not None
+            feeds.append(feed_item.data(Qt.ItemDataRole.UserRole))
         return options_to_recipe_source(title, self.oldest_article.value(), self.max_articles.value(), feeds)
 
     @recipe_source.setter
-    def recipe_source(self, src):
+    def recipe_source(self, src) -> None:
         self.feeds.clear()
         self.feed_title.clear()
         self.feed_url.clear()
@@ -433,37 +472,43 @@ class BasicRecipe(QWidget):  # {{{
             self.max_articles.setValue(100)
         else:
             recipe = compile_recipe(src)
-            self.title.setText(recipe.title)
-            self.oldest_article.setValue(recipe.oldest_article)
-            self.max_articles.setValue(recipe.max_articles_per_feed)
-            for x in (recipe.feeds or ()):
+            self.title.setText(recipe.title)  # type: ignore
+            self.oldest_article.setValue(recipe.oldest_article)  # type: ignore
+            self.max_articles.setValue(recipe.max_articles_per_feed)  # type: ignore
+            for x in recipe.feeds or ():  # type: ignore
                 title, url = ('', x) if len(x) == 1 else x
-                QListWidgetItem('%s - %s' % (title, url), self.feeds).setData(Qt.ItemDataRole.UserRole, (title, url))
+                QListWidgetItem(f'{title} - {url}', self.feeds).setData(Qt.ItemDataRole.UserRole, (title, url))
+
 
 # }}}
 
 
 class AdvancedRecipe(QWidget):  # {{{
-
-    def __init__(self, parent):
+    def __init__(self, parent) -> None:
         QWidget.__init__(self, parent)
         self.l = l = QVBoxLayout(self)
 
-        self.la = la = QLabel(_(
-            'For help with writing advanced news recipes, see the <a href="%s">User Manual</a>'
-        ) % localize_user_manual_link('https://manual.calibre-ebook.com/news.html'))
+        self.la = la = QLabel(
+            _('For help with writing advanced news recipes, see the <a href="%s">User Manual</a>')
+            % localize_user_manual_link('https://manual.calibre-ebook.com/news.html')
+        )
+        la.setOpenExternalLinks(True)
         l.addWidget(la)
 
         self.editor = TextEdit(self)
         l.addWidget(self.editor)
 
-    def validate(self):
+    def validate(self) -> bool:
         src = self.recipe_source
         try:
             compile_recipe(src)
         except Exception as err:
-            error_dialog(self, _('Invalid recipe'), _(
-                'Failed to compile the recipe, with syntax error: %s' % err), show=True)
+            error_dialog(
+                self,
+                _('Invalid recipe'),
+                _('Failed to compile the recipe, with syntax error: {}').format(err),
+                show=True,
+            )
             return False
         return True
 
@@ -472,18 +517,21 @@ class AdvancedRecipe(QWidget):  # {{{
         return self.editor.toPlainText()
 
     @recipe_source.setter
-    def recipe_source(self, src):
+    def recipe_source(self, src) -> None:
         self.editor.load_text(src, syntax='python', doc_name='<recipe>')
 
     def sizeHint(self):
         return QSize(800, 500)
+
+
 # }}}
 
 
 class ChooseBuiltinRecipeModel(QSortFilterProxyModel):
-
-    def filterAcceptsRow(self, source_row, source_parent):
-        idx = self.sourceModel().index(source_row, 0, source_parent)
+    def filterAcceptsRow(self, source_row, source_parent) -> bool:
+        src_model = self.sourceModel()
+        assert src_model is not None
+        idx = src_model.index(source_row, 0, source_parent)
         urn = idx.data(Qt.ItemDataRole.UserRole)
         if not urn or urn in ('::category::0', '::category::1'):
             return False
@@ -491,12 +539,11 @@ class ChooseBuiltinRecipeModel(QSortFilterProxyModel):
 
 
 class ChooseBuiltinRecipe(Dialog):  # {{{
-
-    def __init__(self, recipe_model, parent=None):
+    def __init__(self, recipe_model, parent=None) -> None:
         self.recipe_model = recipe_model
-        Dialog.__init__(self, _("Choose builtin recipe"), 'choose-builtin-recipe', parent=parent)
+        Dialog.__init__(self, _('Choose builtin recipe'), 'choose-builtin-recipe', parent=parent)
 
-    def setup_ui(self):
+    def setup_ui(self) -> None:
         self.l = l = QVBoxLayout(self)
         self.recipes = r = QTreeView(self)
         r.setAnimated(True)
@@ -512,7 +559,7 @@ class ChooseBuiltinRecipe(Dialog):  # {{{
         self.recipe_model.searched.connect(self.search.search_done, type=Qt.ConnectionType.QueuedConnection)
         self.recipe_model.searched.connect(self.search_done)
         self.go_button = b = QToolButton(self)
-        b.setText(_("Go"))
+        b.setText(_('Go'))
         b.clicked.connect(self.search.do_search)
         h = QHBoxLayout()
         h.addWidget(s), h.addWidget(b)
@@ -521,7 +568,7 @@ class ChooseBuiltinRecipe(Dialog):  # {{{
         l.addWidget(self.bb)
         self.search.setFocus(Qt.FocusReason.OtherFocusReason)
 
-    def search_done(self, *args):
+    def search_done(self, *args) -> None:
         if self.recipe_model.showing_count < 10:
             self.recipes.expandAll()
 
@@ -537,19 +584,19 @@ class ChooseBuiltinRecipe(Dialog):  # {{{
 
     def accept(self):
         if not self.selected_recipe:
-            return error_dialog(self, _('Choose recipe'), _(
-                'You must choose a recipe to customize first'), show=True)
+            return error_dialog(self, _('Choose recipe'), _('You must choose a recipe to customize first'), show=True)
         return Dialog.accept(self)
+
+
 # }}}
 
 
 class CustomRecipes(Dialog):
-
-    def __init__(self, recipe_model, parent=None):
+    def __init__(self, recipe_model, parent=None) -> None:
         self.recipe_model = recipe_model
-        Dialog.__init__(self, _("Add custom news source"), 'add-custom-news-source', parent=parent)
+        Dialog.__init__(self, _('Add custom news source'), 'add-custom-news-source', parent=parent)
 
-    def setup_ui(self):
+    def setup_ui(self) -> None:
         self.l = l = QVBoxLayout(self)
         self.stack = s = QStackedWidget(self)
         l.addWidget(s)
@@ -566,27 +613,42 @@ class CustomRecipes(Dialog):
 
         l.addWidget(self.bb)
         self.list_actions = []
-        la = lambda *args:self.list_actions.append(args)
+
+        def la(*args):
+            return self.list_actions.append(args)
+
         la('plus.png', _('&New recipe'), _('Create a new recipe from scratch'), self.add_recipe)
-        la('news.png', _('Customize &builtin recipe'), _('Customize a builtin news download source'), self.customize_recipe)
+        la(
+            'news.png',
+            _('Customize &builtin recipe'),
+            _('Customize a builtin news download source'),
+            self.customize_recipe,
+        )
         la('document_open.png', _('Load recipe from &file'), _('Load a recipe from a file'), self.load_recipe)
-        la('mimetypes/dir.png', _('&Show recipe files'), _('Show the folder containing all recipe files'), self.show_recipe_files)
-        la('mimetypes/opml.png', _('Import &OPML'), _(
-            "Import a collection of RSS feeds in OPML format\n"
-            "Many RSS readers can export their subscribed RSS feeds\n"
-            "in OPML format"), self.import_opml)
+        la(
+            'mimetypes/dir.png',
+            _('&Show recipe files'),
+            _('Show the folder containing all recipe files'),
+            self.show_recipe_files,
+        )
+        la(
+            'mimetypes/opml.png',
+            _('Import &OPML'),
+            _('Import a collection of RSS feeds in OPML format\nMany RSS readers can export their subscribed RSS feeds\nin OPML format'),
+            self.import_opml,
+        )
 
         s.currentChanged.connect(self.update_button_box)
         self.update_button_box()
 
-    def update_button_box(self, index=0):
+    def update_button_box(self, index=0) -> None:
         bb = self.bb
         bb.clear()
         if index == 0:
             bb.setStandardButtons(QDialogButtonBox.StandardButton.Close)
             for icon, text, tooltip, receiver in self.list_actions:
                 b = bb.addButton(text, QDialogButtonBox.ButtonRole.ActionRole)
-                b.setIcon(QIcon(I(icon))), b.setToolTip(tooltip)
+                b.setIcon(QIcon.ic(icon)), b.setToolTip(tooltip)
                 b.clicked.connect(receiver)
         else:
             bb.setStandardButtons(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
@@ -595,17 +657,18 @@ class CustomRecipes(Dialog):
                 tooltip = _('Edit this recipe in advanced mode')
                 receiver = self.switch_to_advanced
                 b = bb.addButton(text, QDialogButtonBox.ButtonRole.ActionRole)
+                assert b is not None
                 b.setToolTip(tooltip)
                 b.clicked.connect(receiver)
 
-    def accept(self):
+    def accept(self) -> None:
         idx = self.stack.currentIndex()
         if idx > 0:
             self.editing_finished()
             return
         Dialog.accept(self)
 
-    def reject(self):
+    def reject(self) -> None:
         idx = self.stack.currentIndex()
         if idx > 0:
             if confirm_delete(_('Are you sure? Any unsaved changes will be lost.'), 'confirm-cancel-edit-custom-recipe'):
@@ -620,16 +683,15 @@ class CustomRecipes(Dialog):
     def show_recipe_files(self):
         bdir = os.path.dirname(custom_recipes.file_path)
         if not os.path.exists(bdir):
-            return error_dialog(self, _('No recipes'),
-                    _('No custom recipes created.'), show=True)
+            return error_dialog(self, _('No recipes'), _('No custom recipes created.'), show=True)
         open_local_file(bdir)
 
-    def add_recipe(self):
+    def add_recipe(self) -> None:
         self.editing_row = None
         self.basic_recipe.recipe_source = None
         self.stack.setCurrentIndex(1)
 
-    def edit_recipe(self, row, src):
+    def edit_recipe(self, row, src) -> None:
         self.editing_row = row
         if is_basic_recipe(src):
             self.basic_recipe.recipe_source = src
@@ -638,8 +700,9 @@ class CustomRecipes(Dialog):
             self.advanced_recipe.recipe_source = src
             self.stack.setCurrentIndex(2)
 
-    def editing_finished(self):
+    def editing_finished(self) -> None:
         w = self.stack.currentWidget()
+        assert isinstance(w, (BasicRecipe, AdvancedRecipe))
         if not w.validate():
             return
         src = w.recipe_source
@@ -649,14 +712,14 @@ class CustomRecipes(Dialog):
         row = self.editing_row
         if row is None:
             # Adding a new recipe
-            self.recipe_list.add(recipe.title, src)
+            self.recipe_list.add(recipe.title, src)  # type: ignore
         else:
-            self.recipe_list.update(row, recipe.title, src)
+            self.recipe_list.update_recipe(row, recipe.title, src)  # type: ignore
         self.stack.setCurrentIndex(0)
 
-    def customize_recipe(self):
+    def customize_recipe(self) -> None:
         d = ChooseBuiltinRecipe(self.recipe_model, self)
-        if d.exec_() != QDialog.DialogCode.Accepted:
+        if d.exec() != QDialog.DialogCode.Accepted:
             return
 
         id_ = d.selected_recipe
@@ -669,28 +732,36 @@ class CustomRecipes(Dialog):
 
         self.edit_recipe(None, src)
 
-    def load_recipe(self):
-        files = choose_files(self, 'recipe loader dialog',
+    def load_recipe(self) -> None:
+        files = choose_files(
+            self,
+            'recipe loader dialog',
             _('Choose a recipe file'),
             filters=[(_('Recipes'), ['py', 'recipe'])],
-            all_files=False, select_only_single_file=True)
+            all_files=False,
+            select_only_single_file=True,
+        )
         if files:
             path = files[0]
             try:
                 with open(path, 'rb') as f:
                     src = f.read().decode('utf-8')
             except Exception as err:
-                error_dialog(self, _('Invalid input'),
-                        _('<p>Could not create recipe. Error:<br>%s')%err, show=True)
+                error_dialog(self, _('Invalid input'), _('<p>Could not create recipe. Error:<br>%s') % err, show=True)
                 return
             self.edit_recipe(None, src)
 
-    def import_opml(self):
+    def import_opml(self) -> None:
         from calibre.gui2.dialogs.opml import ImportOPML
+
         d = ImportOPML(parent=self)
-        if d.exec_() != QDialog.DialogCode.Accepted:
+        if d.exec() != QDialog.DialogCode.Accepted:
             return
-        oldest_article, max_articles_per_feed, replace_existing = d.oldest_article, d.articles_per_feed, d.replace_existing
+        oldest_article, max_articles_per_feed, replace_existing = (
+            d.oldest_article,
+            d.articles_per_feed,
+            d.replace_existing,
+        )
         failed_recipes, replace_recipes, add_recipes = {}, {}, {}
 
         for group in d.recipes:
@@ -699,12 +770,13 @@ class CustomRecipes(Dialog):
                 c = 0
                 while self.recipe_list.has_title(title):
                     c += 1
-                    title = '%s %d' % (base_title, c)
+                    title = f'{base_title} {c}'
             try:
                 src = options_to_recipe_source(title, oldest_article, max_articles_per_feed, group.feeds)
                 compile_recipe(src)
             except Exception:
                 import traceback
+
                 failed_recipes[title] = traceback.format_exc()
                 continue
 
@@ -718,12 +790,16 @@ class CustomRecipes(Dialog):
         if replace_recipes:
             self.recipe_list.replace_many_by_title(replace_recipes)
         if failed_recipes:
-            det_msg = '\n'.join('%s\n%s\n' % (title, tb) for title, tb in iteritems(failed_recipes))
-            error_dialog(self, _('Failed to create recipes'), _(
-                'Failed to create some recipes, click "Show details" for details'), show=True,
-                         det_msg=det_msg)
+            det_msg = '\n'.join(f'{title}\n{tb}\n' for title, tb in failed_recipes.items())
+            error_dialog(
+                self,
+                _('Failed to create recipes'),
+                _('Failed to create some recipes, click "Show details" for details'),
+                show=True,
+                det_msg=det_msg,
+            )
 
-    def switch_to_advanced(self):
+    def switch_to_advanced(self) -> None:
         src = self.basic_recipe.recipe_source
         src = src.replace('AutomaticNewsRecipe', 'BasicNewsRecipe')
         src = src.replace('BasicUserRecipe', 'AdvancedUserRecipe')
@@ -734,6 +810,7 @@ class CustomRecipes(Dialog):
 if __name__ == '__main__':
     from calibre.gui2 import Application
     from calibre.web.feeds.recipes.model import RecipeModel
+
     app = Application([])
-    CustomRecipes(RecipeModel()).exec_()
+    CustomRecipes(RecipeModel()).exec()
     del app

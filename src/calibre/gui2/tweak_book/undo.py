@@ -1,42 +1,47 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
 import shutil
 
-from PyQt5.Qt import (
-    QAbstractListModel, Qt, QModelIndex, QApplication, QWidget,
-    QGridLayout, QListView, QStyledItemDelegate, pyqtSignal, QPushButton, QIcon, QItemSelectionModel)
+from qt.core import (
+    QAbstractListModel,
+    QGridLayout,
+    QIcon,
+    QItemSelectionModel,
+    QListView,
+    QModelIndex,
+    QPushButton,
+    QStyledItemDelegate,
+    Qt,
+    QWidget,
+    pyqtSignal,
+)
 
-from calibre.gui2 import error_dialog
+from calibre.gui2 import error_dialog, qapplication_or_fail
+from calibre.utils.localization import _
 
 ROOT = QModelIndex()
 
 MAX_SAVEPOINTS = 100
 
 
-def cleanup(containers):
+def cleanup(containers) -> None:
     for container in containers:
         try:
             shutil.rmtree(container.root, ignore_errors=True)
-        except:
+        except Exception:
             pass
 
 
-class State(object):
-
-    def __init__(self, container):
+class State:
+    def __init__(self, container) -> None:
         self.container = container
         self.message = None
         self.rewind_message = None
 
 
 class GlobalUndoHistory(QAbstractListModel):
-
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QAbstractListModel.__init__(self, parent)
         self.states = []
         self.pos = 0
@@ -48,7 +53,7 @@ class GlobalUndoHistory(QAbstractListModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return self.label_for_row(index.row())
         if role == Qt.ItemDataRole.FontRole and index.row() == self.pos:
-            f = QApplication.instance().font()
+            f = qapplication_or_fail().font()
             f.setBold(True)
             return f
         if role == Qt.ItemDataRole.UserRole:
@@ -61,8 +66,6 @@ class GlobalUndoHistory(QAbstractListModel):
             msg = _('Current state') + ('' if not msg else _(' [was %s]') % msg)
         elif not msg:
             msg = _('[Unnamed state]')
-        else:
-            msg = msg
         return msg
 
     def label_for_container(self, container):
@@ -78,34 +81,35 @@ class GlobalUndoHistory(QAbstractListModel):
     def previous_container(self):
         return self.states[self.pos - 1].container
 
-    def open_book(self, container):
+    def open_book(self, container) -> None:
         self.beginResetModel()
         self.states = [State(container)]
         self.pos = 0
         self.endResetModel()
 
-    def truncate(self):
-        extra = self.states[self.pos+1:]
+    def truncate(self) -> None:
+        extra = self.states[self.pos + 1 :]
         if extra:
-            self.beginRemoveRows(ROOT, self.pos+1, len(self.states) - 1)
+            self.beginRemoveRows(ROOT, self.pos + 1, len(self.states) - 1)
         cleanup(extra)
-        self.states = self.states[:self.pos+1]
+        self.states = self.states[: self.pos + 1]
         if extra:
             self.endRemoveRows()
 
-    def add_savepoint(self, new_container, message):
+    def add_savepoint(self, new_container, message) -> None:
         try:
             self.states[self.pos].rewind_message = self.states[self.pos].message
             self.states[self.pos].message = message
         except IndexError:
-            raise IndexError('The checkpoint stack has an incorrect position pointer. This should never happen: self.pos = %r, len(self.states) = %r' % (
-                self.pos, len(self.states)))
+            raise IndexError(
+                f'The checkpoint stack has an incorrect position pointer. This should never happen: pos={self.pos!r}, len_states={len(self.states)=}'
+            )
         self.truncate()
-        self.beginInsertRows(ROOT, self.pos+1, self.pos+1)
+        self.beginInsertRows(ROOT, self.pos + 1, self.pos + 1)
         self.states.append(State(new_container))
         self.pos += 1
         self.endInsertRows()
-        self.dataChanged.emit(self.index(self.pos-1), self.index(self.pos))
+        self.dataChanged.emit(self.index(self.pos - 1), self.index(self.pos))
         if len(self.states) > MAX_SAVEPOINTS:
             num = len(self.states) - MAX_SAVEPOINTS
             self.beginRemoveRows(ROOT, 0, num - 1)
@@ -115,11 +119,11 @@ class GlobalUndoHistory(QAbstractListModel):
             self.endRemoveRows()
 
     def rewind_savepoint(self):
-        ''' Revert back to the last save point, should only be used immediately
+        """Revert back to the last save point, should only be used immediately
         after a call to add_savepoint. If there are intervening calls to undo
         or redo, behavior is undefined. This is intended to be used in the case
         where you create savepoint, perform some operation, operation fails, so
-        revert to state before creating savepoint. '''
+        revert to state before creating savepoint."""
         if self.pos > 0 and self.pos == len(self.states) - 1:
             self.beginRemoveRows(ROOT, self.pos, self.pos)
             self.pos -= 1
@@ -133,13 +137,13 @@ class GlobalUndoHistory(QAbstractListModel):
     def undo(self):
         if self.pos > 0:
             self.pos -= 1
-            self.dataChanged.emit(self.index(self.pos), self.index(self.pos+1))
+            self.dataChanged.emit(self.index(self.pos), self.index(self.pos + 1))
             return self.current_container
 
     def redo(self):
         if self.pos < len(self.states) - 1:
             self.pos += 1
-            self.dataChanged.emit(self.index(self.pos-1), self.index(self.pos))
+            self.dataChanged.emit(self.index(self.pos - 1), self.index(self.pos))
             return self.current_container
 
     def revert_to(self, container):
@@ -171,25 +175,24 @@ class GlobalUndoHistory(QAbstractListModel):
             return ''
         return self.states[self.pos + 1].message or _('[Unnamed state]')
 
-    def update_path_to_ebook(self, path):
+    def update_path_to_ebook(self, path) -> None:
         for state in self.states:
             state.container.path_to_ebook = path
 
 
 class SpacedDelegate(QStyledItemDelegate):
-
-    def sizeHint(self, *args):
-        ans = QStyledItemDelegate.sizeHint(self, *args)
+    def sizeHint(self, option=None, index=None):
+        assert option is not None and index is not None
+        ans = QStyledItemDelegate.sizeHint(self, option, index)
         ans.setHeight(ans.height() + 4)
         return ans
 
 
 class CheckpointView(QWidget):
-
     revert_requested = pyqtSignal(object)
     compare_requested = pyqtSignal(object)
 
-    def __init__(self, model, parent=None):
+    def __init__(self, model, parent=None) -> None:
         QWidget.__init__(self, parent)
         self.l = l = QGridLayout(self)
         self.setLayout(l)
@@ -203,42 +206,44 @@ class CheckpointView(QWidget):
         l.addWidget(v, 0, 0, 1, -1)
         model.dataChanged.connect(self.data_changed)
 
-        self.rb = b = QPushButton(QIcon(I('edit-undo.png')), _('&Revert to'), self)
+        self.rb = b = QPushButton(QIcon.ic('edit-undo.png'), _('&Revert to'), self)
         b.setToolTip(_('Revert the book to the selected checkpoint'))
         b.clicked.connect(self.revert_clicked)
         l.addWidget(b, 1, 1)
 
-        self.cb = b = QPushButton(QIcon(I('diff.png')), _('&Compare'), self)
+        self.cb = b = QPushButton(QIcon.ic('diff.png'), _('&Compare'), self)
         b.setToolTip(_('Compare the state of the book at the selected checkpoint with the current state'))
         b.clicked.connect(self.compare_clicked)
         l.addWidget(b, 1, 0)
 
-    def data_changed(self, *args):
+    def data_changed(self, *args) -> None:
         self.view.clearSelection()
         m = self.view.model()
+        assert isinstance(m, GlobalUndoHistory)
         sm = self.view.selectionModel()
-        sm.select(m.index(m.pos), QItemSelectionModel.SelectionFlag.ClearAndSelect)
-        self.view.setCurrentIndex(m.index(m.pos))
+        assert sm is not None
+        sm.select(m.index(m.pos, 0), QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        self.view.setCurrentIndex(m.index(m.pos, 0))
 
-    def double_clicked(self, index):
+    def double_clicked(self, index) -> None:
         pass  # Too much danger of accidental double click
 
     def revert_clicked(self):
         m = self.view.model()
+        assert isinstance(m, GlobalUndoHistory)
         row = self.view.currentIndex().row()
         if row < 0:
             return
         if row == m.pos:
-            return error_dialog(self, _('Cannot revert'), _(
-                'Cannot revert to the current state'), show=True)
+            return error_dialog(self, _('Cannot revert'), _('Cannot revert to the current state'), show=True)
         self.revert_requested.emit(m.states[row].container)
 
     def compare_clicked(self):
         m = self.view.model()
+        assert isinstance(m, GlobalUndoHistory)
         row = self.view.currentIndex().row()
         if row < 0:
             return
         if row == m.pos:
-            return error_dialog(self, _('Cannot compare'), _(
-                'There is no point comparing the current state to itself'), show=True)
+            return error_dialog(self, _('Cannot compare'), _('There is no point comparing the current state to itself'), show=True)
         self.compare_requested.emit(m.states[row].container)

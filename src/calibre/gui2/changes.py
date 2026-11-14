@@ -1,25 +1,22 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2017, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-from calibre.srv.changes import (
-    BooksAdded, BooksDeleted, FormatsAdded, FormatsRemoved, MetadataChanged,
-    SavedSearchesChanged
-)
+from calibre.srv.changes import BooksAdded, BooksDeleted, FormatsAdded, FormatsRemoved, MetadataChanged, SavedSearchesChanged, VirtualLibrariesChanged
 
 
-def handle_changes(changes, gui=None):
+def handle_changes(changes, gui=None) -> None:
     if not changes:
         return
     if gui is None:
         from calibre.gui2.ui import get_gui
+
         gui = get_gui()
     if gui is None:
         return
     refresh_ids = set()
     added, removed = set(), set()
-    ss_changed = False
+    ss_changed = vls_changed = False
+    vls_renamed = []
     for change in changes:
         if isinstance(change, (FormatsAdded, FormatsRemoved, MetadataChanged)):
             refresh_ids |= change.book_ids
@@ -29,8 +26,13 @@ def handle_changes(changes, gui=None):
             removed |= change.book_ids
         elif isinstance(change, SavedSearchesChanged):
             ss_changed = True
+        elif isinstance(change, VirtualLibrariesChanged):
+            vls_changed = True
+            vls_renamed.extend(change.renamed)
 
     if added and removed:
+        if vls_changed:
+            gui.virtual_libraries_changed(renamed=vls_renamed)
         gui.refresh_all()
         return
     refresh_ids -= added | removed
@@ -44,13 +46,15 @@ def handle_changes(changes, gui=None):
             position_based_recount = False
         if removed:
             next_id = gui.current_view().next_id
-            m = gui.library_view.model()
+            m = gui.library_view._model
             m.ids_deleted(removed)
             gui.iactions['Remove Books'].library_ids_deleted2(removed, next_id=next_id)
         if refresh_ids:
             gui.iactions['Edit Metadata'].refresh_books_after_metadata_edit(refresh_ids)
         if ss_changed:
             gui.saved_searches_changed(recount=False)
+        if vls_changed:
+            gui.virtual_libraries_changed(renamed=vls_renamed)
         gui.tags_view.disable_recounting = gui.disable_cover_browser_refresh = False
         (gui.tags_view.recount_with_position_based_index if position_based_recount else gui.tags_view.recount)()
         gui.refresh_cover_browser()

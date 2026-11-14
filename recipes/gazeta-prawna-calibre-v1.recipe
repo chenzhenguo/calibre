@@ -1,21 +1,22 @@
 #!/usr/bin/env python
 
 __license__ = 'GPL v3'
-__copyright__ = u'2020, Tomasz Jozwiak <tjozwiakgm@gmail.com>'
-__author__ = u'Tomasz Jozwiak'
+__copyright__ = '2020, Tomasz Jozwiak <tjozwiakgm@gmail.com>'
+__author__ = 'Tomasz Jozwiak'
 '''
 gazetaprawna.pl
 '''
 
 import re
+
 from calibre.web.feeds.news import BasicNewsRecipe
 
 
 class gazetaprawna(BasicNewsRecipe):
     version = 2
-    title = u'Gazeta Prawna'
-    __author__ = u'Tomasz Jozwiak'
-    publisher = u'Infor Biznes'
+    title = 'Gazeta Prawna'
+    __author__ = 'Tomasz Jozwiak'
+    publisher = 'Infor Biznes'
     max_articles_per_feed = 30
     no_stylesheets = True
     remove_javascript = True
@@ -37,13 +38,10 @@ class gazetaprawna(BasicNewsRecipe):
         .articleGate {font-style: italic; font-weight: normal; font-size:50%;}
     '''
 
-    remove_tags_before = [
-        dict(name='div', attrs={'class': ['article']}),
-        dict(name='div', attrs={'itemprop': ['breadcrumb']})
-    ]
+    remove_tags_before = [dict(name='div', attrs={'class': ['article']}), dict(name='div', attrs={'itemprop': ['breadcrumb']})]
 
     remove_tags_after = [
-       dict(name='div', attrs={'class': ['articleBody', 'artPayWall', 'contentGalBottom', 'komentarze-forum']}),
+        dict(name='div', attrs={'class': ['articleBody', 'artPayWall', 'contentGalBottom', 'komentarze-forum']}),
     ]
 
     remove_tags = [
@@ -51,25 +49,25 @@ class gazetaprawna(BasicNewsRecipe):
         dict(name='div', attrs={'class': ['shareArticleButtons nowe2', 'artPayWall', 'contentGalBottom', 'contentGalTop', 'video-target', 'komentarze-forum']}),
         dict(name=['link', 'meta', 'style']),
         dict(name='div', attrs={'itemprop': ['breadcrumb']}),
-        dict(name='section', attrs={'class': ['videoSection']})
+        dict(name='section', attrs={'class': ['videoSection']}),
     ]
 
     feeds = [
-        (u'Z ostatniej chwili', u'http://rss.gazetaprawna.pl/GazetaPrawna'),
-        (u'Biznes i prawo gospodarcze', u'http://rss.gazetaprawna.pl/GazetaPrawna-Biznes'),
-        (u'Prawo i wymiar sprawiedliwo\u015bci', u'http://rss.gazetaprawna.pl/GazetaPrawna-Prawo'),
-        (u'Praca i ubezpieczenia', u'http://rss.gazetaprawna.pl/GazetaPrawna-Praca'),
-        (u'Podatki i rachunkowo\u015b\u0107', u'http://rss.gazetaprawna.pl/GazetaPrawna-Podatki'),
-        (u'Finanse - waluty i notowania', u'http://rss.gazetaprawna.pl/GazetaPrawna-Finanse'),
+        ('Z ostatniej chwili', 'http://rss.gazetaprawna.pl/GazetaPrawna'),
+        ('Biznes i prawo gospodarcze', 'http://rss.gazetaprawna.pl/GazetaPrawna-Biznes'),
+        ('Prawo i wymiar sprawiedliwo\u015bci', 'http://rss.gazetaprawna.pl/GazetaPrawna-Prawo'),
+        ('Praca i ubezpieczenia', 'http://rss.gazetaprawna.pl/GazetaPrawna-Praca'),
+        ('Podatki i rachunkowo\u015b\u0107', 'http://rss.gazetaprawna.pl/GazetaPrawna-Podatki'),
+        ('Finanse - waluty i notowania', 'http://rss.gazetaprawna.pl/GazetaPrawna-Finanse'),
     ]
 
     def parse_feeds(self):
-        self.log(_('Gazeta Prawna overrided parse_feeds()'))
+        self.log(_('Gazeta Prawna overrode parse_feeds()'))
         parsed_feeds = BasicNewsRecipe.parse_feeds(self)
         for n, feed in enumerate(parsed_feeds):
             for a, article in enumerate(feed):
-                article.text_summary = re.sub(r'<\!\[CDATA\[', "", article.text_summary)
-                article.text_summary = re.sub(r'\]\]', "", article.text_summary)
+                article.text_summary = re.sub(r'<\!\[CDATA\[', '', article.text_summary)
+                article.text_summary = re.sub(r'\]\]', '', article.text_summary)
                 article.summary = article.text_summary
 
         return parsed_feeds
@@ -83,10 +81,10 @@ class gazetaprawna(BasicNewsRecipe):
 
         for span in soup.findAll(name='span'):
             if len(self.tag_to_string(span)) > 1:
-                span.append(" ")
+                span.append(' ')
 
         for locked in soup.findAll(name='div', attrs={'class': ['articleGate']}):
-            locked.append(u"Przejd\u017a do artyku\u0142u na GazetaPrawna.pl aby zalogowa\u0107 si\u0119 lub wykupi\u0107 dost\u0119p")
+            locked.append('Przejd\u017a do artyku\u0142u na GazetaPrawna.pl aby zalogowa\u0107 si\u0119 lub wykupi\u0107 dost\u0119p')
 
         return soup
 
@@ -105,7 +103,6 @@ class gazetaprawna(BasicNewsRecipe):
                     self.log(_('The title cuting in %s to keep the thumbnail visible') % (article.url))
 
     def get_cover_url(self):
-        soup = self.index_to_soup(
-            'http://www.egazety.pl/infor/e-wydanie-dziennik-gazeta-prawna.html')
-        self.cover_url = soup.find("a", {"class": "image cover-preview"}).img['src']
+        soup = self.index_to_soup('http://www.egazety.pl/infor/e-wydanie-dziennik-gazeta-prawna.html')
+        self.cover_url = soup.find('a', {'class': 'image cover-preview'}).img['src']
         return getattr(self, 'cover_url', self.cover_url)

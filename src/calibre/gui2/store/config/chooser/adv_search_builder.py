@@ -1,28 +1,25 @@
-# -*- coding: utf-8 -*-
-
-
-__license__ = 'GPL 3'
-__copyright__ = '2011, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
 
 import re
 
-from PyQt5.Qt import (QDialog, QDialogButtonBox)
+from qt.core import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QLineEdit
 
 from calibre.gui2.store.config.chooser.adv_search_builder_ui import Ui_Dialog
 from calibre.library.caches import CONTAINS_MATCH, EQUALS_MATCH
 from calibre.utils.localization import localize_user_manual_link
-from polyglot.builtins import unicode_type, map
 
 
 class AdvSearchBuilderDialog(QDialog, Ui_Dialog):
+    FIELDS: dict[str, str]
+    text: QLineEdit
+    negate: QCheckBox
+    field: QComboBox
 
-    def __init__(self, parent):
+    def __init__(self, parent) -> None:
         QDialog.__init__(self, parent)
         self.setupUi(self)
         try:
-            self.sh_label.setText(self.sh_label.text() % localize_user_manual_link(
-                'https://manual.calibre-ebook.com/gui.html#the-search-interface'))
+            self.sh_label.setText(self.sh_label.text() % localize_user_manual_link('https://manual.calibre-ebook.com/gui.html#the-search-interface'))
         except TypeError:
             pass  # link already localized
 
@@ -37,17 +34,21 @@ class AdvSearchBuilderDialog(QDialog, Ui_Dialog):
         self.tabWidget.currentChanged[int].connect(self.tab_changed)
         self.tab_changed(0)
 
-    def tab_changed(self, idx):
+    def tab_changed(self, idx) -> None:
         if idx == 1:
-            self.tab_2_button_box.button(QDialogButtonBox.StandardButton.Ok).setDefault(True)
+            btn = self.tab_2_button_box.button(QDialogButtonBox.StandardButton.Ok)
+            assert btn is not None
+            btn.setDefault(True)
         else:
-            self.buttonBox.button(QDialogButtonBox.StandardButton.Ok).setDefault(True)
+            btn = self.buttonBox.button(QDialogButtonBox.StandardButton.Ok)
+            assert btn is not None
+            btn.setDefault(True)
 
-    def advanced_search_button_pushed(self):
+    def advanced_search_button_pushed(self) -> None:
         self.adv_search_used = True
         self.accept()
 
-    def clear_button_pushed(self):
+    def clear_button_pushed(self) -> None:
         self.name_box.setText('')
         self.description_box.setText('')
         self.headquarters_box.setText('')
@@ -77,8 +78,7 @@ class AdvSearchBuilderDialog(QDialog, Ui_Dialog):
             self.mc = '='
         else:
             self.mc = '~'
-        all, any, phrase, none = map(lambda x: unicode_type(x.text()),
-                (self.all, self.any, self.phrase, self.none))
+        all, any, phrase, none = (str(x.text()) for x in (self.all, self.any, self.phrase, self.none))
         all, any, none = map(self.tokens, (all, any, none))
         phrase = phrase.strip()
         all = ' and '.join(all)
@@ -86,7 +86,7 @@ class AdvSearchBuilderDialog(QDialog, Ui_Dialog):
         none = ' and not '.join(none)
         ans = ''
         if phrase:
-            ans += '"%s"'%phrase
+            ans += f'"{phrase}"'
         if all:
             ans += (' and ' if ans else '') + all
         if none:
@@ -96,13 +96,13 @@ class AdvSearchBuilderDialog(QDialog, Ui_Dialog):
         return ans
 
     def token(self):
-        txt = unicode_type(self.text.text()).strip()
+        txt = str(self.text.text()).strip()
         if txt:
             if self.negate.isChecked():
-                txt = '!'+txt
-            tok = self.FIELDS[unicode_type(self.field.currentText())]+txt
+                txt = '!' + txt
+            tok = self.FIELDS[str(self.field.currentText())] + txt
             if re.search(r'\s', tok):
-                tok = '"%s"'%tok
+                tok = f'"{tok}"'
             return tok
 
     def box_search_string(self):
@@ -116,25 +116,25 @@ class AdvSearchBuilderDialog(QDialog, Ui_Dialog):
 
         ans = []
         self.box_last_values = {}
-        name = unicode_type(self.name_box.text()).strip()
+        name = str(self.name_box.text()).strip()
         if name:
             ans.append('name:"' + self.mc + name + '"')
-        description = unicode_type(self.description_box.text()).strip()
+        description = str(self.description_box.text()).strip()
         if description:
             ans.append('description:"' + self.mc + description + '"')
-        headquarters = unicode_type(self.headquarters_box.text()).strip()
+        headquarters = str(self.headquarters_box.text()).strip()
         if headquarters:
             ans.append('headquarters:"' + self.mc + headquarters + '"')
-        format = unicode_type(self.format_box.text()).strip()
+        format = str(self.format_box.text()).strip()
         if format:
             ans.append('format:"' + self.mc + format + '"')
-        enabled = unicode_type(self.enabled_combo.currentText()).strip()
+        enabled = str(self.enabled_combo.currentText()).strip()
         if enabled:
             ans.append('enabled:' + enabled)
-        drm = unicode_type(self.drm_combo.currentText()).strip()
+        drm = str(self.drm_combo.currentText()).strip()
         if drm:
             ans.append('drm:' + drm)
-        affiliate = unicode_type(self.affiliate_combo.currentText()).strip()
+        affiliate = str(self.affiliate_combo.currentText()).strip()
         if affiliate:
             ans.append('affiliate:' + affiliate)
         if ans:

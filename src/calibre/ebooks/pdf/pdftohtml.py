@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
 
 import errno
@@ -7,56 +6,67 @@ import os
 import re
 import shutil
 import subprocess
-import sys
+from typing import TYPE_CHECKING, Unpack, cast
 
 from calibre import CurrentDir, prints, xml_replace_entities
-from calibre.constants import isbsd, islinux, ismacos, iswindows
+from calibre.constants import bundled_binaries_dir, isbsd, iswindows
 from calibre.ebooks import ConversionError, DRMError
 from calibre.ebooks.chardet import xml_to_unicode
+from calibre.ebooks.pdf.bidi import fix_pdftohtml_html
 from calibre.ptempfile import PersistentTemporaryFile
 from calibre.utils.cleantext import clean_xml_chars
 from calibre.utils.ipc import eintr_retry_call
+from calibre.utils.localization import _
 
-PDFTOHTML = 'pdftohtml'
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from typing import IO, TypedDict
+
+    from lxml.etree import _Element
+
+    class PopenKwargs(TypedDict, total=False):
+        stdin: int | IO[bytes] | None
+        stdout: int | IO[bytes] | None
+        stderr: int | IO[bytes] | None
+        cwd: str | None
+        creationflags: int
 
 
-def popen(cmd, **kw):
+PDFTOHTML = 'pdftohtml' + ('.exe' if iswindows else '')
+creationflags = subprocess.DETACHED_PROCESS if iswindows else 0
+
+
+def popen(cmd: Sequence[str], **kw: Unpack[PopenKwargs]) -> subprocess.Popen[bytes]:
     if iswindows:
-        kw['creationflags'] = subprocess.DETACHED_PROCESS
+        kw['creationflags'] = creationflags
     return subprocess.Popen(cmd, **kw)
 
 
-if ismacos and hasattr(sys, 'frameworks_dir'):
-    base = os.path.join(os.path.dirname(sys.frameworks_dir), 'utils.app', 'Contents', 'MacOS')
-    PDFTOHTML = os.path.join(base, PDFTOHTML)
-if iswindows and hasattr(sys, 'frozen'):
-    base = sys.extensions_location if hasattr(sys, 'new_app_layout') else os.path.dirname(sys.executable)
-    PDFTOHTML = os.path.join(base, 'pdftohtml.exe')
-if (islinux or isbsd) and getattr(sys, 'frozen', False):
-    PDFTOHTML = os.path.join(sys.executables_location, 'bin', 'pdftohtml')
+if bbd := bundled_binaries_dir():
+    PDFTOHTML = os.path.join(bbd, PDFTOHTML)
+PDFTOTEXT = os.path.join(os.path.dirname(PDFTOHTML), 'pdftotext' + ('.exe' if iswindows else ''))
 
 
-def pdftohtml(output_dir, pdf_path, no_images, as_xml=False):
-    '''
+def pdftohtml(output_dir: str, pdf_path: str, no_images: bool, as_xml: bool = False) -> None:
+    """
     Convert the pdf into html using the pdftohtml app.
     This will write the html as index.html into output_dir.
     It will also write all extracted images to the output_dir
-    '''
+    """
 
     pdfsrc = os.path.join(output_dir, 'src.pdf')
-    index = os.path.join(output_dir, 'index.'+('xml' if as_xml else 'html'))
+    index = os.path.join(output_dir, 'index.' + ('xml' if as_xml else 'html'))
 
-    with lopen(pdf_path, 'rb') as src, lopen(pdfsrc, 'wb') as dest:
+    with open(pdf_path, 'rb') as src, open(pdfsrc, 'wb') as dest:
         shutil.copyfileobj(src, dest)
 
     with CurrentDir(output_dir):
 
-        def a(x):
+        def a(x: str) -> str:
             return os.path.basename(x)
 
         exe = PDFTOHTML
-        cmd = [exe, '-enc', 'UTF-8', '-noframes', '-p', '-nomerge',
-                '-nodrm', a(pdfsrc), a(index)]
+        cmd = [exe, '-enc', 'UTF-8', '-noframes', '-p', '-nomerge', '-nodrm', a(pdfsrc), a(index)]
 
         if isbsd:
             cmd.remove('-nodrm')
@@ -67,31 +77,30 @@ def pdftohtml(output_dir, pdf_path, no_images, as_xml=False):
 
         logf = PersistentTemporaryFile('pdftohtml_log')
         try:
-            p = popen(cmd, stderr=logf._fd, stdout=logf._fd,
-                    stdin=subprocess.PIPE)
+            p = popen(cmd, stderr=logf._fd, stdout=logf._fd, stdin=subprocess.PIPE)
         except OSError as err:
             if err.errno == errno.ENOENT:
-                raise ConversionError(
-                    _('Could not find pdftohtml, check it is in your PATH'))
+                raise ConversionError(_('Could not find pdftohtml, check it is in your PATH'))
             else:
                 raise
         ret = eintr_retry_call(p.wait)
         logf.flush()
         logf.close()
-        out = lopen(logf.name, 'rb').read().decode('utf-8', 'replace').strip()
+        with open(logf.name, 'rb') as f:
+            out = f.read().decode('utf-8', 'replace').strip()
         if ret != 0:
-            raise ConversionError('pdftohtml failed with return code: %d\n%s' % (ret, out))
+            raise ConversionError(f'pdftohtml failed with return code: {ret}\n{out}')
         if out:
-            prints("pdftohtml log:")
+            prints('pdftohtml log:')
             prints(out)
         if not os.path.exists(index) or os.stat(index).st_size < 100:
             raise DRMError()
 
         if not as_xml:
-            with lopen(index, 'r+b') as i:
+            with open(index, 'r+b') as i:
                 raw = i.read().decode('utf-8', 'replace')
                 raw = flip_images(raw)
-                raw = raw.replace('<head', '<!-- created by calibre\'s pdftohtml -->\n  <head', 1)
+                raw = raw.replace('<head', "<!-- created by calibre's pdftohtml -->\n  <head", 1)
                 i.seek(0)
                 i.truncate()
                 # versions of pdftohtml >= 0.20 output self closing <br> tags, this
@@ -101,64 +110,139 @@ def pdftohtml(output_dir, pdf_path, no_images, as_xml=False):
                 raw = re.sub(r'<a id="(\d+)"', r'<a id="p\1"', raw, flags=re.I)
                 raw = re.sub(r'<a href="index.html#(\d+)"', r'<a href="#p\1"', raw, flags=re.I)
                 raw = xml_replace_entities(raw)
-                raw = raw.replace('\u00a0', ' ')
+                raw = re.sub(r'[\u00a0\u2029]', ' ', raw)
+                # pdftohtml outputs the text of a line in visual order, which
+                # means right-to-left text comes out with its letters backwards
+                raw = fix_pdftohtml_html(raw)
 
                 i.write(raw.encode('utf-8'))
 
-            cmd = [exe, '-f', '1', '-l', '1', '-xml', '-i', '-enc', 'UTF-8', '-noframes', '-p', '-nomerge',
-                    '-nodrm', '-q', '-stdout', a(pdfsrc)]
+            cmd = [
+                exe,
+                '-f',
+                '1',
+                '-l',
+                '1',
+                '-xml',
+                '-i',
+                '-enc',
+                'UTF-8',
+                '-noframes',
+                '-p',
+                '-nomerge',
+                '-nodrm',
+                '-q',
+                '-stdout',
+                a(pdfsrc),
+            ]
             if isbsd:
                 cmd.remove('-nodrm')
             p = popen(cmd, stdout=subprocess.PIPE)
-            raw = p.stdout.read().strip()
-            if p.wait() == 0 and raw:
-                parse_outline(raw, output_dir)
+            assert p.stdout is not None  # stdout=PIPE
+            rawb = p.stdout.read().strip()
+            if p.wait() == 0 and rawb:
+                parse_outline(rawb, output_dir, pdfsrc)
 
         try:
             os.remove(pdfsrc)
-        except:
+        except Exception:
             pass
 
 
-def parse_outline(raw, output_dir):
+def resolve_outline_pages(outline: _Element, pdf_path: str, report: Callable[[str], object]) -> None:
+    """
+    Set the page attribute on <item> elements in the pdftohtml generated
+    outline that poppler could not resolve, for example, because the PDF
+    outline uses JavaScript actions of the form "this.pageNum = N;"
+    rather than destinations.
+    """
+    items = list(outline.iter('item'))
+    if all(item.get('page') for item in items):
+        return
+    from calibre.utils.podofo import get_outline_and_page_count
+
+    try:
+        nodes, num_pages = get_outline_and_page_count(pdf_path)
+    except Exception as err:
+        report(f'Failed to read the PDF outline to resolve Table of Contents destinations: {err}')
+        return
+    flat: list[dict[str, object]] = []
+
+    def flatten(children: list[dict[str, object]]) -> None:
+        for node in children:
+            flat.append(node)
+            flatten(cast('list[dict[str, object]]', node['children']))
+
+    flatten(nodes)
+    if len(flat) != len(items):
+        report(f'PDF outline has {len(flat)} entries but pdftohtml found {len(items)}, cannot resolve Table of Contents destinations')
+        return
+
+    def normalized(x: object) -> str:
+        return ' '.join(str(x or '').split())
+
+    for item, node in zip(items, flat):
+        if normalized(item.text) != normalized(node.get('title')):
+            report(f'PDF outline entry {node.get("title")!r} does not match pdftohtml entry {item.text!r}, cannot resolve Table of Contents destinations')
+            return
+    for item, node in zip(items, flat):
+        if item.get('page'):
+            continue
+        page = 0
+        if isinstance(dest := node.get('dest'), dict):
+            page = int(cast('dict[str, int]', dest)['page'])
+        elif isinstance(js := node.get('js'), str) and (m := re.fullmatch(r'\s*this\.pageNum\s*=\s*(\d+)\s*;?\s*', js)):
+            page = int(m.group(1)) + 1  # pageNum is zero based
+        if 0 < page <= num_pages:
+            item.set('page', str(page))
+        elif page > num_pages:
+            report(f'PDF outline entry {item.text!r} links to page {page} but the PDF has only {num_pages} pages, ignoring it')
+
+
+def parse_outline(raw: bytes, output_dir: str, pdf_path: str) -> None:
     from lxml import etree
+
     from calibre.utils.xml_parse import safe_xml_fromstring
-    raw = clean_xml_chars(xml_to_unicode(raw, strip_encoding_pats=True, assume_utf8=True)[0])
-    outline = safe_xml_fromstring(raw).xpath('(//outline)[1]')
+
+    text = clean_xml_chars(xml_to_unicode(raw, strip_encoding_pats=True, assume_utf8=True)[0])
+    outline = safe_xml_fromstring(text).xpath('(//outline)[1]')
     if outline:
         from calibre.ebooks.oeb.polish.toc import TOC, create_ncx
+
         outline = outline[0]
+        resolve_outline_pages(outline, pdf_path, prints)
         toc = TOC()
         count = [0]
 
-        def process_node(node, toc):
+        def process_node(node: _Element, toc: TOC) -> None:
             for child in node.iterchildren('*'):
                 if child.tag == 'outline':
                     parent = toc.children[-1] if toc.children else toc
                     process_node(child, parent)
-                else:
-                    if child.text:
-                        page = child.get('page', '1')
-                        toc.add(child.text, 'index.html', 'p' + page)
-                        count[0] += 1
+                elif child.text:
+                    page = child.get('page', '1')
+                    toc.add(child.text, 'index.html', 'p' + page)
+                    count[0] += 1
+
         process_node(outline, toc)
         if count[0] > 2:
-            root = create_ncx(toc, (lambda x:x), 'pdftohtml', 'en', 'pdftohtml')
+            root = create_ncx(toc, (lambda x: x), 'pdftohtml', 'en', 'pdftohtml')
             with open(os.path.join(output_dir, 'toc.ncx'), 'wb') as f:
                 f.write(etree.tostring(root, pretty_print=True, with_tail=False, encoding='utf-8', xml_declaration=True))
 
 
-def flip_image(img, flip):
+def flip_image(img_path: str, flip: str) -> None:
     from calibre.utils.img import flip_image, image_and_format_from_data, image_to_data
-    with lopen(img, 'r+b') as f:
+
+    with open(img_path, 'r+b') as f:
         img, fmt = image_and_format_from_data(f.read())
         img = flip_image(img, horizontal='x' in flip, vertical='y' in flip)
         f.seek(0), f.truncate()
         f.write(image_to_data(img, fmt=fmt))
 
 
-def flip_images(raw):
-    for match in re.finditer('<IMG[^>]+/?>', raw, flags=re.I):
+def flip_images(raw: str) -> str:
+    for match in re.finditer(r'<IMG[^>]+/?>', raw, flags=re.I):
         img = match.group()
         m = re.search(r'class="(x|y|xy)flip"', img)
         if m is None:
@@ -171,5 +255,14 @@ def flip_images(raw):
         if not os.path.exists(img):
             continue
         flip_image(img, flip)
-    raw = re.sub(r'<STYLE.+?</STYLE>\s*', '', raw, flags=re.I|re.DOTALL)
+    raw = re.sub(r'<STYLE.+?</STYLE>\s*', '', raw, flags=re.I | re.DOTALL)
+
+    counter = 0
+
+    def add_alt(m: re.Match[str]) -> str:
+        nonlocal counter
+        counter += 1
+        return m.group(1).rstrip('/') + f' alt="Image {counter}"/>'
+
+    raw = re.sub(r'(<IMG[^>]+)/?>', add_alt, raw, flags=re.I)
     return raw

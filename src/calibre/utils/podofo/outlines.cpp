@@ -15,95 +15,124 @@ create_outline(PDFDoc *self, PyObject *args) {
     PyObject *title_buf;
     unsigned int pagenum;
     double left = 0, top = 0, zoom = 0;
-    PdfPage *page;
 
     if (!PyArg_ParseTuple(args, "UI|ddd", &title_buf, &pagenum, &left, &top, &zoom)) return NULL;
 
     ans = PyObject_New(PDFOutlineItem, &PDFOutlineItemType);
-    if (ans == NULL) goto error;
+    if (ans == NULL) return NULL;
+    pyunique_ptr decref_ans_on_exit((PyObject *)ans);
 
     try {
         PdfString title = podofo_convert_pystring(title_buf);
-        PdfOutlines *outlines = self->doc->GetOutlines();
-        if (outlines == NULL) {PyErr_NoMemory(); goto error;}
-        ans->item = outlines->CreateRoot(title);
-        if (ans->item == NULL) {PyErr_NoMemory(); goto error;}
+        PdfOutlines &outlines = self->doc->GetOrCreateOutlines();
+        ans->item = &outlines.CreateRoot(title);
         ans->doc = self->doc;
-        try {
-            page = self->doc->GetPage(pagenum - 1);
-        } catch (const PdfError &err) {
-            (void)err;
-            PyErr_Format(PyExc_ValueError, "Invalid page number: %u", pagenum - 1); goto error;
+        auto page = get_page(self->doc, pagenum - 1);
+        if (!page) {
+            PyErr_Format(PyExc_ValueError, "Invalid page number: %u", pagenum - 1);
+            return NULL;
         }
-        PdfDestination dest(page, left, top, zoom);
-        ans->item->SetDestination(dest);
-    } catch(const PdfError & err) {
-        podofo_set_exception(err); goto error;
-    } catch(const std::exception & err) {
+        auto dest = self->doc->CreateDestination();
+        dest->SetDestination(*page, left, top, zoom);
+        ans->item->SetDestination(*dest);
+    } catch (const PdfError &err) {
+        podofo_set_exception(err);
+        return NULL;
+    } catch (const std::exception &err) {
         PyErr_Format(PyExc_ValueError, "An error occurred while trying to create the outline: %s", err.what());
-        goto error;
+        return NULL;
     } catch (...) {
         PyErr_SetString(PyExc_ValueError, "An unknown error occurred while trying to create the outline");
-        goto error;
+        return NULL;
     }
 
-    return (PyObject*)ans;
-error:
-    Py_XDECREF(ans);
-    return NULL;
-
+    return decref_ans_on_exit.release();
 }
 
-static PyObject*
+static PyObject *
 create_outline_node() {
-	pyunique_ptr ans(PyDict_New());
-	if (!ans) return NULL;
-	pyunique_ptr children(PyList_New(0));
-	if (!children) return NULL;
-	if (PyDict_SetItemString(ans.get(), "children", children.get()) != 0) return NULL;
-	return ans.release();
+    pyunique_ptr ans(PyDict_New());
+    if (!ans) return NULL;
+    pyunique_ptr children(PyList_New(0));
+    if (!children) return NULL;
+    if (PyDict_SetItemString(ans.get(), "children", children.get()) != 0) return NULL;
+    return ans.release();
 }
 
 static void
 convert_outline(PDFDoc *self, PyObject *parent, PdfOutlineItem *item) {
-	pyunique_ptr title(podofo_convert_pdfstring(item->GetTitle()));
-	if (!title) return;
-	pyunique_ptr node(create_outline_node());
-	if (!node) return;
-	if (PyDict_SetItemString(node.get(), "title", title.get()) != 0) return;
-	PdfDestination* dest = item->GetDestination(self->doc);
-	if (dest) {
-		PdfPage *page = dest->GetPage(self->doc);
-		long pnum = page ? page->GetPageNumber() : -1;
-		pyunique_ptr d(Py_BuildValue("{sl sd sd sd}", "page", pnum, "top", dest->GetTop(), "left", dest->GetLeft(), "zoom", dest->GetZoom()));
-		if (!d) return;
-		if (PyDict_SetItemString(node.get(), "dest", d.get()) != 0) return;
-	}
-	PyObject *children = PyDict_GetItemString(parent, "children");
-	if (PyList_Append(children, node.get()) != 0) return;
+    pyunique_ptr title(podofo_convert_pdfstring(item->GetTitle()));
+    if (!title) return;
+    pyunique_ptr node(create_outline_node());
+    if (!node) return;
+    if (PyDict_SetItemString(node.get(), "title", title.get()) != 0) return;
+    // Do not use PdfOutlineItem::GetDestination()/GetAction() as in PoDoFo
+    // 1.1.2 they dereference a null pointer when the item has no /Dest or /A
+    PdfDictionary &dict = item->GetDictionary();
+    PdfObject *obj;
+    std::unique_ptr<PdfDestination> dest;
+    std::unique_ptr<PdfAction> action;
+    if ((obj = dict.FindKey("Dest")) && PdfDestination::TryCreateFromObject(*obj, dest)) {
+        PdfPage *page = dest->GetPage();
+        long pnum = page ? page->GetPageNumber() : -1;
+        // Not all destination types have these values, PoDoFo raises
+        // WrongDestinationType or a type error (for null values) for them.
+        auto value = [&dest](double (PdfDestination::*getter)() const) -> double {
+            try {
+                return ((*dest).*getter)();
+            } catch (const PdfError &) { return 0; }
+        };
+        pyunique_ptr d(Py_BuildValue(
+            "{sl sd sd sd}",
+            "page",
+            pnum,
+            "top",
+            value(&PdfDestination::GetTop),
+            "left",
+            value(&PdfDestination::GetLeft),
+            "zoom",
+            value(&PdfDestination::GetZoom)));
+        if (!d) return;
+        if (PyDict_SetItemString(node.get(), "dest", d.get()) != 0) return;
+    } else if ((obj = dict.FindKey("A")) && PdfAction::TryCreateFromObject(*obj, action) && action->GetType() == PdfActionType::JavaScript) {
+        // Some generators link outline items to pages via JavaScript actions
+        // (e.g. "this.pageNum = 4;") which poppler cannot resolve, so expose
+        // the script and let the caller interpret it.
+        auto script = static_cast<const PdfActionJavaScript &>(*action).GetScript();
+        if (script.has_value()) {
+            pyunique_ptr js(podofo_convert_pdfstring(*script));
+            if (!js) return;
+            if (PyDict_SetItemString(node.get(), "js", js.get()) != 0) return;
+        }
+    }
+    PyObject *children = PyDict_GetItemString(parent, "children");
+    if (PyList_Append(children, node.get()) != 0) return;
 
-	if (item->First()) {
-		convert_outline(self, node.get(), item->First());
-		if (PyErr_Occurred()) return;
-	}
+    if (item->First()) {
+        convert_outline(self, node.get(), item->First());
+        if (PyErr_Occurred()) return;
+    }
 
-	if (item->Next()) {
-		convert_outline(self, parent, item->Next());
-		if (PyErr_Occurred()) return;
-	}
+    if (item->Next()) {
+        convert_outline(self, parent, item->Next());
+        if (PyErr_Occurred()) return;
+    }
 }
 
 static PyObject *
 get_outline(PDFDoc *self, PyObject *args) {
-	PdfOutlines *root = self->doc->GetOutlines(PoDoFo::ePdfDontCreateObject);
-	if (!root || !root->First()) Py_RETURN_NONE;
-	PyObject *ans = create_outline_node();
-	if (!ans) return NULL;
-	convert_outline(self, ans, root->First());
-	if (PyErr_Occurred()) { Py_DECREF(ans); return NULL; }
-	if (!ans) return NULL;
+    PdfOutlines *root = self->doc->GetOutlines();
+    if (!root || !root->First()) Py_RETURN_NONE;
+    PyObject *ans = create_outline_node();
+    if (!ans) return NULL;
+    convert_outline(self, ans, root->First());
+    if (PyErr_Occurred()) {
+        Py_DECREF(ans);
+        return NULL;
+    }
+    if (!ans) return NULL;
 
-	return ans;
+    return ans;
 }
 
 PYWRAP(create_outline)

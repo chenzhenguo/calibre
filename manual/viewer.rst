@@ -41,7 +41,7 @@ You can access the viewer controls by either:
 The viewer has two modes, "paged" and "flow". In paged mode the book content
 is presented as pages, similar to a paper book. In flow mode the text is
 presented continuously, like in a web browser. You can switch between them
-using the viewer Preferences under :guilabel:`Page layout` or by pressing the
+using the viewer :guilabel:`Preferences` under :guilabel:`Page layout` or by pressing the
 :kbd:`Ctrl+M` key.
 
 
@@ -62,7 +62,7 @@ Table of Contents
 ^^^^^^^^^^^^^^^^^^^^
 
 If the book you are reading defines a Table of Contents, you can access it by
-pressing the :guilabel:`Table of Contents` button.  This will bring up a list
+pressing the :guilabel:`Table of Contents` button. This will bring up a list
 of sections in the book. You can click on any of them to jump to that portion
 of the book.
 
@@ -91,9 +91,9 @@ These buttons behave just like those in a web browser.
 Reference mode
 ^^^^^^^^^^^^^^^^^
 
-calibre also has a very handy :guilabel:`Reference mode`.  You can turn it on
+calibre also has a very handy :guilabel:`Reference mode`. You can turn it on
 by clicking the :guilabel:`Reference mode` button in the viewer controls.  Once
-you do this, every mouse over a paragraph, calibre will display a unique number
+you do this, every paragraph will have a unique number displayed at the start,
 made up of the section and paragraph numbers.
 
 You can use this number to unambiguously refer to parts of the books when
@@ -109,9 +109,10 @@ When you select text in the viewer, a little popup bar appears next to the
 selection. You can click the highlight button in that bar to create a
 highlight. You can add notes and change the color of the highlight. On a touch
 screen, long tap a word to select it and show the popup bar. Once in highlight
-mode you can tap the :guilabel:`Adjust selection` button to change what text is
-selected, using touch screen friendly selection handles.  Drag
-the handles to the top or bottom margins to scroll while selecting.
+mode you can change what text is selected, using touch screen friendly selection
+handles. Drag the handles to the top or bottom margins to scroll while selecting.
+You can also :kbd:`Shift+click` or :kbd:`right click` to extend the selection,
+particularly useful for multi-page selections.
 
 You can use the :guilabel:`Highlights` button in the viewer
 controls to show a separate panel with a list of all highlights in the book,
@@ -133,10 +134,12 @@ Read aloud
 
 The viewer can read book text aloud. To use it you can simply click the
 :guilabel:`Read aloud` button in the viewer controls to start reading book text
-aloud. The word being currently read is highlighted. Speech is synthesized from
-the text using your operating system services for text-to-speech. You can
-change the voice being used by clicking the gear icon in the bar that is
-displayed while :guilabel:`Read aloud` is active.
+aloud. The word or sentence being currently read is highlighted. Speech is
+synthesized from the text using either the `Piper
+<https://github.com/rhasspy/piper>`__ neural text-to-speech engine or your
+operating system services for text-to-speech. You can change the backend and
+the voice being used by clicking the gear icon in the bar that is displayed
+while :guilabel:`Read aloud` is active.
 
 You can also read aloud highlighted passages by adding the :guilabel:`Read aloud` button to
 the selection bar in the viewer preferences under :guilabel:`Selection
@@ -146,12 +149,48 @@ behavior`.
 .. note:: Support for text-to-speech in browsers is very incomplete and
    bug-ridden so how well :guilabel:`Read aloud` will work in the in-browser
    viewer is dependent on how well the underlying browser supports
-   text-to-speech. In particular, highlighting of current word does not work,
-   and changing speed or voice will cause reading to start again from the
-   beginning.
+   text-to-speech.
 
-.. note:: On Linux, :guilabel:`Read aloud` requires `Speech Dispatcher
-   <https://freebsoft.org/speechd>`_ to be installed and working.
+Searching the text
+--------------------------
+
+The viewer has very powerful search capabilities. Press the :kbd:`Ctrl+F` key
+or access the viewer controls and click search. The simplest form of searching is
+to just search for whatever text you enter in the text box. The different forms
+of searching are chosen by the search mode box below the search input.
+Available modes are:
+
+#. :guilabel:`Contains` - The simplest default mode. The text entered in the search box
+   is searched for anywhere. All punctuation, accents and spaces are ignored.
+   For example, the search: ``Pena`` will match all of the following:
+   ``penal, pen a, pen.a and Peña``. If you select the :guilabel:`Case sensitive` box
+   then accents, spaces and punctuation are no longer ignored.
+
+#. :guilabel:`Whole words` - Searches for whole words. So for example, the search
+   ``pena`` will match the word ``Peña`` but not the word ``Penal``. As with
+   :guilabel:`Contains` searches above, accents and punctuation are ignored
+   unless the :guilabel:`Case sensitive` box is checked.
+
+#. :guilabel:`Nearby words` - Searches for whole words that are near each other. So for example,
+   the search ``calibre cool`` will match places where the words ``calibre``
+   and ``cool`` occur within sixty characters of each other. To change the
+   number of characters add the new number to the end of the list of words. For
+   instance, ``calibre cool awesome 120`` will match places where the three
+   words occur within 120 characters of each other. Note that punctuation and
+   accents are *not* ignored for these searches.
+
+#. :guilabel:`Regex` - Interprets the search text as a *regular expression*.
+   To learn more about using regular expressions, see :doc:`the tutorial
+   <regexp>`.
+
+By default, the whole book is searched. To search only the chapter you are
+reading, change :guilabel:`Entire book` to :guilabel:`Current chapter` in the
+box below the search mode box. The chapter is the top level entry in the
+:guilabel:`Table of Contents` that contains the current position, including all
+its sub-sections. If the book has a single top level entry containing all the
+others, such as one for the book title, its sub-entries are used as the
+chapters instead. If the book has no Table of Contents or the current position
+is before its first entry, the whole book is searched.
 
 
 Following links using only the keyboard
@@ -196,9 +235,25 @@ custom stylesheets used by calibre's users, see `the forums
 Dictionary lookup
 -------------------
 
-You can look up the meaning of words in the current book by opening the
-:guilabel:`Lookup/search word panel` via the viewer controls. Then simply double
-click on any word and its definition will be displayed in the Lookup panel.
+You can look up the meaning of words in the current book by double clicking
+or long tapping the word you want to lookup and then clicking the lookup button
+that looks like a library.
+
+Custom lookup sources
+^^^^^^^^^^^^^^^^^^^^^^
+
+In addition to the built-in sources (such as Google dictionary and Wordnik), you
+can add your own. In the :guilabel:`Lookup` panel, click :guilabel:`Add sources`,
+then :guilabel:`Add`, and enter a name and a URL template. The placeholder
+:code:`{word}` in the URL is replaced with the selected word at lookup time. You
+can also restrict a source to specific book languages so that it is only used
+when the book matches.
+
+This can be used to point the viewer at any web dictionary that exposes a
+per-word URL, or at a local HTTP server running on your machine. For example, a
+URL template like :code:`http://127.0.0.1:8000/{word}` will query a dictionary
+server running locally, which is useful for offline reading or for using
+dictionaries that are not available online.
 
 
 Copying text and images
@@ -217,14 +272,195 @@ double clicking or long tapping on it. You can also right click on it and
 choose :guilabel:`View image`.
 
 
+Syncing with a paper edition of the current book
+----------------------------------------------------
+
+Some e-books, that have corresponding print editions, include metadata that
+marks the start of each paper page. For such e-books, the viewer allows you to
+jump to a particular paper edition page via the :guilabel:`Go to` button in the
+viewer controls. You can also optionally display the paper page corresponding
+to the current location in the book's headers or footers via the viewer
+settings, by adding :guilabel:`Pages from paper edition` to either the header
+or the footer.
+
+.. _viewer_shortcuts:
+
+Keyboard shortcuts
+-----------------------
+
+The viewer has extensive keyboard shortcuts, like the rest of calibre. They can
+be customised in the viewer :guilabel:`Preferences`. The default shortcuts are listed below:
+
+
+.. list-table:: Keyboard shortcuts for the calibre E-book viewer
+    :widths: 10 100
+    :header-rows: 1
+
+    * - Keyboard shortcut
+      - Action
+    * - :kbd:`Home, Ctrl+ArrowUp, Ctrl+ArrowLeft`
+      - Scroll to the start of the current file in a multi-file book
+    * - :kbd:`Ctrl+Home`
+      - Scroll to the beginning of the book
+    * - :kbd:`Ctrl+End`
+      - Scroll to the end of the book
+    * - :kbd:`End, Ctrl+ArrowDown, Ctrl+ArrowRight`
+      - Scroll to the end of the current file in a multi-file book
+    * - :kbd:`ArrowUp`
+      - Scroll backwards, smoothly in flow mode and by screen fulls in paged mode
+    * - :kbd:`ArrowDown`
+      - Scroll forwards, smoothly in flow mode and by screen fulls in paged mode
+    * - :kbd:`ArrowLeft`
+      - Scroll leftwards by a little in flow mode and by a page in paged mode
+    * - :kbd:`ArrowRight`
+      - Scroll rightwards by a little in flow mode and by a page in paged mode
+    * - :kbd:`PageUp, Shift+Spacebar`
+      - Scroll backwards by screen-fulls
+    * - :kbd:`PageDown, Spacebar`
+      - Scroll forwards by screen-fulls
+    * - :kbd:`Ctrl+PageUp`
+      - Scroll to the previous section
+    * - :kbd:`Ctrl+PageDown`
+      - Scroll to the next section
+    * - :kbd:`Alt+ArrowLeft`
+      - Back
+    * - :kbd:`Alt+ArrowRight`
+      - Forward
+    * - :kbd:`Ctrl+T`
+      - Toggle Table of Contents
+    * - :kbd:`Ctrl+S`
+      - Read aloud
+    * - :kbd:`Alt+P`
+      - Change settings quickly by creating and switching to :guilabel:`profiles`
+    * - :kbd:`Alt+f`
+      - Follow links with the keyboard
+    * - :kbd:`Ctrl+C`
+      - Copy to clipboard
+    * - :kbd:`Alt+C`
+      - Copy current location to clipboard
+    * - :kbd:`Ctrl+Shift+C`
+      - Copy current location as calibre:// URL to clipboard
+    * - :kbd:`/, Ctrl+f, Cmd+f`
+      - Start search
+    * - :kbd:`F3, Enter`
+      - Find next
+    * - :kbd:`Shift+F3, Shift+Enter`
+      - Find previous
+    * - :kbd:`Ctrl+Plus, Meta+Plus`
+      - Increase font size
+    * - :kbd:`Ctrl+Minus, Meta+Minus`
+      - Decrease font size
+    * - :kbd:`Ctrl+0`
+      - Restore default font size
+    * - :kbd:`Ctrl+]`
+      - Increase number of pages per screen
+    * - :kbd:`Ctrl+[`
+      - Decrease number of pages per screen
+    * - :kbd:`Ctrl+Alt+C`
+      - Make number of pages per screen automatic
+    * - :kbd:`F11, Ctrl+Shift+F`
+      - Toggle full screen
+    * - :kbd:`Ctrl+M`
+      - Toggle between Paged mode and Flow mode for text layout
+    * - :kbd:`Ctrl+W`
+      - Toggle the scrollbar
+    * - :kbd:`Ctrl+X`
+      - Toggle the Reference mode
+    * - :kbd:`Ctrl+B`
+      - Show/hide bookmarks
+    * - :kbd:`Ctrl+Alt+B`
+      - New bookmark
+    * - :kbd:`Ctrl+N, Ctrl+E`
+      - Show the book metadata
+    * - :kbd:`Ctrl+Alt+F5, Ctrl+Alt+R`
+      - Reload book
+    * - :kbd:`Ctrl+Shift+ArrowRight`
+      - Alter the current selection forward by a word
+    * - :kbd:`Ctrl+Shift+ArrowLeft`
+      - Alter the current selection backwards by a word
+    * - :kbd:`Shift+ArrowRight`
+      - Alter the current selection forward by a character
+    * - :kbd:`Shift+ArrowLeft`
+      - Alter the current selection backwards by a character
+    * - :kbd:`Shift+ArrowDown`
+      -  Alter the current selection forward by a line
+    * - :kbd:`Shift+Home`
+      -  Extend the current selection to the start of the line
+    * - :kbd:`Shift+End`
+      - Extend the current selection to the end of the line
+    * - :kbd:`Ctrl+A`
+      - Select all
+    * - :kbd:`Shift+ArrowUp`
+      - Alter the current selection backwards by a line
+    * - :kbd:`Ctrl+Shift+ArrowDown`
+      - Alter the current selection forward by a paragraph
+    * - :kbd:`Ctrl+Shift+ArrowUp`
+      - Alter the current selection backwards by a paragraph
+    * - :kbd:`Esc, MenuKey`
+      - Show the E-book viewer controls
+    * - :kbd:`Ctrl+Comma, Ctrl+Esc, Meta+Esc, Meta+Comma`
+      - Show E-book viewer preferences
+    * - :kbd:`Ctrl+G, ;, :`
+      - Go to a specified book location or position
+    * - :kbd:`Ctrl+Spacebar`
+      - Toggle auto-scroll
+    * - :kbd:`Alt+ArrowUp`
+      - Auto scroll faster
+    * - :kbd:`Alt+ArrowDown`
+      - Auto scroll slower
+    * - :kbd:`Ctrl+I`
+      - Show/hide Inspector
+    * - :kbd:`Ctrl+L`
+      -  Show/hide the word lookup panel
+    * - :kbd:`Ctrl+Q (Cmd+Q on macOS)`
+      - Quit
+    * - :kbd:`Ctrl+P`
+      - Print book to PDF
+    * - :kbd:`Ctrl+F11`
+      - Toggle the toolbar
+    * - :kbd:`Ctrl+H`
+      - Toggle the highlights panel
+    * - :kbd:`Ctrl+D`
+      - Edit this book
+
 Non re-flowable content
 --------------------------
 
 Some books have very wide content that cannot be broken up at page boundaries.
 For example tables or :code:`<pre>` tags. In such cases, you should switch the
-viewer to *flow mode* by pressing :kbd:`Ctrl+m` to read this content.
+viewer to *flow mode* by pressing :kbd:`Ctrl+M` to read this content.
 Alternately, you can also add the following CSS to the :guilabel:`Styles` section of the
 viewer preferences to force the viewer to break up lines of text in
 :code:`<pre>` tags::
 
     code, pre { white-space: pre-wrap }
+
+
+Designing your book to work well with the calibre E-book viewer
+-----------------------------------------------------------------
+
+The calibre E-book viewer will set the ``is-calibre-viewer`` class on the root
+element. So you can write CSS rules that apply only for it. Additionally,
+the viewer will set the following classes on the ``body`` element:
+
+``body.calibre-viewer-dark-colors``
+    Set when using a dark color scheme
+
+``body.calibre-viewer-light-colors``
+    Set when using a light color scheme
+
+``body.calibre-viewer-paginated``
+    Set when in paged mode
+
+``body.calibre-viewer-scrolling``
+    Set when in flow (non-paginated) mode
+
+``body.calibre-footnote-container``
+    Set when displaying a popup footnote
+
+Finally, you can use the calibre color scheme colors via `CSS variables
+<https://developer.mozilla.org/en-US/docs/Web/CSS/Using_CSS_custom_properties>`_.
+The calibre E-book viewer defines the following variables:
+``--calibre-viewer-background-color``, ``--calibre-viewer-foreground-color``
+and optionally ``--calibre-viewer-link-color`` in color themes that define
+a link color.

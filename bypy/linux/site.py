@@ -8,6 +8,8 @@ import sys
 
 import _sitebuiltins
 
+USER_SITE = None
+
 
 def set_quit():
     eof = 'Ctrl-D (i.e. EOF)'
@@ -23,18 +25,53 @@ def setup_openssl_environment():
     if 'SSL_CERT_FILE' not in os.environ and 'SSL_CERT_DIR' not in os.environ:
         if os.access('/etc/pki/tls/certs/ca-bundle.crt', os.R_OK):
             os.environ['SSL_CERT_FILE'] = '/etc/pki/tls/certs/ca-bundle.crt'
+        # morons in Fedora removed the bundle file in Fedora 44.
+        # https://fedoraproject.org/wiki/Changes/droppingOfCertPemFile
+        # Hopefully there does not exist another distro that uses this dir for something else.
+        elif os.path.isdir('/etc/pki/tls/certs'):
+            os.environ['SSL_CERT_DIR'] = '/etc/pki/tls/certs'
         elif os.path.isdir('/etc/ssl/certs'):
             os.environ['SSL_CERT_DIR'] = '/etc/ssl/certs'
+
+
+def preload_libxml2():
+    # QtWebEngineProcess on some ancient Linux systems probes for GPU backends
+    # which loads swrast_dri.so which links against system libxml2, which
+    # overwrites or global libxml2 symbols.
+    # So we preload lxml and html5_parser as a workaround.
+    # Thankfully this is basically only needed for ancient Debian as modern
+    # mesa uses libexpat not libxml2.
+    # We need a specific version of libxml2 as html5-parser checks the version,
+    # so preload it to ensure we have the correct one.
+    from html5_parser import parse
+    setattr(preload_libxml2, 'parse', parse)
+
+
+def setup_langtool():
+    # The langtool data files, including the precompiled rule tables, are
+    # placed in resources/langtool by the freeze scripts, as they must be real
+    # files, not frozen
+    os.environ['LANGTOOL_RESOURCE_DIR'] = os.path.join(sys.resources_location, 'langtool')
 
 
 def set_helper():
     builtins.help = _sitebuiltins._Helper()
 
 
+def exit_code(ret: object) -> int:
+    # Entry points may return None or arbitrary non-numeric objects, only
+    # integers (including bools) are meaningful as process exit codes
+    if isinstance(ret, int):
+        return int(ret)
+    return 0
+
+
 def main():
     sys.argv[0] = sys.calibre_basename
     set_helper()
     setup_openssl_environment()
+    setup_langtool()
+    preload_libxml2()
     set_quit()
     mod = __import__(sys.calibre_module, fromlist=[1])
     func = getattr(mod, sys.calibre_function)
@@ -42,4 +79,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(exit_code(main()))

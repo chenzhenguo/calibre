@@ -1,76 +1,81 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2018, Kovid Goyal <kovid at kovidgoyal.net>
-
 
 import atexit
 import errno
 import os
 import tempfile
 import time
+from typing import IO, TYPE_CHECKING
 
 from calibre.constants import cache_dir, iswindows
 from calibre.ptempfile import remove_dir
 from calibre.utils.monotonic import monotonic
 
-TDIR_LOCK = u'tdir-lock'
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+TDIR_LOCK = 'tdir-lock'
 
 if iswindows:
     from calibre.utils.lock import windows_open
 
-    def lock_tdir(path):
+    def lock_tdir(path: str) -> IO[bytes]:
         return windows_open(os.path.join(path, TDIR_LOCK))
 
-    def unlock_file(fobj):
+    def unlock_file(fobj: IO[bytes] | IO[str]) -> None:
         fobj.close()
 
-    def remove_tdir(path, lock_file):
+    def remove_tdir(path: str, lock_file: IO[bytes] | IO[str]) -> None:
         lock_file.close()
         remove_dir(path)
 
-    def is_tdir_locked(path):
+    def is_tdir_locked(path: str) -> bool:
         try:
             with windows_open(os.path.join(path, TDIR_LOCK)):
                 pass
-        except EnvironmentError:
+        except OSError:
             return True
         return False
+
 else:
     import fcntl
+
     from calibre.utils.ipc import eintr_retry_call
 
-    def lock_tdir(path):
+    def lock_tdir(path: str) -> IO[str]:
         lf = os.path.join(path, TDIR_LOCK)
-        f = lopen(lf, 'w')
+        f = open(lf, 'w')  # ruff: ignore[open-file-with-context-handler]
         eintr_retry_call(fcntl.lockf, f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         return f
 
-    def unlock_file(fobj):
+    def unlock_file(fobj: IO[bytes] | IO[str]) -> None:
         from calibre.utils.ipc import eintr_retry_call
+
         eintr_retry_call(fcntl.lockf, fobj.fileno(), fcntl.LOCK_UN)
         fobj.close()
 
-    def remove_tdir(path, lock_file):
+    def remove_tdir(path: str, lock_file: IO[bytes] | IO[str]) -> None:
         lock_file.close()
         remove_dir(path)
 
-    def is_tdir_locked(path):
+    def is_tdir_locked(path: str) -> bool:
         lf = os.path.join(path, TDIR_LOCK)
-        f = lopen(lf, 'w')
+        f = open(lf, 'w')  # ruff: ignore[open-file-with-context-handler]
         try:
             eintr_retry_call(fcntl.lockf, f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             eintr_retry_call(fcntl.lockf, f.fileno(), fcntl.LOCK_UN)
             return False
-        except EnvironmentError:
+        except OSError:
             return True
         finally:
             f.close()
 
 
-def tdirs_in(b):
+def tdirs_in(b: str) -> Iterator[str]:
     try:
         tdirs = os.listdir(b)
-    except EnvironmentError as e:
+    except OSError as e:
         if e.errno != errno.ENOENT:
             raise
         tdirs = ()
@@ -80,14 +85,14 @@ def tdirs_in(b):
             yield x
 
 
-def clean_tdirs_in(b):
+def clean_tdirs_in(b: str) -> None:
     # Remove any stale tdirs left by previous program crashes
     for q in tdirs_in(b):
         if not is_tdir_locked(q):
             remove_dir(q)
 
 
-def retry_lock_tdir(path, timeout=30, sleep=0.1):
+def retry_lock_tdir(path: str, timeout: float = 30, sleep: float = 0.1) -> IO[bytes] | IO[str]:
     st = monotonic()
     while True:
         try:
@@ -98,24 +103,28 @@ def retry_lock_tdir(path, timeout=30, sleep=0.1):
             time.sleep(sleep)
 
 
-def tdir_in_cache(base):
-    ''' Create a temp dir inside cache_dir/base. The created dir is robust
+_tdir_in_cache_scanned: set[str] = set()
+
+
+def tdir_in_cache(base: str) -> str:
+    """Create a temp dir inside cache_dir/base. The created dir is robust
     against application crashes. i.e. it will be cleaned up the next time the
-    application starts, even if it was left behind by a previous crash. '''
+    application starts, even if it was left behind by a previous crash."""
     b = os.path.join(os.path.realpath(cache_dir()), base)
     try:
         os.makedirs(b)
-    except EnvironmentError as e:
+    except OSError as e:
         if e.errno != errno.EEXIST:
             raise
     global_lock = retry_lock_tdir(b)
     try:
-        if b not in tdir_in_cache.scanned:
-            tdir_in_cache.scanned.add(b)
+        if b not in _tdir_in_cache_scanned:
+            _tdir_in_cache_scanned.add(b)
             try:
                 clean_tdirs_in(b)
             except Exception:
                 import traceback
+
                 traceback.print_exc()
         tdir = tempfile.mkdtemp(dir=b)
         lock_data = lock_tdir(tdir)
@@ -125,6 +134,3 @@ def tdir_in_cache(base):
         return tdir
     finally:
         unlock_file(global_lock)
-
-
-tdir_in_cache.scanned = set()

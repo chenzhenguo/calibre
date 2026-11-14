@@ -1,17 +1,19 @@
-# -*- coding: utf-8 -*-
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
 
+from typing import TYPE_CHECKING
 
-__license__ = 'GPL 3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+from calibre.customize.conversion import InputFormatPlugin, OptionRecommendation, OutputFormatPlugin
+from calibre.utils import StreamOrPath
+from calibre.utils.localization import _
 
-import os
+if TYPE_CHECKING:
+    from optparse import Values
 
-from calibre.customize.conversion import OutputFormatPlugin, OptionRecommendation
+    from calibre.ebooks.oeb.base import OEBBook
+    from calibre.utils.logging import Log
 
 
 class FB2Output(OutputFormatPlugin):
-
     name = 'FB2 Output'
     author = 'John Schember'
     file_type = 'fb2'
@@ -147,33 +149,41 @@ class FB2Output(OutputFormatPlugin):
         'sectionize': {
             'toc': _('Section per entry in the ToC'),
             'files': _('Section per file'),
-            'nothing': _('A single section')
+            'nothing': _('A single section'),
         },
         'genres': FB2_GENRES,
     }
 
     options = {
-        OptionRecommendation(name='sectionize',
-            recommended_value='files', level=OptionRecommendation.LOW,
+        OptionRecommendation(
+            name='sectionize',
+            recommended_value='files',
+            level=OptionRecommendation.LOW,
             choices=list(ui_data['sectionize']),
-            help=_('Specify how sections are created:\n'
+            help=_(
+                'Specify how sections are created:\n'
                 ' * nothing: {nothing}\n'
                 ' * files: {files}\n'
                 ' * toc: {toc}\n'
                 'If ToC based generation fails, adjust the "Structure detection" and/or "Table of Contents" settings '
-                '(turn on "Force use of auto-generated Table of Contents").').format(**ui_data['sectionize'])
+                '(turn on "Force use of auto-generated Table of Contents").'
+            ).format(**ui_data['sectionize']),
         ),
-        OptionRecommendation(name='fb2_genre',
-            recommended_value='antique', level=OptionRecommendation.LOW,
+        OptionRecommendation(
+            name='fb2_genre',
+            recommended_value='antique',
+            level=OptionRecommendation.LOW,
             choices=FB2_GENRES,
-            help=(_('Genre for the book. Choices: %s\n\n See: ') % ', '.join(FB2_GENRES)
-                ) + 'http://www.fictionbook.org/index.php/Eng:FictionBook_2.1_genres ' + _('for a complete list with descriptions.')),
+            help=(_('Genre for the book. Choices: %s\n\n See: ') % ', '.join(FB2_GENRES))
+            + 'http://www.fictionbook.org/index.php/Eng:FictionBook_2.1_genres '
+            + _('for a complete list with descriptions.'),
+        ),
     }
 
-    def convert(self, oeb_book, output_path, input_plugin, opts, log):
+    def convert(self, oeb_book: OEBBook, output: str, input_plugin: InputFormatPlugin, opts: Values, log: Log) -> None:
+        from calibre.ebooks.fb2.fb2ml import FB2MLizer
         from calibre.ebooks.oeb.transforms.jacket import linearize_jacket
         from calibre.ebooks.oeb.transforms.rasterize import SVGRasterizer, Unavailable
-        from calibre.ebooks.fb2.fb2ml import FB2MLizer
 
         try:
             rasterizer = SVGRasterizer()
@@ -186,18 +196,7 @@ class FB2Output(OutputFormatPlugin):
         fb2mlizer = FB2MLizer(log)
         fb2_content = fb2mlizer.extract_content(oeb_book, opts)
 
-        close = False
-        if not hasattr(output_path, 'write'):
-            close = True
-            if not os.path.exists(os.path.dirname(output_path)) and os.path.dirname(output_path) != '':
-                os.makedirs(os.path.dirname(output_path))
-            out_stream = lopen(output_path, 'wb')
-        else:
-            out_stream = output_path
-
-        out_stream.seek(0)
-        out_stream.truncate()
-        out_stream.write(fb2_content.encode('utf-8', 'replace'))
-
-        if close:
-            out_stream.close()
+        with StreamOrPath(output, 'wb', makedirs=True) as out_stream:
+            out_stream.seek(0)
+            out_stream.truncate()
+            out_stream.write(fb2_content.encode('utf-8', 'replace'))

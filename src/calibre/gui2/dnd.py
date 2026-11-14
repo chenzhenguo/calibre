@@ -1,19 +1,15 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2011, Kovid Goyal <kovid@kovidgoyal.net>
 
 import os
 import posixpath
 import re
-from PyQt5.Qt import (
-    QDialog, QDialogButtonBox, QImageReader, QLabel, QPixmap, QProgressBar, Qt,
-    QTimer, QUrl, QVBoxLayout
-)
+from contextlib import suppress
+from queue import Empty, Queue
 from threading import Thread
+from urllib.parse import urlparse
+
+from qt.core import QDialog, QDialogButtonBox, QImageReader, QLabel, QMimeData, QPixmap, QProgressBar, Qt, QTimer, QUrl, QVBoxLayout
 
 from calibre import as_unicode, browser, prints
 from calibre.constants import DEBUG, iswindows
@@ -21,15 +17,17 @@ from calibre.gui2 import error_dialog
 from calibre.ptempfile import PersistentTemporaryFile
 from calibre.utils.filenames import make_long_path_useable
 from calibre.utils.imghdr import what
-from polyglot.builtins import unicode_type
-from polyglot.queue import Empty, Queue
-from polyglot.urllib import unquote, urlparse
+from calibre.utils.localization import _
+from polyglot.urllib import unquote
+
+_image_extensions: list[str] | None = None
 
 
-def image_extensions():
-    if not hasattr(image_extensions, 'ans'):
-        image_extensions.ans = [x.data().decode('utf-8') for x in QImageReader.supportedImageFormats()]
-    return image_extensions.ans
+def image_extensions() -> list[str]:
+    global _image_extensions
+    if _image_extensions is None:
+        _image_extensions = [x.data().decode('utf-8') for x in QImageReader.supportedImageFormats()]
+    return _image_extensions
 
 
 # This is present for compatibility with old plugins, do not use
@@ -37,37 +35,37 @@ IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'gif', 'png', 'bmp']
 
 
 class Worker(Thread):  # {{{
-
-    def __init__(self, url, fpath, rq):
+    def __init__(self, url, fpath, rq) -> None:
         Thread.__init__(self)
         self.url, self.fpath = url, fpath
         self.daemon = True
         self.rq = rq
         self.err = self.tb = None
 
-    def run(self):
+    def run(self) -> None:
         try:
             br = browser()
             br.retrieve(self.url, self.fpath, self.callback)
         except Exception as e:
             self.err = as_unicode(e)
             import traceback
+
             self.tb = traceback.format_exc()
 
-    def callback(self, a, b, c):
+    def callback(self, a, b, c) -> None:
         self.rq.put((a, b, c))
+
+
 # }}}
 
 
 class DownloadDialog(QDialog):  # {{{
-
-    def __init__(self, url, fname, parent):
+    def __init__(self, url, fname, parent) -> None:
         QDialog.__init__(self, parent)
-        self.setWindowTitle(_('Download %s')%fname)
+        self.setWindowTitle(_('Download %s') % fname)
         self.l = QVBoxLayout(self)
         self.purl = urlparse(url)
-        self.msg = QLabel(_('Downloading <b>%(fname)s</b> from %(url)s')%dict(
-            fname=fname, url=self.purl.netloc))
+        self.msg = QLabel(_('Downloading <b>%(fname)s</b> from %(url)s') % dict(fname=fname, url=self.purl.netloc))
         self.msg.setWordWrap(True)
         self.l.addWidget(self.msg)
         self.pb = QProgressBar(self)
@@ -85,24 +83,27 @@ class DownloadDialog(QDialog):  # {{{
         self.fpath = fpath.name
 
         self.worker = Worker(url, self.fpath, Queue())
-        self.rejected = False
+        self._download_rejected = False
 
-    def reject(self):
-        self.rejected = True
+    def reject(self) -> None:
+        self._download_rejected = True
         QDialog.reject(self)
 
-    def start_download(self):
+    def start_download(self) -> None:
         self.worker.start()
         QTimer.singleShot(50, self.update)
-        self.exec_()
+        self.exec()
         if self.worker.err is not None:
-            error_dialog(self.parent(), _('Download failed'),
-                _('Failed to download from %(url)r with error: %(err)s')%dict(
-                    url=self.worker.url, err=self.worker.err),
-                det_msg=self.worker.tb, show=True)
+            error_dialog(
+                self.parent(),
+                _('Download failed'),
+                _('Failed to download from %(url)r with error: %(err)s') % dict(url=self.worker.url, err=self.worker.err),
+                det_msg=self.worker.tb,
+                show=True,
+            )
 
-    def update(self):
-        if self.rejected:
+    def update(self, *args, **kwargs):
+        if self._download_rejected:
             return
 
         try:
@@ -116,7 +117,7 @@ class DownloadDialog(QDialog):  # {{{
             return self.accept()
         QTimer.singleShot(50, self.update)
 
-    def update_pb(self, progress):
+    def update_pb(self, progress) -> None:
         transferred, block_size, total = progress
         if total == -1:
             self.pb.setMaximum(0)
@@ -131,12 +132,13 @@ class DownloadDialog(QDialog):  # {{{
     def err(self):
         return self.worker.err
 
+
 # }}}
 
 
 def dnd_has_image(md):
     # Chromium puts image data into application/octet-stream
-    return md.hasImage() or md.hasFormat('application/octet-stream') and what(None, bytes(md.data('application/octet-stream'))) in image_extensions()
+    return md.hasImage() or (md.hasFormat('application/octet-stream') and what(None, bytes(md.data('application/octet-stream'))) in image_extensions())
 
 
 def data_as_string(f, md):
@@ -144,7 +146,7 @@ def data_as_string(f, md):
     if '/x-moz' in f:
         try:
             raw = raw.decode('utf-16')
-        except:
+        except Exception:
             pass
     return raw
 
@@ -169,7 +171,9 @@ def path_from_qurl(qurl, allow_remote=False):
     if lf:
         if iswindows:
             from calibre_extensions.winutil import get_long_path_name
-            lf = get_long_path_name(lf)
+
+            with suppress(OSError):
+                lf = get_long_path_name(lf)
             lf = make_long_path_useable(lf)
         return lf
     if not allow_remote:
@@ -183,8 +187,7 @@ def path_from_qurl(qurl, allow_remote=False):
 
 def remote_urls_from_qurl(qurls, allowed_exts):
     for qurl in qurls:
-        if qurl.scheme() in remote_protocols and posixpath.splitext(
-                qurl.path())[1][1:].lower() in allowed_exts:
+        if qurl.scheme() in remote_protocols and posixpath.splitext(qurl.path())[1][1:].lower() in allowed_exts:
             yield bytes(qurl.toEncoded()).decode('utf-8'), posixpath.basename(qurl.path())
 
 
@@ -196,7 +199,7 @@ def dnd_has_extension(md, extensions, allow_all_extensions=False, allow_remote=F
     if DEBUG:
         prints('\nDebugging DND event')
         for f in md.formats():
-            f = unicode_type(f)
+            f = str(f)
             raw = data_as_string(f, md)
             prints(f, len(raw), repr(raw[:300]), '\n')
         print()
@@ -219,7 +222,7 @@ def dnd_has_extension(md, extensions, allow_all_extensions=False, allow_remote=F
 def dnd_get_local_image_and_pixmap(md, image_exts=None):
     if md.hasImage():
         for x in md.formats():
-            x = unicode_type(x)
+            x = str(x)
             if x.startswith('image/'):
                 cdata = bytes(md.data(x))
                 pmap = QPixmap()
@@ -257,13 +260,13 @@ def dnd_get_local_image_and_pixmap(md, image_exts=None):
 
 
 def dnd_get_image(md, image_exts=None):
-    '''
+    """
     Get the image in the QMimeData object md.
 
     :return: None, None if no image is found
              QPixmap, None if an image is found, the pixmap is guaranteed not null
              url, filename if a URL that points to an image is found
-    '''
+    """
     if image_exts is None:
         image_exts = image_extensions()
     pmap, data = dnd_get_local_image_and_pixmap(md, image_exts)
@@ -284,14 +287,14 @@ def dnd_get_image(md, image_exts=None):
 
 
 def dnd_get_files(md, exts, allow_all_extensions=False, filter_exts=()):
-    '''
+    """
     Get the file in the QMimeData object md with an extension that is one of
     the extensions in exts.
 
     :return: None, None if no file is found
              [paths], None if a local file is found
              [urls], [filenames] if URLs that point to a files are found
-    '''
+    """
     # Look for a URL pointing to a file
     urls = urls_from_md(md)
     # First look for a local file
@@ -302,6 +305,7 @@ def dnd_get_files(md, exts, allow_all_extensions=False, filter_exts=()):
         if allow_all_extensions and ext and ext not in filter_exts:
             return True
         return ext in exts and ext not in filter_exts
+
     local_files = [p for p in local_files if is_ok(unquote(p))]
     local_files = [x for x in local_files if os.path.exists(x)]
     if local_files:
@@ -335,7 +339,7 @@ def _get_firefox_pair(md, exts, url, fname):
         return None, None
     ext = posixpath.splitext(fname)[1][1:].lower()
     # Weird firefox bug on linux
-    ext = {'jpe':'jpg', 'epu':'epub', 'mob':'mobi'}.get(ext, ext)
+    ext = {'jpe': 'jpg', 'epu': 'epub', 'mob': 'mobi'}.get(ext, ext)
     fname = os.path.splitext(fname)[0] + '.' + ext
     if DEBUG:
         prints('Firefox file promise:', url, fname)
@@ -345,26 +349,23 @@ def _get_firefox_pair(md, exts, url, fname):
 
 
 def get_firefox_rurl(md, exts):
-    formats = frozenset([unicode_type(x) for x in md.formats()])
+    formats = frozenset(str(x) for x in md.formats())
     url = fname = None
-    if 'application/x-moz-file-promise-url' in formats and \
-            'application/x-moz-file-promise-dest-filename' in formats:
+    if 'application/x-moz-file-promise-url' in formats and 'application/x-moz-file-promise-dest-filename' in formats:
         try:
-            url, fname = _get_firefox_pair(md, exts,
-                    'application/x-moz-file-promise-url',
-                    'application/x-moz-file-promise-dest-filename')
-        except:
+            url, fname = _get_firefox_pair(md, exts, 'application/x-moz-file-promise-url', 'application/x-moz-file-promise-dest-filename')
+        except Exception:
             if DEBUG:
                 import traceback
+
                 traceback.print_exc()
-    if url is None and 'text/x-moz-url-data' in formats and \
-            'text/x-moz-url-desc' in formats:
+    if url is None and 'text/x-moz-url-data' in formats and 'text/x-moz-url-desc' in formats:
         try:
-            url, fname = _get_firefox_pair(md, exts,
-                    'text/x-moz-url-data', 'text/x-moz-url-desc')
-        except:
+            url, fname = _get_firefox_pair(md, exts, 'text/x-moz-url-data', 'text/x-moz-url-desc')
+        except Exception:
             if DEBUG:
                 import traceback
+
                 traceback.print_exc()
 
     if url is None and '_NETSCAPE_URL' in formats:
@@ -377,9 +378,10 @@ def get_firefox_rurl(md, exts):
                 ext = posixpath.splitext(fname)[1][1:].lower()
                 if ext not in exts:
                     fname = url = None
-        except:
+        except Exception:
             if DEBUG:
                 import traceback
+
                 traceback.print_exc()
     if DEBUG:
         prints('Firefox rurl:', url, fname)
@@ -388,3 +390,8 @@ def get_firefox_rurl(md, exts):
 
 def has_firefox_ext(md, exts):
     return bool(get_firefox_rurl(md, exts)[0])
+
+
+def set_urls_from_local_file_paths(md: QMimeData, *paths: str) -> QMimeData:
+    md.setUrls(list(map(QUrl.fromLocalFile, paths)))
+    return md

@@ -1,85 +1,70 @@
-# -*- coding: utf-8 -*-
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
 
 import glob
 import os
 import shutil
+from typing import IO, TYPE_CHECKING
 
 from calibre.customize.conversion import InputFormatPlugin
 from calibre.ptempfile import TemporaryDirectory
-from polyglot.builtins import getcwd
+from calibre.utils import StreamOrPath
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from calibre.ebooks.metadata.toc import TOC
+    from calibre.ebooks.oeb.base import OEBBook
+    from calibre.utils.logging import Log
 
 
 class PMLInput(InputFormatPlugin):
-
-    name        = 'PML Input'
-    author      = 'John Schember'
-    description = 'Convert PML to OEB'
+    name = 'PML Input'
+    author = 'John Schember'
+    description = _('Convert PML to OEB')
     # pmlz is a zip file containing pml files and png images.
-    file_types  = {'pml', 'pmlz'}
+    file_types = {'pml', 'pmlz'}
     commit_name = 'pml_input'
 
-    def process_pml(self, pml_path, html_path, close_all=False):
+    def process_pml(self, pml_path: str | IO[bytes], html_path: str, close_all: bool = False) -> TOC:
         from calibre.ebooks.pml.pmlconverter import PML_HTMLizer
 
-        pclose = False
-        hclose = False
-
-        if not hasattr(pml_path, 'read'):
-            pml_stream = lopen(pml_path, 'rb')
-            pclose = True
-        else:
-            pml_stream = pml_path
+        with StreamOrPath(pml_path, 'rb') as pml_stream, StreamOrPath(html_path, 'wb') as html_stream:
             pml_stream.seek(0)
+            ienc = getattr(pml_stream, 'encoding', None)
+            if ienc is None:
+                ienc = 'cp1252'
+            enc_opt = getattr(self.options, 'input_encoding', None)
+            if enc_opt:
+                ienc = enc_opt
 
-        if not hasattr(html_path, 'write'):
-            html_stream = lopen(html_path, 'wb')
-            hclose = True
-        else:
-            html_stream = html_path
+            self.log.debug('Converting PML to HTML...')
+            hizer = PML_HTMLizer()
+            html = hizer.parse_pml(pml_stream.read().decode(ienc), html_path)
+            html = f'<html><head><title></title></head><body>{html}</body></html>'
+            html_stream.write(html.encode('utf-8', 'replace'))
+            return hizer.get_toc()
 
-        ienc = getattr(pml_stream, 'encoding', None)
-        if ienc is None:
-            ienc = 'cp1252'
-        if self.options.input_encoding:
-            ienc = self.options.input_encoding
-
-        self.log.debug('Converting PML to HTML...')
-        hizer = PML_HTMLizer()
-        html = hizer.parse_pml(pml_stream.read().decode(ienc), html_path)
-        html = '<html><head><title></title></head><body>%s</body></html>'%html
-        html_stream.write(html.encode('utf-8', 'replace'))
-
-        if pclose:
-            pml_stream.close()
-        if hclose:
-            html_stream.close()
-
-        return hizer.get_toc()
-
-    def get_images(self, stream, tdir, top_level=False):
+    def get_images(self, stream: IO[bytes] | None = None, tdir: str | None = None, top_level: bool = False) -> list[str]:
         images = []
         imgs = []
 
         if top_level:
+            assert tdir is not None
             imgs = glob.glob(os.path.join(tdir, '*.png'))
         # Images not in top level try bookname_img directory because
         # that's where Dropbook likes to see them.
         if not imgs:
-            if hasattr(stream, 'name'):
+            if hasattr(stream, 'name') and tdir is not None:
                 imgs = glob.glob(os.path.join(tdir, os.path.splitext(os.path.basename(stream.name))[0] + '_img', '*.png'))
         # No images in Dropbook location try generic images directory
-        if not imgs:
+        if not imgs and tdir is not None:
             imgs = glob.glob(os.path.join(os.path.join(tdir, 'images'), '*.png'))
         if imgs:
-            os.makedirs(os.path.join(getcwd(), 'images'))
+            os.makedirs(os.path.join(os.getcwd(), 'images'))
         for img in imgs:
             pimg_name = os.path.basename(img)
-            pimg_path = os.path.join(getcwd(), 'images', pimg_name)
+            pimg_path = os.path.join(os.getcwd(), 'images', pimg_name)
 
             images.append('images/' + pimg_name)
 
@@ -87,13 +72,14 @@ class PMLInput(InputFormatPlugin):
 
         return images
 
-    def convert(self, stream, options, file_ext, log,
-                accelerators):
-        from calibre.ebooks.metadata.toc import TOC
+    def convert(self, stream: IO[bytes], options: Values, file_ext: str, log: Log, accelerators: dict[str, str]) -> str:
         from calibre.ebooks.metadata.opf2 import OPFCreator
+        from calibre.ebooks.metadata.toc import TOC
         from calibre.utils.zipfile import ZipFile
 
-        self.options = options
+        # PMLInput stores the conversion options on the instance, shadowing the
+        # class level set of OptionRecommendations
+        self.options = options  # ty: ignore[invalid-assignment]
         self.log = log
         pages, images = [], []
         toc = TOC()
@@ -106,11 +92,11 @@ class PMLInput(InputFormatPlugin):
 
                 pmls = glob.glob(os.path.join(tdir, '*.pml'))
                 for pml in pmls:
-                    html_name = os.path.splitext(os.path.basename(pml))[0]+'.html'
-                    html_path = os.path.join(getcwd(), html_name)
+                    html_name = os.path.splitext(os.path.basename(pml))[0] + '.html'
+                    html_path = os.path.join(os.getcwd(), html_name)
 
                     pages.append(html_name)
-                    log.debug('Processing PML item %s...' % pml)
+                    log.debug(f'Processing PML item {pml}...')
                     ttoc = self.process_pml(pml, html_path)
                     toc += ttoc
                 images = self.get_images(stream, tdir, True)
@@ -121,45 +107,50 @@ class PMLInput(InputFormatPlugin):
             if hasattr(stream, 'name'):
                 images = self.get_images(stream, os.path.abspath(os.path.dirname(stream.name)))
 
-        # We want pages to be orded alphabetically.
+        # We want pages to be ordered alphabetically.
         pages.sort()
 
         manifest_items = []
-        for item in pages+images:
+        for item in pages + images:
             manifest_items.append((item, None))
 
         from calibre.ebooks.metadata.meta import get_metadata
+
         log.debug('Reading metadata from input file...')
         mi = get_metadata(stream, 'pml')
         if 'images/cover.png' in images:
             mi.cover = 'images/cover.png'
-        opf = OPFCreator(getcwd(), mi)
+        opf = OPFCreator(os.getcwd(), mi)
         log.debug('Generating manifest...')
         opf.create_manifest(manifest_items)
         opf.create_spine(pages)
         opf.set_toc(toc)
-        with lopen('metadata.opf', 'wb') as opffile:
-            with lopen('toc.ncx', 'wb') as tocfile:
+        with open('metadata.opf', 'wb') as opffile:
+            with open('toc.ncx', 'wb') as tocfile:
                 opf.render(opffile, tocfile, 'toc.ncx')
 
-        return os.path.join(getcwd(), 'metadata.opf')
+        return os.path.join(os.getcwd(), 'metadata.opf')
 
-    def postprocess_book(self, oeb, opts, log):
+    def postprocess_book(self, oeb: OEBBook, opts: Values, log: Log) -> None:
+        from lxml import etree
+
         from calibre.ebooks.oeb.base import XHTML, barename
+
         for item in oeb.spine:
-            if hasattr(item.data, 'xpath'):
-                for heading in item.data.iterdescendants(*map(XHTML, 'h1 h2 h3 h4 h5 h6'.split())):
+            root = item.data
+            if isinstance(root, etree._Element):
+                for heading in root.iterdescendants(*map(XHTML, 'h1 h2 h3 h4 h5 h6'.split())):
                     if not len(heading):
                         continue
                     span = heading[0]
-                    if not heading.text and not span.text and not len(span) and barename(span.tag) == 'span':
-                        if not heading.get('id') and span.get('id'):
-                            heading.set('id', span.get('id'))
+                    if not heading.text and not span.text and not len(span) and isinstance(span.tag, str) and barename(span.tag) == 'span':
+                        if not heading.get('id') and (span_id := span.get('id')):
+                            heading.set('id', span_id)
                             heading.text = span.tail
                             heading.remove(span)
                     if len(heading) == 1 and heading[0].get('style') == 'text-align: center; margin: auto;':
                         div = heading[0]
-                        if barename(div.tag) == 'div' and not len(div) and not div.get('id') and not heading.get('style'):
+                        if isinstance(div.tag, str) and barename(div.tag) == 'div' and not len(div) and not div.get('id') and not heading.get('style'):
                             heading.text = (heading.text or '') + (div.text or '') + (div.tail or '')
                             heading.remove(div)
                             heading.set('style', 'text-align: center')

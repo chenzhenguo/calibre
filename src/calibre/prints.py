@@ -1,22 +1,31 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPL v3 Copyright: 2019, Kovid Goyal <kovid at kovidgoyal.net>
 
 import io
 import sys
+import time
+from typing import IO, TYPE_CHECKING, TypedDict, Unpack
 
 from polyglot.builtins import as_bytes, as_unicode
 
+if TYPE_CHECKING:
 
-def is_binary(stream):
+    class PrintKwargs(TypedDict, total=False):
+        sep: str | bytes | None
+        end: str | bytes | None
+        file: IO[str] | IO[bytes] | None
+        flush: bool
+
+
+def is_binary(stream: object) -> bool:
     mode = getattr(stream, 'mode', None)
     if mode:
         return 'b' in mode
     return not isinstance(stream, io.TextIOBase)
 
 
-def prints(*a, **kw):
-    ' Print either unicode or bytes to either binary or text mode streams '
+def prints(*a: object, **kw: Unpack[PrintKwargs]) -> None:
+    "Print either unicode or bytes to either binary or text mode streams"
     stream = kw.get('file', sys.stdout)
     if stream is None:
         return
@@ -27,11 +36,11 @@ def prints(*a, **kw):
         end = '\n'
     if is_binary(stream):
         encoding = getattr(stream, 'encoding', None) or 'utf-8'
-        a = (as_bytes(x, encoding=encoding) for x in a)
+        a = (as_bytes(x, encoding=encoding) for x in a)  # ty: ignore[invalid-assignment]
         sep = as_bytes(sep)
         end = as_bytes(end)
     else:
-        a = (as_unicode(x, errors='replace') for x in a)
+        a = (as_unicode(x, errors='replace') for x in a)  # ty: ignore[invalid-assignment]
         sep = as_unicode(sep)
         end = as_unicode(end)
     for i, x in enumerate(a):
@@ -45,3 +54,39 @@ def prints(*a, **kw):
             stream.flush()
         except Exception:
             pass
+
+
+def debug_print(*args: object, **kw: Unpack[PrintKwargs]) -> None:
+    """
+    Prints debug information to the console if debugging is enabled.
+
+    This function prints a message prefixed with a timestamp showing the elapsed time
+    since the first call to this function. The message is printed only if debugging is enabled.
+
+    Parameters:
+    *args : tuple
+        Variable length argument list to be printed.
+    **kw : dict
+        Arbitrary keyword arguments to be passed to the `print` function.
+
+    Attributes:
+    base_time : float
+        The timestamp of the first call to this function. Stored as an attribute of the function.
+
+    Behavior:
+    - On the first call, initializes `base_time` to the current time using `time.monotonic()`.
+    - If `is_debugging()` returns True, prints the elapsed time since `base_time` along with the provided arguments.
+    """
+    from calibre.constants import is_debugging
+
+    # Get the base_time attribute, initializing it on the first call
+    base_time = getattr(debug_print, 'base_time', None)
+    if base_time is None:
+        # Set base_time to the current monotonic time if it hasn't been set
+        base_time = time.monotonic()
+        setattr(debug_print, 'base_time', base_time)
+
+    # Check if debugging is enabled
+    if is_debugging():
+        # Print the elapsed time and the provided arguments if debugging is enabled
+        prints(f'DEBUG: {time.monotonic() - base_time:6.1f}', *args, **kw)

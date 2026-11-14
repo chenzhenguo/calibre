@@ -1,16 +1,10 @@
-# -*- coding: utf-8 -*-
-
-
-__license__ = 'GPL 3'
-__copyright__ = '2011, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
 
 from calibre.utils.filenames import ascii_filename
 
 
-class StorePlugin(object):  # {{{
-
-    '''
+class StorePlugin:  # {{{
+    """
     A plugin representing an online ebook repository (store). The store can
     be a commercial store that sells ebooks or a source of free downloadable
     ebooks.
@@ -41,40 +35,41 @@ class StorePlugin(object):  # {{{
 
     Plugin authors can use affiliate programs within their plugin. The
     distribution of money earned from a store plugin is 70/30. 70% going
-    to the pluin author / maintainer and 30% going to the calibre project.
+    to the plugin author / maintainer and 30% going to the calibre project.
 
     The easiest way to handle affiliate money payouts is to randomly select
     between the author's affiliate id and calibre's affiliate id so that
     70% of the time the author's id is used.
 
     See declined.txt for a list of stores that do not want to be included.
-    '''
+    """
 
     minimum_calibre_version = (0, 9, 14)
 
-    def __init__(self, gui, name, config=None, base_plugin=None):
+    def __init__(self, gui, name, config=None, base_plugin=None) -> None:
         self.gui = gui
         self.name = name
         self.base_plugin = base_plugin
         if config is None:
             from calibre.utils.config import JSONConfig
+
             config = JSONConfig('store/stores/' + ascii_filename(self.name))
         self.config = config
 
     def create_browser(self):
-        '''
+        """
         If the server requires special headers, such as a particular user agent
-        or a referrer, then implement this method in you plugin to return a
+        or a referrer, then implement this method in your plugin to return a
         customized browser instance. See the Gutenberg plugin for an example.
 
         Note that if you implement the open() method in your plugin and use the
         WebStoreDialog class, remember to pass self.createbrowser in the
         constructor of WebStoreDialog.
-        '''
+        """
         raise NotImplementedError()
 
     def open(self, gui, parent=None, detail_item=None, external=False):
-        '''
+        """
         Open the store.
 
         :param gui: The main GUI. This will be used to have the job
@@ -90,11 +85,11 @@ class StorePlugin(object):  # {{{
         store. When True open the users default browser to the store's
         web site. :param:`detail_item` should still be respected when external
         is True.
-        '''
+        """
         raise NotImplementedError()
 
     def search(self, query, max_results=10, timeout=60):
-        '''
+        """
         Searches the store for items matching query. This should
         return items as a generator.
 
@@ -115,19 +110,19 @@ class StorePlugin(object):  # {{{
         disabled by default.
 
         If a store doesn't provide search on it's own use something like a site specific
-        google search to get search results for this funtion.
+        google search to get search results for this function.
 
         :param query: The string query search with.
         :param max_results: The maximum number of results to return.
         :param timeout: The maximum amount of time in seconds to spend downloading data for search results.
 
         :return: :class:`calibre.gui2.store.search_result.SearchResult` objects
-        item_data is plugin specific and is used in :meth:`open` to open to a specifc place in the store.
-        '''
+        item_data is plugin specific and is used in :meth:`open` to open to a specific place in the store.
+        """
         raise NotImplementedError()
 
-    def get_details(self, search_result, timeout=60):
-        '''
+    def get_details(self, search_result, timeout=60) -> bool:
+        """
         Delayed search for information about specific search items.
 
         Typically, this will be used when certain information such as
@@ -144,11 +139,11 @@ class StorePlugin(object):  # {{{
         :param timeout: The maximum amount of time in seconds to spend downloading details.
 
         :return: True if the search_result was modified otherwise False
-        '''
+        """
         return False
 
-    def update_cache(self, parent=None, timeout=60, force=False, suppress_progress=False):
-        '''
+    def update_cache(self, parent=None, timeout=60, force=False, suppress_progress=False) -> bool:
+        """
         Some plugins need to keep an local cache of available books. This function
         is called to update the caches. It is recommended to call this function
         from :meth:`open`. Especially if :meth:`open` does anything other than
@@ -178,34 +173,35 @@ class StorePlugin(object):  # {{{
         :param suppress_progress: Should a progress indicator be shown.
 
         :return: True if the cache was updated, False otherwise.
-        '''
+        """
         return False
 
-    def do_genesis(self):
+    def do_genesis(self) -> None:
         self.genesis()
 
-    def genesis(self):
-        '''
+    def genesis(self) -> None:
+        """
         Plugin specific initialization.
-        '''
+        """
         pass
 
     def config_widget(self):
-        '''
+        """
         See :class:`calibre.customize.Plugin` for details.
-        '''
+        """
         raise NotImplementedError()
 
     def save_settings(self, config_widget):
-        '''
+        """
         See :class:`calibre.customize.Plugin` for details.
-        '''
+        """
         raise NotImplementedError()
 
     def customization_help(self, gui=False):
-        '''
+        """
         See :class:`calibre.customize.Plugin` for details.
-        '''
+        """
         raise NotImplementedError()
+
 
 # }}}

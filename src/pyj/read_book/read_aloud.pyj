@@ -3,11 +3,12 @@
 from __python__ import bound_methods, hash_literals
 
 from elementmaker import E
-
-from book_list.theme import get_color
-from dom import clear, svgicon, unique_id
 from gettext import gettext as _
-from read_book.globals import runtime, ui_operations
+
+from book_list.globals import get_session_data
+from book_list.theme import get_color
+from dom import clear, cycle_focus, index_of_focused, svgicon, unique_id
+from read_book.globals import ui_operations
 from read_book.highlights import ICON_SIZE
 from read_book.selection_bar import BUTTON_MARGIN, get_margins, map_to_iframe_coords
 from read_book.shortcuts import shortcut_for_key_event
@@ -19,9 +20,22 @@ PLAYING = 3
 STOPPED = 4
 
 
-class ReadAloud:
+def is_flow_mode():
+    sd = get_session_data()
+    mode = sd.get('read_mode')
+    return mode is 'flow'
 
+
+def bar_class_and_position():
+    sd = get_session_data()
+    bp = sd.get('tts_bar_position')
+    iclass = 'floating' if 'float' in bp else 'docked'
+    return iclass, bp
+
+
+class ReadAloud:
     dont_hide_on_content_loaded = True
+    prevent_navigation = True
 
     def __init__(self, view):
         self.view = view
@@ -30,22 +44,24 @@ class ReadAloud:
         container = self.container
         container.setAttribute('tabindex', '0')
         container.style.overflow = 'hidden'
-        container.style.textAlign = 'right'
-        container.appendChild(E.div(
-            id=self.bar_id,
-            style='position: static; border: solid 1px currentColor; border-radius: 5px;'
-            'display: inline-flex; flex-direction: column; margin: 1rem;'
+        container.appendChild(E.div(id=self.bar_id))
+        container.appendChild(E.style(
+            f'#{self.bar_id}.floating' + '{ border: var(--calibre-border-style-strong); border-radius: 5px; display: flex;' +
+            ' flex-direction: column; margin: 1rem; }\n\n',
+            f'#{self.bar_id}.docked' + '{ border-radius: 1em; height: 2em; padding:0.5em; display: flex; justify-content: center; align-items: center; }\n\n',
+            f'#{self.bar_id}.speaking ' + '{ opacity: 0.5 }\n\n',
+            f'#{self.bar_id}.speaking:hover ' + '{ opacity: 1.0 }\n\n',
+            f'#{self.bar_id}.speaking:focus-within ' + '{ opacity: 1.0 }\n\n',
+            f'#{self.bar_id} button' + '{ padding: 0; border: none; background: none; color: inherit; font: inherit; line-height: 0 }\n\n',
+            f'#{self.bar_id} button:focus-visible' + '{ outline: 2px solid ' + get_color('link-foreground') + '; outline-offset: 2px }\n\n',
         ))
         container.addEventListener('keydown', self.on_keydown, {'passive': False})
         container.addEventListener('click', self.container_clicked, {'passive': False})
+        container.addEventListener('contextmenu', self.toggle, {'passive': False})
 
     @property
     def container(self):
         return document.getElementById('book-read-aloud-overlay')
-
-    @property
-    def supports_css_min_max(self):
-        return not runtime.is_standalone_viewer or runtime.QT_VERSION >= 0x050f00
 
     @property
     def bar(self):
@@ -76,7 +92,7 @@ class ReadAloud:
 
     def show(self):
         if self.state is HIDDEN:
-            self.container.style.display = 'block'
+            self.container.style.display = 'flex'
             self.state = STOPPED
             self.focus()
             if ui_operations.read_aloud_state_changed:
@@ -85,35 +101,30 @@ class ReadAloud:
     def focus(self):
         self.container.focus()
 
-    def build_bar(self, annot_id):
-        if self.state is HIDDEN:
-            return
-        bar_container = self.bar
-        clear(bar_container)
-        bar_container.style.maxWidth = 'min(40rem, 80vw)' if self.supports_css_min_max else '40rem'
-        bar_container.style.backgroundColor = get_color("window-background")
-        for x in [
-            E.div(style='height: 4ex; display: flex; align-items: center; padding: 5px; justify-content: center'),
+    def build_docked_bar(self, bar_container, bar_position):
+        container = self.container
+        container.style.alignItems = 'flex-end' if 'bottom' in bar_position else 'flex-start'
+        container.style.justifyContent = 'flex-end' if 'right' in bar_position else ('flex-start' if 'left' in bar_position else 'center')
+        self.create_buttons(bar_container)
 
-            E.hr(style='border-top: solid 1px; margin: 0; padding: 0; display: none'),
-
-            E.div(
-                style='display: none; padding: 5px; font-size: smaller',
-                E.div()
-            )
-        ]:
-            bar_container.appendChild(x)
-        bar = bar_container.firstChild
-
+    def create_buttons(self, bar):
         def cb(name, icon, text):
-            ans = svgicon(icon, ICON_SIZE, ICON_SIZE, text)
+            ans = E.button(svgicon(icon, ICON_SIZE, ICON_SIZE), type='button', title=text, aria_label=text, class_='simple-link')
             if name:
-                ans.addEventListener('click', def(ev):
+                ans.addEventListener('click', def (ev):
                     ev.stopPropagation(), ev.preventDefault()
                     self[name](ev)
-                    self.view.focus_iframe()
+                    # Clicks hand focus back to the book, but keyboard users
+                    # (ev.detail is zero) keep it on the bar, so that they can
+                    # use the other controls
+                    if ev.detail > 0:
+                        self.view.focus_iframe()
                 )
-            ans.classList.add('simple-link')
+            else:
+                # Keep the place of the control, so that focus can stay on
+                # it while reading starts
+                ans.setAttribute('aria-disabled', 'true')
+                ans.addEventListener('click', def (ev): ev.stopPropagation(), ev.preventDefault();)
             ans.style.marginLeft = ans.style.marginRight = BUTTON_MARGIN
             return ans
 
@@ -126,7 +137,56 @@ class ReadAloud:
         bar.appendChild(cb('slower', 'slower', _('Slow down speech')))
         bar.appendChild(cb('faster', 'faster', _('Speed up speech')))
         bar.appendChild(cb('configure', 'cogs', _('Configure Read aloud')))
-        bar.appendChild(cb('hide', 'close', _('Close Read aloud')))
+        bar.appendChild(cb('hide', 'off', _('Close Read aloud')))
+
+    def build_bar(self):
+        if self.state is HIDDEN:
+            return
+        bar_container = self.bar
+        bar_container.classList.remove('floating')
+        bar_container.classList.remove('docked')
+        iclass, bp = bar_class_and_position()
+        bar_container.classList.add(iclass)
+        bar_container.style.maxWidth = 'min(40rem, 80vw)'
+        bar_container.style.backgroundColor = get_color('window-background')
+        if self.state is PLAYING:
+            bar_container.classList.add('speaking')
+        else:
+            bar_container.classList.remove('speaking')
+        # The bar is rebuilt, so put focus back on the control in the same
+        # place, such as Pause after Play was pressed
+        focused = self.focused_control()
+        clear(bar_container)
+        self.build_bar_contents(bar_container, iclass, bp)
+        if focused is not None:
+            controls = self.controls()
+            if controls.length:
+                controls[min(focused, controls.length - 1)].focus()
+
+    def controls(self):
+        return self.bar.querySelectorAll('button')
+
+    def focused_control(self):
+        return index_of_focused(self.controls())
+
+    def build_bar_contents(self, bar_container, iclass, bp):
+        if iclass is not 'floating':
+            return self.build_docked_bar(bar_container, bp)
+
+        container = self.container
+        container.style.alignItems = 'flex-end' if is_flow_mode() else 'flex-start'
+        container.style.justifyContent = 'flex-end'
+        for x in [
+            E.div(style='height: 4ex; display: flex; align-items: center; padding: 5px; justify-content: center'),
+            E.hr(style='border-top: solid 1px; margin: 0; padding: 0; display: none'),
+            E.div(
+                style='display: none; padding: 5px; font-size: smaller',
+                E.div()
+            )
+        ]:
+            bar_container.appendChild(x)
+        self.create_buttons(bar_container.firstChild)
+
         if self.state is not WAITING_FOR_PLAY_TO_START:
             notes_container = bar_container.lastChild
             notes_container.style.display = notes_container.previousSibling.style.display = 'block'
@@ -184,12 +244,20 @@ class ReadAloud:
         self.send_message('play', pos=pos)
 
     def on_keydown(self, ev):
+        if ev.key is 'Tab' and not ev.ctrlKey and not ev.altKey and not ev.metaKey:
+            # Move between the controls, wrapping around, so that focus stays
+            # in Read aloud, which covers the book
+            ev.stopPropagation(), ev.preventDefault()
+            cycle_focus(self.controls(), ev.shiftKey)
+            return
+        if (ev.key is 'Enter' or ev.key is ' ') and self.focused_control() is not None:
+            # Let the focused control be activated as a button
+            ev.stopPropagation()
+            return
         ev.stopPropagation(), ev.preventDefault()
         if ev.key is 'Escape':
             self.hide()
             return
-        # Note that in the standalone viewer MediaPlayPause is currently broken
-        # in Qt: https://bugreports.qt.io/browse/QTBUG-89915
         if ev.key is ' ' or ev.key is 'MediaPlayPause' or ev.key is 'PlayPause':
             self.toggle()
             return
@@ -210,13 +278,15 @@ class ReadAloud:
         elif sc_name is 'quit':
             self.hide()
             ui_operations.quit()
-        elif sc_name in ('up', 'down', 'pageup', 'pagedown', 'left', 'right'):
-            self.send_message('trigger-shortcut', name=sc_name)
 
     def handle_tts_event(self, which, data):
         if which is 'mark':
             self.send_message('mark', num=data)
         elif which is 'begin':
+            self.state = PLAYING
+        elif which is 'pause':
+            self.state = PAUSED
+        elif which is 'resume':
             self.state = PLAYING
         elif which is 'end':
             self.state = STOPPED
@@ -235,4 +305,15 @@ class ReadAloud:
         if msg.type is 'text-extracted':
             if msg.pos:
                 self.stop()
-            ui_operations.tts('play', {'marked_text': msg.marked_text})
+            has_words = False
+            for x in msg.marked_text:
+                if jstype(x) is 'number':
+                    has_words = True
+                    break
+            if has_words:
+                ui_operations.tts('play', {'marked_text': msg.marked_text})
+            else:
+                # nothing to speak in this file (e.g. a full page image) so
+                # skip to the next spine item, see https://bugs.launchpad.net/bugs/2165923
+                self.state = STOPPED
+                self.view.show_next_spine_item()

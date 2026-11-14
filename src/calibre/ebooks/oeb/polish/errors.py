@@ -1,23 +1,41 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
 from calibre.ebooks import DRMError as _DRMError
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 
 class InvalidBook(ValueError):
     pass
 
 
-class DRMError(_DRMError):
+_drm_message = ''
 
-    def __init__(self):
-        super(DRMError, self).__init__(_('This file is locked with DRM. It cannot be edited.'))
+
+@contextmanager
+def drm_message(msg: str) -> Generator[None]:
+    global _drm_message
+    orig, _drm_message = _drm_message, msg
+    try:
+        yield
+    finally:
+        _drm_message = orig
+
+
+class DRMError(_DRMError):
+    def __init__(self) -> None:
+        super().__init__(_drm_message or _('This file is locked with DRM. It cannot be edited.'))
 
 
 class MalformedMarkup(ValueError):
+    pass
+
+
+class UnsupportedContainerType(Exception):
     pass

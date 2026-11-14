@@ -1,73 +1,75 @@
+"""Collection of python utility-methodes commonly used by other
+bibliograph packages.
+From http://pypi.python.org/pypi/bibliograph.core/
+from Tom Gross <itconsense@gmail.com>
 
+Adapted for calibre use
 
-""" Collection of python utility-methodes commonly used by other
-    bibliograph packages.
-    From http://pypi.python.org/pypi/bibliograph.core/
-    from Tom Gross <itconsense@gmail.com>
+Zope Public License (ZPL) Version 2.1
 
-    Adapted for calibre use
+A copyright notice accompanies this license document that
+identifies the copyright holders.
 
-    Zope Public License (ZPL) Version 2.1
+This license has been certified as open source. It has also
+been designated as GPL compatible by the Free Software
+Foundation (FSF).
 
-    A copyright notice accompanies this license document that
-    identifies the copyright holders.
+Redistribution and use in source and binary forms, with or
+without modification, are permitted provided that the
+following conditions are met:
 
-    This license has been certified as open source. It has also
-    been designated as GPL compatible by the Free Software
-    Foundation (FSF).
+1. Redistributions in source code must retain the
+   accompanying copyright notice, this list of conditions,
+   and the following disclaimer.
 
-    Redistribution and use in source and binary forms, with or
-    without modification, are permitted provided that the
-    following conditions are met:
+2. Redistributions in binary form must reproduce the accompanying
+   copyright notice, this list of conditions, and the
+   following disclaimer in the documentation and/or other
+   materials provided with the distribution.
 
-    1. Redistributions in source code must retain the
-       accompanying copyright notice, this list of conditions,
-       and the following disclaimer.
+3. Names of the copyright holders must not be used to
+   endorse or promote products derived from this software
+   without prior written permission from the copyright
+   holders.
 
-    2. Redistributions in binary form must reproduce the accompanying
-       copyright notice, this list of conditions, and the
-       following disclaimer in the documentation and/or other
-       materials provided with the distribution.
+4. The right to distribute this software or to use it for
+   any purpose does not give you the right to use
+   Servicemarks (sm) or Trademarks (tm) of the copyright
+   holders. Use of them is covered by separate agreement
+   with the copyright holders.
 
-    3. Names of the copyright holders must not be used to
-       endorse or promote products derived from this software
-       without prior written permission from the copyright
-       holders.
+5. If any files are modified, you must cause the modified
+   files to carry prominent notices stating that you changed
+   the files and the date of any change.
 
-    4. The right to distribute this software or to use it for
-       any purpose does not give you the right to use
-       Servicemarks (sm) or Trademarks (tm) of the copyright
-       holders. Use of them is covered by separate agreement
-       with the copyright holders.
+Disclaimer
 
-    5. If any files are modified, you must cause the modified
-       files to carry prominent notices stating that you changed
-       the files and the date of any change.
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS''
+  AND ANY EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT
+  NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
+  AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN
+  NO EVENT SHALL THE COPYRIGHT HOLDERS BE
+  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+  OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+  DAMAGE.
+"""
 
-    Disclaimer
+__author__ = 'sengian <sengian1 at gmail.com>'
 
-      THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS''
-      AND ANY EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT
-      NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
-      AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN
-      NO EVENT SHALL THE COPYRIGHT HOLDERS BE
-      LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-      EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-      LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-      LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
-      HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-      CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
-      OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-      SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
-      DAMAGE.
-    """
-
-__author__  = 'sengian <sengian1 at gmail.com>'
-__docformat__ = 'restructuredtext en'
-
-import re, string
+import re
+import string
+from typing import TYPE_CHECKING
 
 from calibre.utils.mreplace import MReplace
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 utf8enc2latex_mapping = {  # {{{
     # This is a mapping of Unicode characters to LaTeX equivalents.
@@ -77,7 +79,6 @@ utf8enc2latex_mapping = {  # {{{
     #
     # The extraction has been done by the "create_unimap.py" script
     # located at <http://docutils.sf.net/tools/dev/create_unimap.py>.
-
     # Fix some encoding problem between cp1252 and latin1
     # from http://www.microsoft.com/typography/unicode/1252.htm
     '\x80': '{\\texteuro}',  # EURO SIGN
@@ -89,10 +90,10 @@ utf8enc2latex_mapping = {  # {{{
     '\x87': '{\\textdaggerdbl}',  # DOUBLE DAGGER
     '\x88': '{\textasciicircum}',  # MODIFIER LETTER CIRCUMFLEX ACCENT
     '\x89': '{\\textperthousand}',  # PER MILLE SIGN
-    '\x8A': '{\\v{S}}',  # LATIN CAPITAL LETTER S WITH CARON
-    '\x8B': '{\\guilsinglleft}',  # SINGLE LEFT-POINTING ANGLE QUOTATION MARK
-    '\x8C': '{\\OE}',  # LATIN CAPITAL LIGATURE OE
-    '\x8E': '{\\v{Z}}',  # LATIN CAPITAL LETTER Z WITH CARON
+    '\x8a': '{\\v{S}}',  # LATIN CAPITAL LETTER S WITH CARON
+    '\x8b': '{\\guilsinglleft}',  # SINGLE LEFT-POINTING ANGLE QUOTATION MARK
+    '\x8c': '{\\OE}',  # LATIN CAPITAL LIGATURE OE
+    '\x8e': '{\\v{Z}}',  # LATIN CAPITAL LETTER Z WITH CARON
     '\x91': '{`}',  # LEFT SINGLE QUOTATION MARK
     '\x92': "{'}",  # RIGHT SINGLE QUOTATION MARK
     '\x93': '{\\textquotedblleft}',  # LEFT DOUBLE QUOTATION MARK
@@ -102,12 +103,11 @@ utf8enc2latex_mapping = {  # {{{
     '\x97': '{\\textemdash}',  # EM DASH
     '\x98': '{\\texttildelow}',  # SMALL TILDE
     '\x99': '{\\texttrademark}',  # TRADE MARK SIGN
-    '\x9A': '{\\v{s}}',  # LATIN SMALL LETTER S WITH CARON
-    '\x9B': '{\\guilsinglright}',  # SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
-    '\x9C': '{\\oe}',  # LATIN SMALL LIGATURE OE
-    '\x9E': '{\\v{z}}',  # LATIN SMALL LETTER Z WITH CARON
-    '\x9F': '{\\"{Y}}',  # LATIN CAPITAL LETTER Y WITH DIAERESIS
-
+    '\x9a': '{\\v{s}}',  # LATIN SMALL LETTER S WITH CARON
+    '\x9b': '{\\guilsinglright}',  # SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
+    '\x9c': '{\\oe}',  # LATIN SMALL LIGATURE OE
+    '\x9e': '{\\v{z}}',  # LATIN SMALL LETTER Z WITH CARON
+    '\x9f': '{\\"{Y}}',  # LATIN CAPITAL LETTER Y WITH DIAERESIS
     '\xa1': '{\\textexclamdown}',
     '\xa2': '{\\textcent}',
     '\xa3': '{\\textsterling}',
@@ -2165,11 +2165,9 @@ utf8enc2latex_mapping = {  # {{{
     '\U0001d7fd': '$\\mathtt{7}$',
     '\U0001d7fe': '$\\mathtt{8}$',
     '\U0001d7ff': '$\\mathtt{9}$',
-
     # Items from simple list
     '\u0106': "{\\a\\'C}",
     '\u0408': '{\\CYRJE}',
-    '\u20ac': '{\\texteuro}',
     '\u2191': '{\\textuparrow}',
     '\u0493': '{\\cyrghcrs}',
     '\u2116': '{\\textnumero}',
@@ -2495,8 +2493,7 @@ utf8enc2latex_mapping = {  # {{{
     '\u20a4': '{\\textlira}',
     '\xea': '{\\^e}',
     '\u016f': '{\\r u}',
-    '\xfa': "{\\'u}"
-
+    '\xfa': "{\\'u}",
     # Items to add at a latter date (check first)
     # '\u0000': r'{$\alpha$}',
     # '\u0000': r'{$\beta$}',
@@ -2536,60 +2533,58 @@ utf8enc2latex_mapping = {  # {{{
     # '\u0000': r'{$\Phi$}',
     # '\u0000': r'{$\Psi$}',
     # '\u0000': r'{$\Omega$}',
-    }
+}
 # }}}
 
 entity_mapping = {
-                '&mdash;':'{---}',
-                '&ndash;':'{--}',
-                '"':'{"}',
-                }
+    '&mdash;': '{---}',
+    '&ndash;': '{--}',
+    '"': '{"}',
+}
 
 
 class BibTeX:
-
-    def __init__(self):
+    def __init__(self) -> None:
         self.rep_utf8 = MReplace(utf8enc2latex_mapping)
         self.rep_ent = MReplace(entity_mapping)
         # Set default conversion to ASCII BibTeX
         self.ascii_bibtex = True
         # This substitution is based on the description of cite key restrictions at
         # http://bibdesk.sourceforge.net/manual/BibDesk%20Help_2.html
-        self.invalid_cit = re.compile('[ "@\',\\#}{~%&$^]')
-        self.upper = re.compile('[' +
-            string.ascii_uppercase + ']')
-        self.escape = re.compile('[#&%_]')
+        self.invalid_cit = re.compile(r'[ "@\',\#}{~%&$^]')
+        self.upper = re.compile('[' + string.ascii_uppercase + ']')
+        self.escape = re.compile(r'[#&%_]')
 
-    def ValidateCitationKey(self, text):
+    def ValidateCitationKey(self, text: str) -> str:
         """
         Removes characters not allowed in BibTeX keys
         """
         return self.invalid_cit.sub('', text)
 
-    def braceUppercase(self, text):
+    def braceUppercase(self, text: str) -> str:
         """
         Convert uppercase letters to bibtex encoded uppercase
         """
-        return self.upper.sub(lambda m: '{%s}' % m.group(), text)
+        return self.upper.sub(lambda m: f'{{{m.group()}}}', text)
 
-    def resolveEntities(self, text):
+    def resolveEntities(self, text: str) -> str:
         return self.rep_ent.mreplace(text)
 
-    def resolveUnicode(self, text):
+    def resolveUnicode(self, text: str) -> str:
         # UTF-8 text as entry
         text = self.rep_utf8.mreplace(text)
         return text.replace('$}{$', '')
 
-    def escapeSpecialCharacters(self, text):
+    def escapeSpecialCharacters(self, text: str) -> str:
         """
         Latex escaping some (not all) special characters
         """
         text = text.replace('\\', '\\\\')
         text = text.replace('~', '{\\char`\\~}')  # TILDE
-        return self.escape.sub(lambda m: '\\%s' % m.group(), text)
+        return self.escape.sub(lambda m: f'\\{m.group()}', text)
 
     # Calibre functions: Option to go to official ASCII Bibtex or unofficial UTF-8
-    def utf8ToBibtex(self, text):
+    def utf8ToBibtex(self, text: str) -> str:
         """
         Go from an unicode entry to ASCII Bibtex format without encoding
         """
@@ -2597,17 +2592,17 @@ class BibTeX:
             return ''
         text = self.resolveEntities(text)
         text = self.escapeSpecialCharacters(text)
-        if self.ascii_bibtex :
+        if self.ascii_bibtex:
             text = self.resolveUnicode(text)
         return text
 
-    def bibtex_author_format(self, item):
+    def bibtex_author_format(self, item: Iterable[str]) -> str:
         """
         Format authors for Bibtex compliance (get a list as input)
         """
-        return self.utf8ToBibtex(' and '.join([author for author in item]))
+        return self.utf8ToBibtex(' and '.join(item))
 
-    def stripUnmatchedSyntax(self, text, open_character, close_character):
+    def stripUnmatchedSyntax(self, text: str, open_character: str, close_character: str) -> str:
         """
         Strips unmatched BibTeX syntax
         """
@@ -2627,8 +2622,8 @@ class BibTeX:
         remove.extend(stack)
 
         if remove:
-            text = list(text)
+            chars = list(text)
             for i in sorted(remove, reverse=True):
-                text.pop(i)
-            text = ''.join(text)
+                chars.pop(i)
+            text = ''.join(chars)
         return text

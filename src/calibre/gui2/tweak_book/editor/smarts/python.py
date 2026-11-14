@@ -1,20 +1,18 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
 import re
 
-from PyQt5.Qt import Qt
+from qt.core import Qt
 
 from calibre.gui2.tweak_book.editor.smarts import NullSmarts
-from calibre.gui2.tweak_book.editor.smarts.utils import (
-    get_text_before_cursor, get_leading_whitespace_on_block as lw,
-    smart_home, smart_backspace, smart_tab)
+from calibre.gui2.tweak_book.editor.smarts.utils import get_leading_whitespace_on_block as lw
+from calibre.gui2.tweak_book.editor.smarts.utils import get_text_before_cursor, smart_backspace, smart_home, smart_tab
 
-get_leading_whitespace_on_block = lambda editor, previous=False: expand_tabs(lw(editor, previous=previous))
+
+def get_leading_whitespace_on_block(editor, previous=False):
+    return expand_tabs(lw(editor, previous=previous))
+
 
 tw = 4  # The tab width (hardcoded to the pep8 value)
 
@@ -24,20 +22,21 @@ def expand_tabs(text):
 
 
 class Smarts(NullSmarts):
-
     override_tab_stop_width = tw
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         NullSmarts.__init__(self, *args, **kwargs)
         c = re.compile
         self.escape_scope_pat = c(r'\s+(continue|break|return|pass)(\s|$)')
         self.dedent_pat = c(r'\s+(else|elif|except)(\(|\s|$)')
 
-    def handle_key_press(self, ev, editor):
+    def handle_key_press(self, ev, editor) -> bool:
         key = ev.key()
 
-        if key == Qt.Key.Key_Tab and smart_tab(editor, ev):
-            return True
+        if key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            mods = ev.modifiers()
+            if not mods & Qt.KeyboardModifier.ControlModifier and smart_tab(editor, ev):
+                return True
 
         elif key == Qt.Key.Key_Backspace and smart_backspace(editor, ev):
             return True
@@ -68,9 +67,12 @@ class Smarts(NullSmarts):
 
         if key == Qt.Key.Key_Home and smart_home(editor, ev):
             return True
+        return False
 
 
 if __name__ == '__main__':
     import os
+
     from calibre.gui2.tweak_book.editor.widget import launch_editor
+
     launch_editor(os.path.abspath(__file__), syntax='python')

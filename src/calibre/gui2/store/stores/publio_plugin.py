@@ -1,22 +1,13 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
+# License: GPLv3 Copyright: 2012-2017, Tomasz Długosz <tomek3d@gmail.com>
 
-store_version = 9  # Needed for dynamic plugin loading
 
-__license__ = 'GPL 3'
-__copyright__ = '2012-2017, Tomasz Długosz <tomek3d@gmail.com>'
-__docformat__ = 'restructuredtext en'
+store_version = 10  # Needed for dynamic plugin loading
 
-try:
-    from urllib.parse import quote
-except ImportError:
-    from urllib import quote
 from base64 import b64encode
 from contextlib import closing
+from urllib.parse import quote
 
-from lxml import html
-
-from PyQt5.Qt import QUrl
+from qt.core import QUrl
 
 from calibre import browser, url_slash_cleaner
 from calibre.gui2 import open_url
@@ -24,6 +15,11 @@ from calibre.gui2.store import StorePlugin
 from calibre.gui2.store.basic_config import BasicStoreConfig
 from calibre.gui2.store.search_result import SearchResult
 from calibre.gui2.store.web_store_dialog import WebStoreDialog
+
+try:
+    from calibre.utils.xml_parse import safe_html_fromstring
+except ImportError:
+    from lxml.html import fromstring as safe_html_fromstring
 
 
 def as_base64(data):
@@ -36,8 +32,7 @@ def as_base64(data):
 
 
 class PublioStore(BasicStoreConfig, StorePlugin):
-
-    def open(self, parent=None, detail_item=None, external=False):
+    def open(self, gui=None, parent=None, detail_item=None, external=False) -> None:
         aff_root = 'https://www.a4b-tracking.com/pl/stat-click-text-link/29/58/'
         url = 'http://www.publio.pl/'
 
@@ -48,12 +43,12 @@ class PublioStore(BasicStoreConfig, StorePlugin):
             detail_url = aff_root + as_base64(detail_item)
 
         if external or self.config.get('open_external', False):
-            open_url(QUrl(url_slash_cleaner(detail_url if detail_url else aff_url)))
+            open_url(QUrl(url_slash_cleaner(detail_url or aff_url)))
         else:
-            d = WebStoreDialog(self.gui, url, parent, detail_url if detail_url else aff_url)
+            d = WebStoreDialog(self.gui, url, parent, detail_url or aff_url)
             d.setWindowTitle(self.name)
             d.set_tags(self.config.get('tags', ''))
-            d.exec_()
+            d.exec()
 
     def search(self, query, max_results=20, timeout=60):
 
@@ -62,8 +57,8 @@ class PublioStore(BasicStoreConfig, StorePlugin):
         counter = max_results
         page = 1
         while counter:
-            with closing(br.open('http://www.publio.pl/e-booki,strona{}.html?q={}'.format(page, quote(query)), timeout=timeout)) as f:  # noqa
-                doc = html.fromstring(f.read())
+            with closing(br.open(f'http://www.publio.pl/e-booki,strona{page}.html?q={quote(query)}', timeout=timeout)) as f:
+                doc = safe_html_fromstring(f.read())
                 for data in doc.xpath('//div[@class="products-list"]//div[@class="product-tile"]'):
                     if counter <= 0:
                         break
@@ -91,4 +86,4 @@ class PublioStore(BasicStoreConfig, StorePlugin):
                     yield s
                 if not doc.xpath('boolean(//a[@class="next"])'):
                     break
-                page+=1
+                page += 1

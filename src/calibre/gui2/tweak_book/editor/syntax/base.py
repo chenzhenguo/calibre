@@ -1,17 +1,13 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
 from collections import defaultdict, deque
 
-from PyQt5.Qt import QTextCursor, QTextBlockUserData, QTextLayout, QTimer
+from qt.core import QTextBlock, QTextBlockUserData, QTextCursor, QTextFormat, QTextLayout, QTimer
 
-from ..themes import highlight_to_char_format
-from calibre.gui2.tweak_book.widgets import BusyCursor
+from calibre.gui2.tweak_book.editor.themes import highlight_to_char_format
+from calibre.gui2.widgets import BusyCursor
 from calibre.utils.icu import utf16_length
-from polyglot.builtins import iteritems, unicode_type
 
 
 def run_loop(user_data, state_map, formats, text):
@@ -28,7 +24,7 @@ def run_loop(user_data, state_map, formats, text):
                 if fix_offsets:
                     # We need to map offsets/lengths from UCS-4 to UTF-16 in
                     # which non-BMP characters are two code points wide
-                    yield utf16_length(text[:i]), utf16_length(text[i:i+num]), f
+                    yield utf16_length(text[:i]), utf16_length(text[i : i + num]), f
                 else:
                     yield i, num, f
                 i += num
@@ -38,11 +34,10 @@ def run_loop(user_data, state_map, formats, text):
             break
 
 
-class SimpleState(object):
-
+class SimpleState:
     __slots__ = ('parse',)
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.parse = 0
 
     def copy(self):
@@ -52,25 +47,29 @@ class SimpleState(object):
 
 
 class SimpleUserData(QTextBlockUserData):
-
-    def __init__(self):
+    def __init__(self) -> None:
         QTextBlockUserData.__init__(self)
         self.state = SimpleState()
         self.doc_name = None
 
-    def clear(self, state=None, doc_name=None):
+    def clear(self, state=None, doc_name=None) -> None:
         self.state = SimpleState() if state is None else state
         self.doc_name = doc_name
 
 
-class SyntaxHighlighter(object):
+class SyntaxHighlighter:
+    def create_formats_func(highlighter):
+        return {}
 
-    create_formats_func = lambda highlighter: {}
     spell_attributes = ()
-    tag_ok_for_spell = lambda x: False
-    user_data_factory = SimpleUserData
 
-    def __init__(self):
+    def tag_ok_for_spell(x) -> bool:
+        return False
+
+    user_data_factory = SimpleUserData
+    state_map: dict
+
+    def __init__(self) -> None:
         self.doc = None
         self.doc_name = None
         self.requests = deque()
@@ -80,15 +79,15 @@ class SyntaxHighlighter(object):
     def has_requests(self):
         return bool(self.requests)
 
-    def apply_theme(self, theme):
-        self.theme = {k:highlight_to_char_format(v) for k, v in iteritems(theme)}
+    def apply_theme(self, theme) -> None:
+        self.theme = {k: highlight_to_char_format(v) for k, v in theme.items()}
         self.create_formats()
         self.rehighlight()
 
-    def create_formats(self):
+    def create_formats(self) -> None:
         self.formats = self.create_formats_func()
 
-    def set_document(self, doc, doc_name=None):
+    def set_document(self, doc, doc_name=None) -> None:
         old_doc = self.doc
         if old_doc is not None:
             old_doc.contentsChange.disconnect(self.reformat_blocks)
@@ -96,7 +95,7 @@ class SyntaxHighlighter(object):
             c.beginEditBlock()
             blk = old_doc.begin()
             while blk.isValid():
-                blk.layout().clearAdditionalFormats()
+                blk.layout().clearFormats()
                 blk = blk.next()
             c.endEditBlock()
         self.doc = self.doc_name = None
@@ -106,7 +105,7 @@ class SyntaxHighlighter(object):
             doc.contentsChange.connect(self.reformat_blocks)
             self.rehighlight()
 
-    def rehighlight(self):
+    def rehighlight(self) -> None:
         doc = self.doc
         if doc is None:
             return
@@ -123,7 +122,7 @@ class SyntaxHighlighter(object):
             new_data = True
         return ud, new_data
 
-    def reformat_blocks(self, position, removed, added):
+    def reformat_blocks(self, position, removed, added) -> None:
         doc = self.doc
         if doc is None or self.ignore_requests or not hasattr(self, 'state_map'):
             return
@@ -140,7 +139,7 @@ class SyntaxHighlighter(object):
         self.requests.append((start_cursor, end_cursor))
         QTimer.singleShot(0, self.do_one_block)
 
-    def do_one_block(self):
+    def do_one_block(self) -> None:
         try:
             start_cursor, end_cursor = self.requests[0]
         except IndexError:
@@ -153,8 +152,10 @@ class SyntaxHighlighter(object):
                 return
             formats, force_next_highlight = self.parse_single_block(block)
             self.apply_format_changes(block, formats)
+            doc = self.doc
+            assert doc is not None
             try:
-                self.doc.markContentsDirty(block.position(), block.length())
+                doc.markContentsDirty(block.position(), block.length())
             except AttributeError:
                 self.requests.clear()
                 return
@@ -173,8 +174,8 @@ class SyntaxHighlighter(object):
             self.ignore_requests = False
             QTimer.singleShot(0, self.do_one_block)
 
-    def join(self):
-        ''' Blocks until all pending highlighting requests are handled '''
+    def join(self) -> None:
+        """Blocks until all pending highlighting requests are handled"""
         doc = self.doc
         if doc is None:
             self.requests.clear()
@@ -215,7 +216,7 @@ class SyntaxHighlighter(object):
             start_state = self.user_data_factory().state
         ud.clear(state=start_state, doc_name=self.doc_name)  # Ensure no stale user data lingers
         formats = []
-        for i, num, fmt in run_loop(ud, self.state_map, self.formats, unicode_type(block.text())):
+        for i, num, fmt in run_loop(ud, self.state_map, self.formats, str(block.text())):
             if fmt is not None:
                 r = QTextLayout.FormatRange()
                 r.start, r.length, r.format = i, num, fmt
@@ -223,11 +224,11 @@ class SyntaxHighlighter(object):
         force_next_highlight = is_new_ud or ud.state != orig_state
         return formats, force_next_highlight
 
-    def reformat_block(self, block):
+    def reformat_block(self, block) -> None:
         if block.isValid():
             self.reformat_blocks(block.position(), 0, 1)
 
-    def apply_format_changes(self, block, formats):
+    def apply_format_changes(self, block, formats) -> None:
         layout = block.layout()
         preedit_start = layout.preeditAreaPosition()
         preedit_length = len(layout.preeditAreaText())
@@ -238,4 +239,13 @@ class SyntaxHighlighter(object):
                     r.start += preedit_length
                 elif r.start + r.length >= preedit_start:
                     r.length += preedit_length
-        layout.setAdditionalFormats(formats)
+        layout.setFormats(formats)
+
+    def formats_for_line(self, block: QTextBlock, start, length):
+        layout = block.layout()
+        assert layout is not None
+        start_in_block = start - block.position()
+        limit = start_in_block + length
+        for f in layout.formats():
+            if f.start >= start_in_block and f.start < limit and f.format.hasProperty(QTextFormat.Property.BackgroundBrush):
+                yield f

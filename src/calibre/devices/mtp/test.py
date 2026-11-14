@@ -1,36 +1,37 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid at kovidgoyal.net>
 
+import gc
+import io
+import unittest
+from typing import TYPE_CHECKING, cast
 
-__license__   = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-import unittest, gc, io
-
-from calibre.constants import iswindows, islinux
-from calibre.utils.icu import lower
+from calibre.constants import islinux, iswindows
 from calibre.devices.mtp.driver import MTP_DEVICE
 from calibre.devices.scanner import DeviceScanner
-from polyglot.builtins import range
+from calibre.utils.icu import lower
+from calibre.utils.stop_gc import stop_gc
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from calibre.devices.mtp.filesystem_cache import FileOrFolder, MTPEntry, ObjectId
 
 
-class ProgressCallback(object):
-
-    def __init__(self):
+class ProgressCallback:
+    def __init__(self) -> None:
         self.count = 0
         self.end_called = False
 
-    def __call__(self, pos, total):
+    def __call__(self, pos: int, total: int) -> None:
         if pos == total:
             self.end_called = True
         self.count += 1
 
 
 class TestDeviceInteraction(unittest.TestCase):
-
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(cls) -> None:
         cls.dev = cls.storage = None
         cls.dev = MTP_DEVICE(None)
         cls.dev.startup()
@@ -42,106 +43,112 @@ class TestDeviceInteraction(unittest.TestCase):
             cls.dev = None
             return
         cls.dev.open(cd, 'test_library')
-        if cls.dev.free_space()[0] < 10*(1024**2):
+        if cls.dev.free_space()[0] < 10 * (1024**2):
             return
-        cls.dev.filesystem_cache
         cls.storage = cls.dev.filesystem_cache.entries[0]
 
     @classmethod
-    def tearDownClass(cls):
+    def tearDownClass(cls) -> None:
         if cls.dev is not None:
             cls.dev.shutdown()
             cls.dev = None
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.cleanup = []
 
-    def tearDown(self):
+    def tearDown(self) -> None:
+        dev = self.dev
+        assert dev is not None
         for obj in reversed(self.cleanup):
-            self.dev.delete_file_or_folder(obj)
+            dev.delete_file_or_folder(obj)
 
-    def check_setup(self):
+    def check_setup(self) -> None:
         if self.dev is None:
             self.skipTest('No MTP device detected')
         if self.storage is None:
             self.skipTest('The connected device does not have enough free space')
 
-    def test_folder_operations(self):
-        ''' Test the creation of folders, duplicate folders and sub folders '''
+    def test_folder_operations(self) -> None:
+        """Test the creation of folders, duplicate folders and sub folders"""
         self.check_setup()
+        dev = self.dev
+        assert dev is not None
+        storage = self.storage
+        assert storage is not None
 
         # Create a folder
         name = 'zzz-test-folder'
-        folder = self.dev.create_folder(self.storage, name)
+        folder = dev.create_folder(storage, name)
         self.cleanup.append(folder)
         self.assertTrue(folder.is_folder)
-        self.assertEqual(folder.parent_id, self.storage.object_id)
-        self.assertEqual(folder.storage_id, self.storage.object_id)
+        self.assertEqual(folder.parent_id, storage.object_id)
+        self.assertEqual(folder.storage_id, storage.object_id)
         self.assertEqual(lower(name), lower(folder.name))
 
         # Create a sub-folder
         name = 'sub-folder'
-        subfolder = self.dev.create_folder(folder, name)
+        subfolder = dev.create_folder(folder, name)
         self.assertTrue(subfolder.is_folder)
         self.assertEqual(subfolder.parent_id, folder.object_id)
-        self.assertEqual(subfolder.storage_id, self.storage.object_id)
+        self.assertEqual(subfolder.storage_id, storage.object_id)
         self.assertEqual(lower(name), lower(subfolder.name))
         self.cleanup.append(subfolder)
 
         # Check that creating an existing folder returns that folder (case
         # insensitively)
-        self.assertIs(subfolder, self.dev.create_folder(folder,
-            'SUB-FOLDER'),
-            msg='Creating an existing folder did not return the existing folder')
+        self.assertIs(
+            subfolder,
+            dev.create_folder(folder, 'SUB-FOLDER'),
+            msg='Creating an existing folder did not return the existing folder',
+        )
 
         # Check that creating folders as children of files is not allowed
-        root_file = [f for f in self.dev.filesystem_cache.entries[0].files if
-                not f.is_folder]
+        root_file = [f for f in dev.filesystem_cache.entries[0].files if not f.is_folder]
         if root_file:
             with self.assertRaises(ValueError):
-                self.dev.create_folder(root_file[0], 'sub-folder')
+                dev.create_folder(root_file[0], 'sub-folder')
 
-    def test_file_transfer(self):
-        ''' Test transferring files to and from the device '''
+    def test_file_transfer(self) -> None:
+        """Test transferring files to and from the device"""
         self.check_setup()
+        dev = self.dev
+        assert dev is not None
+        storage = self.storage
+        assert storage is not None
         # Create a folder
         name = 'zzz-test-folder'
-        folder = self.dev.create_folder(self.storage, name)
+        folder = dev.create_folder(storage, name)
         self.cleanup.append(folder)
         self.assertTrue(folder.is_folder)
-        self.assertEqual(folder.parent_id, self.storage.object_id)
+        self.assertEqual(folder.parent_id, storage.object_id)
 
         # Check simple file put/get
         size = 1024**2
-        raw = io.BytesIO(b'a'*size)
+        raw = io.BytesIO(b'a' * size)
         raw.seek(0)
         name = 'test-file.txt'
         pc = ProgressCallback()
-        f = self.dev.put_file(folder, name, raw, size, callback=pc)
+        f = dev.put_file(folder, name, raw, size, callback=pc)
         self.cleanup.append(f)
         self.assertEqual(f.name, name)
         self.assertEqual(f.size, size)
         self.assertEqual(f.parent_id, folder.object_id)
         self.assertEqual(f.storage_id, folder.storage_id)
-        self.assertTrue(pc.end_called,
-                msg='Progress callback not called with equal values (put_file)')
-        self.assertTrue(pc.count > 1,
-                msg='Progress callback only called once (put_file)')
+        self.assertTrue(pc.end_called, msg='Progress callback not called with equal values (put_file)')
+        self.assertTrue(pc.count > 1, msg='Progress callback only called once (put_file)')
 
         raw2 = io.BytesIO()
         pc = ProgressCallback()
-        self.dev.get_mtp_file(f, raw2, callback=pc)
+        dev.get_mtp_file(f, raw2, callback=pc)
         self.assertEqual(raw.getvalue(), raw2.getvalue())
-        self.assertTrue(pc.end_called,
-                msg='Progress callback not called with equal values (get_file)')
-        self.assertTrue(pc.count > 1,
-                msg='Progress callback only called once (get_file)')
+        self.assertTrue(pc.end_called, msg='Progress callback not called with equal values (get_file)')
+        self.assertTrue(pc.count > 1, msg='Progress callback only called once (get_file)')
 
         # Check file replacement
         raw = io.BytesIO(b'abcd')
         raw.seek(0)
         size = 4
-        f = self.dev.put_file(folder, name, raw, size)
+        f = dev.put_file(folder, name, raw, size)
         self.cleanup.append(f)
         self.assertEqual(f.name, name)
         self.assertEqual(f.size, size)
@@ -151,115 +158,107 @@ class TestDeviceInteraction(unittest.TestCase):
         # Check that we get an error with replace=False
         raw.seek(0)
         with self.assertRaises(ValueError):
-            self.dev.put_file(folder, name, raw, size, replace=False)
+            dev.put_file(folder, name, raw, size, replace=False)
 
         # Check that we can put a file into the root
         raw.seek(0)
         name = 'zzz-test-file.txt'
-        f = self.dev.put_file(self.storage, name, raw, size)
+        f = dev.put_file(storage, name, raw, size)
         self.cleanup.append(f)
         self.assertEqual(f.name, name)
         self.assertEqual(f.size, size)
-        self.assertEqual(f.parent_id, self.storage.object_id)
-        self.assertEqual(f.storage_id, self.storage.storage_id)
+        self.assertEqual(f.parent_id, storage.object_id)
+        self.assertEqual(f.storage_id, storage.storage_id)
 
         raw2 = io.BytesIO()
-        self.dev.get_mtp_file(f, raw2)
+        dev.get_mtp_file(f, raw2)
         self.assertEqual(raw.getvalue(), raw2.getvalue())
 
-    def measure_memory_usage(self, repetitions, func, *args, **kwargs):
+    def measure_memory_usage[**P](self, repetitions: int, func: Callable[P, object], *args: P.args, **kwargs: P.kwargs) -> float:
         from calibre.utils.mem import memory
-        gc.disable()
-        try:
+
+        with stop_gc:
             start_mem = memory()
             for i in range(repetitions):
                 func(*args, **kwargs)
             for i in range(3):
                 gc.collect()
             end_mem = memory()
-        finally:
-            gc.enable()
         return end_mem - start_mem
 
-    def check_memory(self, once, many, msg, factor=2):
-        msg += ' for once: %g for many: %g'%(once, many)
+    def check_memory(self, once: float, many: float, msg: str, factor: float = 2) -> None:
+        msg += f' for once: {once:g} for many: {many:g}'
         if once > 0:
-            self.assertTrue(many <= once*factor, msg=msg)
+            self.assertTrue(many <= once * factor, msg=msg)
         else:
             self.assertTrue(many <= 0.01, msg=msg)
 
     @unittest.skipUnless(iswindows or islinux, 'Can only test for leaks on windows and linux')
-    def test_memory_leaks(self):
-        ''' Test for memory leaks in the C module '''
+    def test_memory_leaks(self) -> None:
+        """Test for memory leaks in the C module"""
         self.check_setup()
+        dev = self.dev
+        assert dev is not None
+        storage = self.storage
+        assert storage is not None
 
         # Test device scanning
-        used_by_one = self.measure_memory_usage(1,
-                self.dev.detect_managed_devices, self.scanner.devices,
-                force_refresh=True)
+        used_by_one = self.measure_memory_usage(1, dev.detect_managed_devices, self.scanner.devices, force_refresh=True)
 
-        used_by_many = self.measure_memory_usage(100,
-                self.dev.detect_managed_devices, self.scanner.devices,
-                force_refresh=True)
+        used_by_many = self.measure_memory_usage(100, dev.detect_managed_devices, self.scanner.devices, force_refresh=True)
 
-        self.check_memory(used_by_one, used_by_many,
-                'Memory consumption during device scan')
+        self.check_memory(used_by_one, used_by_many, 'Memory consumption during device scan')
 
         # Test file transfer
-        size = 1024*100
-        raw = io.BytesIO(b'a'*size)
+        size = 1024 * 100
+        raw = io.BytesIO(b'a' * size)
         raw.seek(0)
         name = 'zzz-test-file.txt'
 
-        def send_file(storage, name, raw, size):
+        def send_file(storage: FileOrFolder, name: str, raw: io.BytesIO, size: int) -> None:
             raw.seek(0)
             pc = ProgressCallback()
-            f = self.dev.put_file(storage, name, raw, size, callback=pc)
+            f = dev.put_file(storage, name, raw, size, callback=pc)
             self.cleanup.append(f)
             del pc
 
-        used_once = self.measure_memory_usage(1, send_file, self.storage, name,
-                raw, size)
-        used_many = self.measure_memory_usage(20, send_file, self.storage, name,
-                raw, size)
+        used_once = self.measure_memory_usage(1, send_file, storage, name, raw, size)
+        used_many = self.measure_memory_usage(20, send_file, storage, name, raw, size)
 
-        self.check_memory(used_once, used_many,
-                'Memory consumption during put_file:')
+        self.check_memory(used_once, used_many, 'Memory consumption during put_file:')
 
-        def get_file(f):
+        def get_file(f: FileOrFolder) -> None:
             raw = io.BytesIO()
             pc = ProgressCallback()
-            self.dev.get_mtp_file(f, raw, callback=pc)
+            dev.get_mtp_file(f, raw, callback=pc)
             raw.truncate(0)
             del raw
             del pc
 
-        f = self.storage.file_named(name)
+        f = storage.file_named(name)
+        assert f is not None
         used_once = self.measure_memory_usage(1, get_file, f)
         used_many = self.measure_memory_usage(20, get_file, f)
-        self.check_memory(used_once, used_many,
-                'Memory consumption during get_file:')
+        self.check_memory(used_once, used_many, 'Memory consumption during get_file:')
 
         # Test get_filesystem
-        used_by_one = self.measure_memory_usage(1,
-                self.dev.dev.get_filesystem, self.storage.object_id,
-                                                lambda x, l:True)
+        assert dev.dev is not None
+        # The type of storage ids depends on the platform specific driver
+        get_filesystem = cast('Callable[[ObjectId, Callable[[MTPEntry, int], bool]], object]', dev.dev.get_filesystem)
+        used_by_one = self.measure_memory_usage(1, get_filesystem, storage.object_id, lambda x, l: True)
 
-        used_by_many = self.measure_memory_usage(5,
-                self.dev.dev.get_filesystem, self.storage.object_id,
-                                                 lambda x, l: True)
+        used_by_many = self.measure_memory_usage(5, get_filesystem, storage.object_id, lambda x, l: True)
 
-        self.check_memory(used_by_one, used_by_many,
-                'Memory consumption during get_filesystem')
+        self.check_memory(used_by_one, used_by_many, 'Memory consumption during get_filesystem')
 
 
-def tests():
+def tests() -> unittest.TestSuite:
     tl = unittest.TestLoader()
     # return tl.loadTestsFromName('test.TestDeviceInteraction.test_memory_leaks')
     return tl.loadTestsFromTestCase(TestDeviceInteraction)
 
 
-def run():
+def run() -> None:
     unittest.TextTestRunner(verbosity=2).run(tests())
 
 

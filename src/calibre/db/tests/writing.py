@@ -1,51 +1,79 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-from collections import namedtuple
+import os
 from functools import partial
 from io import BytesIO
+from typing import TYPE_CHECKING, NamedTuple
 
+from calibre.db.backend import FTSQueryError
+from calibre.db.cache import Pages
+from calibre.db.constants import METADATA_FILE_NAME, RESOURCE_URL_SCHEME
+from calibre.db.tests.base import IMG, BaseTest
 from calibre.ebooks.metadata import author_to_author_sort, title_sort
 from calibre.ebooks.metadata.book.base import Metadata
 from calibre.utils.date import UNDEFINED_DATE
-from calibre.db.tests.base import BaseTest, IMG
-from calibre.db.backend import FTSQueryError
-from polyglot.builtins import iteritems, itervalues, unicode_type
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    import datetime
+    from collections.abc import Callable, Iterable
+
+    from calibre.db.listeners import EventType
+    from calibre.library.database2 import LibraryDatabase2
+
+    type Getter = Callable[[LibraryDatabase2], Callable[[int], object]]
+    type Setter = Callable[[LibraryDatabase2], Callable[[int, object], object]]
 
 
 class WritingTest(BaseTest):
-
     # Utils {{{
-    def create_getter(self, name, getter=None):
+    class Test(NamedTuple):
+        name: str
+        vals: tuple
+        getter: Callable
+        setter: Callable
+
+    def create_getter(self, name: str, getter: str | Getter | None = None) -> Getter:
         if getter is None:
             if name.endswith('_index'):
-                ans = lambda db:partial(db.get_custom_extra, index_is_id=True,
-                                        label=name[1:].replace('_index', ''))
+
+                def ans(db: LibraryDatabase2) -> Callable[[int], object]:
+                    return partial(db.get_custom_extra, index_is_id=True, label=name[1:].replace('_index', ''))
+
             else:
-                ans = lambda db:partial(db.get_custom, label=name[1:],
-                                       index_is_id=True)
+
+                def ans(db: LibraryDatabase2) -> Callable[[int], object]:
+                    return partial(db.get_custom, label=name[1:], index_is_id=True)
+
+        elif callable(getter):
+            return getter
         else:
-            ans = lambda db:partial(getattr(db, getter), index_is_id=True)
+
+            def ans(db: LibraryDatabase2) -> Callable[[int], object]:
+                return partial(getattr(db, getter), index_is_id=True)
+
         return ans
 
-    def create_setter(self, name, setter=None):
+    def create_setter(self, name: str, setter: str | Setter | None = None) -> Setter:
         if setter is None:
-            ans = lambda db:partial(db.set_custom, label=name[1:], commit=True)
+
+            def ans(db: LibraryDatabase2) -> Callable[[int, object], object]:
+                return partial(db.set_custom, label=name[1:], commit=True)
+
+        elif callable(setter):
+            return setter
         else:
-            ans = lambda db:partial(getattr(db, setter), commit=True)
+
+            def ans(db: LibraryDatabase2) -> Callable[[int, object], object]:
+                return partial(getattr(db, setter), commit=True)
+
         return ans
 
-    def create_test(self, name, vals, getter=None, setter=None):
-        T = namedtuple('Test', 'name vals getter setter')
-        return T(name, vals, self.create_getter(name, getter),
-                 self.create_setter(name, setter))
+    def create_test(self, name: str, vals: tuple[object, ...], getter: str | Getter | None = None, setter: str | Setter | None = None) -> WritingTest.Test:
+        return WritingTest.Test(name, vals, self.create_getter(name, getter), self.create_setter(name, setter))
 
-    def run_tests(self, tests):
+    def run_tests(self, tests: Iterable[WritingTest.Test]) -> None:
         results = {}
         for test in tests:
             results[test] = []
@@ -60,25 +88,32 @@ class WritingTest(BaseTest):
                 sqlite_res = getter(1)
                 if test.name.endswith('_index'):
                     val = float(val) if val is not None else 1.0
-                    self.assertEqual(sqlite_res, val,
-                        'Failed setting for %s with value %r, sqlite value not the same. val: %r != sqlite_val: %r'%(
-                            test.name, val, val, sqlite_res))
+                    self.assertEqual(
+                        sqlite_res,
+                        val,
+                        f'Failed setting for {test.name} with value {val!r}, sqlite value not the same. val: {val!r} != sqlite_val: {sqlite_res!r}',
+                    )
                 else:
                     test.setter(db)(1, val)
                     old_cached_res = getter(1)
-                    self.assertEqual(old_cached_res, cached_res,
-                                    'Failed setting for %s with value %r, cached value not the same. Old: %r != New: %r'%(
-                            test.name, val, old_cached_res, cached_res))
+                    self.assertEqual(
+                        old_cached_res,
+                        cached_res,
+                        f'Failed setting for {test.name} with value {val!r}, cached value not the same. Old: {old_cached_res!r} != New: {cached_res!r}',
+                    )
                     db.refresh()
                     old_sqlite_res = getter(1)
-                    self.assertEqual(old_sqlite_res, sqlite_res,
-                        'Failed setting for %s, sqlite value not the same: %r != %r'%(
-                            test.name, old_sqlite_res, sqlite_res))
+                    self.assertEqual(
+                        old_sqlite_res,
+                        sqlite_res,
+                        f'Failed setting for {test.name}, sqlite value not the same: {old_sqlite_res!r} != {sqlite_res!r}',
+                    )
                 del db
+
     # }}}
 
-    def test_one_one(self):  # {{{
-        'Test setting of values in one-one fields'
+    def test_one_one(self) -> None:  # {{{
+        "Test setting of values in one-one fields"
         tests = [self.create_test('#yesno', (True, False, 'true', 'false', None))]
         for name, getter, setter in (
             ('#series_index', None, None),
@@ -93,8 +128,7 @@ class WritingTest(BaseTest):
             ('timestamp', 'timestamp', 'set_timestamp'),
             ('#date', None, None),
         ):
-            tests.append(self.create_test(
-                name, ('2011-1-12', UNDEFINED_DATE, None), getter, setter))
+            tests.append(self.create_test(name, ('2011-1-12', UNDEFINED_DATE, None), getter, setter))
 
         for name, getter, setter in (
             ('title', 'title', 'set_title'),
@@ -116,112 +150,146 @@ class WritingTest(BaseTest):
             tests.append(self.create_test(name, tuple(vals), getter, setter))
 
         self.run_tests(tests)
+        db = self.init_cache()
+        # Whitespace in comments must be preserved, single text fields are normalized
+        val = '<p>a\xa0\u2026 b</p>\n\n<p>c  d</p>'
+        db.set_field('comments', {1: val})
+        self.assertEqual(db.field_for('comments', 1), val)
+        db.set_field('#comments', {1: val})
+        self.assertEqual(db.field_for('#comments', 1), val)
+        db.set_field('title', {1: ' a\n  b '})
+        self.assertEqual(db.field_for('title', 1), 'a b')
+        # Non-breaking spaces must be preserved in normalized fields
+        db.set_field('title', {1: ' a\xa0\xa0b\n\n c d\t  e '})
+        self.assertEqual(db.field_for('title', 1), 'a\xa0\xa0b c d   e')
+        db.set_field('series', {1: 'x\xa0y  z'})
+        self.assertEqual(db.field_for('series', 1), 'x\xa0y z')
+        db.set_field('tags', {1: ('t\xa0a  g', ' u\tv ')})
+        self.assertEqual(db.field_for('tags', 1), ('t\xa0a g', 'u v'))
+        for val in (-1, -2, 0, 1, 2, None):
+            db.set_field('pages', {1: val})
+            self.assertEqual(db.field_for('pages', 1), val)
+            if val is not None:
+                a = db.get_pages(1)
+                self.assertEqual(Pages(val, 0, '', 0, a.timestamp), a)
+        self.assertIsNone(db.get_pages(1))
+        db.set_pages(1, 12, algorithm=1, format='test', format_size=13)
+        a = db.get_pages(1)
+        self.assertEqual(Pages(12, 1, 'test', 13, a.timestamp), a)
+        # setting pages for a non-existent book must be a no-op, not a FOREIGN KEY error
+        db.remove_books((1,), permanent=True)
+        db.set_pages(1, 7)
+        self.assertIsNone(db.get_pages(1))
+        self.assertNotIn(1, db.fields['pages'].table.book_col_map)
+
     # }}}
 
-    def test_many_one_basic(self):  # {{{
-        'Test the different code paths for writing to a many-one field'
+    def test_many_one_basic(self) -> None:  # {{{
+        "Test the different code paths for writing to a many-one field"
         cl = self.cloned_library
         cache = self.init_cache(cl)
         f = cache.fields['publisher']
         item_ids = {f.ids_for_book(1)[0], f.ids_for_book(2)[0]}
         val = 'Changed'
-        self.assertEqual(cache.set_field('publisher', {1:val, 2:val}), {1, 2})
+        self.assertEqual(cache.set_field('publisher', {1: val, 2: val}), {1, 2})
         cache2 = self.init_cache(cl)
         for book_id in (1, 2):
             for c in (cache, cache2):
                 self.assertEqual(c.field_for('publisher', book_id), val)
                 self.assertFalse(item_ids.intersection(set(c.fields['publisher'].table.id_map)))
         del cache2
-        self.assertFalse(cache.set_field('publisher', {1:val, 2:val}))
+        self.assertFalse(cache.set_field('publisher', {1: val, 2: val}))
         val = val.lower()
-        self.assertFalse(cache.set_field('publisher', {1:val, 2:val},
-                                         allow_case_change=False))
-        self.assertEqual(cache.set_field('publisher', {1:val, 2:val}), {1, 2})
+        self.assertFalse(cache.set_field('publisher', {1: val, 2: val}, allow_case_change=False))
+        self.assertEqual(cache.set_field('publisher', {1: val, 2: val}), {1, 2})
         cache2 = self.init_cache(cl)
         for book_id in (1, 2):
             for c in (cache, cache2):
                 self.assertEqual(c.field_for('publisher', book_id), val)
         del cache2
-        self.assertEqual(cache.set_field('publisher', {1:'new', 2:'New'}), {1, 2})
+        self.assertEqual(cache.set_field('publisher', {1: 'new', 2: 'New'}), {1, 2})
         self.assertEqual(cache.field_for('publisher', 1).lower(), 'new')
         self.assertEqual(cache.field_for('publisher', 2).lower(), 'new')
-        self.assertEqual(cache.set_field('publisher', {1:None, 2:'NEW'}), {1, 2})
+        self.assertEqual(cache.set_field('publisher', {1: None, 2: 'NEW'}), {1, 2})
         self.assertEqual(len(f.table.id_map), 1)
-        self.assertEqual(cache.set_field('publisher', {2:None}), {2})
+        self.assertEqual(cache.set_field('publisher', {2: None}), {2})
         self.assertEqual(len(f.table.id_map), 0)
         cache2 = self.init_cache(cl)
         self.assertEqual(len(cache2.fields['publisher'].table.id_map), 0)
         del cache2
-        self.assertEqual(cache.set_field('publisher', {1:'one', 2:'two',
-                                                       3:'three'}), {1, 2, 3})
-        self.assertEqual(cache.set_field('publisher', {1:''}), {1})
-        self.assertEqual(cache.set_field('publisher', {1:'two'}), {1})
-        self.assertEqual(tuple(map(f.for_book, (1,2,3))), ('two', 'two', 'three'))
-        self.assertEqual(cache.set_field('publisher', {1:'Two'}), {1, 2})
+        self.assertEqual(cache.set_field('publisher', {1: 'one', 2: 'two', 3: 'three'}), {1, 2, 3})
+        self.assertEqual(cache.set_field('publisher', {1: ''}), {1})
+        self.assertEqual(cache.set_field('publisher', {1: 'two'}), {1})
+        self.assertEqual(tuple(map(f.for_book, (1, 2, 3))), ('two', 'two', 'three'))
+        self.assertEqual(cache.set_field('publisher', {1: 'Two'}), {1, 2})
         cache2 = self.init_cache(cl)
-        self.assertEqual(tuple(map(f.for_book, (1,2,3))), ('Two', 'Two', 'three'))
+        self.assertEqual(tuple(map(f.for_book, (1, 2, 3))), ('Two', 'Two', 'three'))
         del cache2
 
         # Enum
-        self.assertFalse(cache.set_field('#enum', {1:'Not allowed'}))
-        self.assertEqual(cache.set_field('#enum', {1:'One', 2:'One', 3:'Three'}), {1, 3})
-        self.assertEqual(cache.set_field('#enum', {1:None}), {1})
+        self.assertFalse(cache.set_field('#enum', {1: 'Not allowed'}))
+        self.assertEqual(cache.set_field('#enum', {1: 'One', 2: 'One', 3: 'Three'}), {1, 3})
+        self.assertEqual(cache.set_field('#enum', {1: None}), {1})
         cache2 = self.init_cache(cl)
         for c in (cache, cache2):
-            for i, val in iteritems({1:None, 2:'One', 3:'Three'}):
+            for i, val in {1: None, 2: 'One', 3: 'Three'}.items():
                 self.assertEqual(c.field_for('#enum', i), val)
         del cache2
 
         # Rating
-        self.assertFalse(cache.set_field('rating', {1:6, 2:4}))
-        self.assertEqual(cache.set_field('rating', {1:0, 3:2}), {1, 3})
-        self.assertEqual(cache.set_field('#rating', {1:None, 2:4, 3:8}), {1, 2, 3})
+        self.assertFalse(cache.set_field('rating', {1: 6, 2: 4}))
+        self.assertEqual(cache.set_field('rating', {1: 0, 3: 2}), {1, 3})
+        self.assertEqual(cache.set_field('#rating', {1: None, 2: 4, 3: 8}), {1, 2, 3})
         cache2 = self.init_cache(cl)
         for c in (cache, cache2):
-            for i, val in iteritems({1:None, 2:4, 3:2}):
+            for i, val in {1: None, 2: 4, 3: 2}.items():
                 self.assertEqual(c.field_for('rating', i), val)
-            for i, val in iteritems({1:None, 2:4, 3:8}):
+            for i, val in {1: None, 2: 4, 3: 8}.items():
                 self.assertEqual(c.field_for('#rating', i), val)
         del cache2
 
         # Series
-        self.assertFalse(cache.set_field('series',
-                {1:'a series one', 2:'a series one'}, allow_case_change=False))
-        self.assertEqual(cache.set_field('series', {3:'Series [3]'}), {3})
-        self.assertEqual(cache.set_field('#series', {1:'Series', 3:'Series'}),
-                                         {1, 3})
-        self.assertEqual(cache.set_field('#series', {2:'Series [0]'}), {2})
+        self.assertFalse(cache.set_field('series', {1: 'a series one', 2: 'a series one'}, allow_case_change=False))
+        self.assertEqual(cache.set_field('series', {3: 'Series [3]'}), {3})
+        self.assertEqual(cache.set_field('#series', {1: 'Series', 3: 'Series'}), {1, 3})
+        self.assertEqual(cache.set_field('#series', {2: 'Series [0]'}), {2})
         cache2 = self.init_cache(cl)
         for c in (cache, cache2):
-            for i, val in iteritems({1:'A Series One', 2:'A Series One', 3:'Series'}):
+            for i, val in {1: 'A Series One', 2: 'A Series One', 3: 'Series'}.items():
                 self.assertEqual(c.field_for('series', i), val)
-            cs_indices = {1:c.field_for('#series_index', 1), 3:c.field_for('#series_index', 3)}
+            cs_indices = {1: c.field_for('#series_index', 1), 3: c.field_for('#series_index', 3)}
             for i in (1, 2, 3):
                 self.assertEqual(c.field_for('#series', i), 'Series')
-            for i, val in iteritems({1:2, 2:1, 3:3}):
+            for i, val in {1: 2, 2: 1, 3: 3}.items():
                 self.assertEqual(c.field_for('series_index', i), val)
-            for i, val in iteritems({1:cs_indices[1], 2:0, 3:cs_indices[3]}):
+            for i, val in {1: cs_indices[1], 2: 0, 3: cs_indices[3]}.items():
                 self.assertEqual(c.field_for('#series_index', i), val)
         del cache2
 
+        # Changing the series keeps the index of the book, also in the database
+        cache.set_field('#series_index', {1: 3})
+        for series, index in (('Other [3]', 3), ('Another', 3), ('Yet Another [7]', 7)):
+            cache.set_field('#series', {1: series})
+            for c in (cache, self.init_cache(cl)):
+                self.assertEqual(c.field_for('#series_index', 1), index)
+
     # }}}
 
-    def test_many_many_basic(self):  # {{{
-        'Test the different code paths for writing to a many-many field'
+    def test_many_many_basic(self) -> None:  # {{{
+        "Test the different code paths for writing to a many-many field"
         cl = self.cloned_library
         cache = self.init_cache(cl)
         ae, af, sf = self.assertEqual, self.assertFalse, cache.set_field
 
         # Tags
-        ae(sf('#tags', {1:cache.field_for('tags', 1), 2:cache.field_for('tags', 2)}),
-            {1, 2})
+        ae(sf('#tags', {1: cache.field_for('tags', 1), 2: cache.field_for('tags', 2)}), {1, 2})
         for name in ('tags', '#tags'):
             f = cache.fields[name]
-            af(sf(name, {1:('News', 'tag one')}, allow_case_change=False))
-            ae(sf(name, {1:'tag one, News'}), {1, 2})
-            ae(sf(name, {3:('tag two', 'sep,sep2')}), {2, 3})
+            af(sf(name, {1: ('News', 'tag one')}, allow_case_change=False))
+            ae(sf(name, {1: 'tag one, News'}), {1, 2})
+            ae(sf(name, {3: ('tag two', 'sep,sep2')}), {2, 3})
             ae(len(f.table.id_map), 4)
-            ae(sf(name, {1:None}), {1})
+            ae(sf(name, {1: None}), {1})
             cache2 = self.init_cache(cl)
             for c in (cache, cache2):
                 ae(c.field_for(name, 3), ('tag two', 'sep;sep2'))
@@ -232,45 +300,47 @@ class WritingTest(BaseTest):
             del cache2
 
         # Authors
-        ae(sf('#authors', {k:cache.field_for('authors', k) for k in (1,2,3)}),
-           {1,2,3})
+        ae(sf('#authors', {k: cache.field_for('authors', k) for k in (1, 2, 3)}), {1, 2, 3})
 
         for name in ('authors', '#authors'):
             f = cache.fields[name]
             ae(len(f.table.id_map), 3)
-            af(cache.set_field(name, {3:'Unknown'}))
-            ae(cache.set_field(name, {3:'Kovid Goyal & Divok Layog'}), {3})
-            ae(cache.set_field(name, {1:'', 2:'An, Author'}), {1,2})
+            af(cache.set_field(name, {3: 'Unknown'}))
+            ae(cache.set_field(name, {3: 'Kovid Goyal & Divok Layog'}), {3})
+            ae(cache.set_field(name, {1: '', 2: 'An, Author'}), {1, 2})
             cache2 = self.init_cache(cl)
             for c in (cache, cache2):
-                ae(len(c.fields[name].table.id_map), 4 if name =='authors' else 3)
+                ae(len(c.fields[name].table.id_map), 4 if name == 'authors' else 3)
                 ae(c.field_for(name, 3), ('Kovid Goyal', 'Divok Layog'))
                 ae(c.field_for(name, 2), ('An, Author',))
-                ae(c.field_for(name, 1), (_('Unknown'),) if name=='authors' else ())
+                ae(c.field_for(name, 1), (_('Unknown'),) if name == 'authors' else ())
                 if name == 'authors':
                     ae(c.field_for('author_sort', 1), author_to_author_sort(_('Unknown')))
                     ae(c.field_for('author_sort', 2), author_to_author_sort('An, Author'))
-                    ae(c.field_for('author_sort', 3), author_to_author_sort('Kovid Goyal') + ' & ' + author_to_author_sort('Divok Layog'))
+                    ae(
+                        c.field_for('author_sort', 3),
+                        author_to_author_sort('Kovid Goyal') + ' & ' + author_to_author_sort('Divok Layog'),
+                    )
             del cache2
-        ae(cache.set_field('authors', {1:'KoviD GoyaL'}), {1, 3})
+        ae(cache.set_field('authors', {1: 'KoviD GoyaL'}), {1, 3})
         ae(cache.field_for('author_sort', 1), 'GoyaL, KoviD')
         ae(cache.field_for('author_sort', 3), 'GoyaL, KoviD & Layog, Divok')
 
         # Languages
         f = cache.fields['languages']
         ae(f.table.id_map, {1: 'eng', 2: 'deu'})
-        ae(sf('languages', {1:''}), {1})
+        ae(sf('languages', {1: ''}), {1})
         ae(cache.field_for('languages', 1), ())
-        ae(sf('languages', {2:('und',)}), {2})
+        ae(sf('languages', {2: ('und',)}), {2})
         af(f.table.id_map)
-        ae(sf('languages', {1:'eng,fra,deu', 2:'es,Dutch', 3:'English'}), {1, 2, 3})
+        ae(sf('languages', {1: 'eng,fra,deu', 2: 'es,Dutch', 3: 'English'}), {1, 2, 3})
         ae(cache.field_for('languages', 1), ('eng', 'fra', 'deu'))
         ae(cache.field_for('languages', 2), ('spa', 'nld'))
         ae(cache.field_for('languages', 3), ('eng',))
-        ae(sf('languages', {3:None}), {3})
+        ae(sf('languages', {3: None}), {3})
         ae(cache.field_for('languages', 3), ())
-        ae(sf('languages', {1:'deu,fra,eng'}), {1}, 'Changing order failed')
-        ae(sf('languages', {2:'deu,eng,eng'}), {2})
+        ae(sf('languages', {1: 'deu,fra,eng'}), {1}, 'Changing order failed')
+        ae(sf('languages', {2: 'deu,eng,eng'}), {2})
         cache2 = self.init_cache(cl)
         for c in (cache, cache2):
             ae(cache.field_for('languages', 1), ('deu', 'fra', 'eng'))
@@ -280,17 +350,17 @@ class WritingTest(BaseTest):
         # Identifiers
         f = cache.fields['identifiers']
         ae(sf('identifiers', {3: 'one:1,two:2'}), {3})
-        ae(sf('identifiers', {2:None}), {2})
-        ae(sf('identifiers', {1: {'test':'1', 'two':'2'}}), {1})
+        ae(sf('identifiers', {2: None}), {2})
+        ae(sf('identifiers', {1: {'test': '1', 'two': '2'}}), {1})
         cache2 = self.init_cache(cl)
         for c in (cache, cache2):
-            ae(c.field_for('identifiers', 3), {'one':'1', 'two':'2'})
+            ae(c.field_for('identifiers', 3), {'one': '1', 'two': '2'})
             ae(c.field_for('identifiers', 2), {})
-            ae(c.field_for('identifiers', 1), {'test':'1', 'two':'2'})
+            ae(c.field_for('identifiers', 1), {'test': '1', 'two': '2'})
         del cache2
 
         # Test setting of title sort
-        ae(sf('title', {1:'The Moose', 2:'Cat'}), {1, 2})
+        ae(sf('title', {1: 'The Moose', 2: 'Cat'}), {1, 2})
         cache2 = self.init_cache(cl)
         for c in (cache, cache2):
             ae(c.field_for('sort', 1), title_sort('The Moose'))
@@ -308,8 +378,8 @@ class WritingTest(BaseTest):
 
     # }}}
 
-    def test_dirtied(self):  # {{{
-        'Test the setting of the dirtied flag and the last_modified column'
+    def test_dirtied(self) -> None:  # {{{
+        "Test the setting of the dirtied flag and the last_modified column"
         cl = self.cloned_library
         cache = self.init_cache(cl)
         ae, af, sf = self.assertEqual, self.assertFalse, cache.set_field
@@ -319,26 +389,77 @@ class WritingTest(BaseTest):
         af(self.init_cache(cl).dirtied_cache)
 
         prev = cache.field_for('last_modified', 3)
-        import calibre.db.cache as c
         from datetime import timedelta
-        utime = prev+timedelta(days=1)
+
+        import calibre.db.cache as c
+
+        utime = prev + timedelta(days=1)
         onowf = c.nowf
         c.nowf = lambda: utime
         try:
-            ae(sf('title', {3:'xxx'}), {3})
+            ae(sf('title', {3: 'xxx'}), {3})
             self.assertTrue(3 in cache.dirtied_cache)
             ae(cache.field_for('last_modified', 3), utime)
             cache.dump_metadata()
             raw = cache.read_backup(3)
             from calibre.ebooks.metadata.opf2 import OPF
+
             opf = OPF(BytesIO(raw))
             ae(opf.title, 'xxx')
         finally:
             c.nowf = onowf
+
+        # update_path() is called with a tuple by set_cover() when the path is missing
+        cache.dump_metadata()
+        af(cache.dirtied_cache)
+        with cache.write_lock:
+            cache._update_path((1, 2))
+        ae(set(cache.dirtied_cache), {1, 2})
+
     # }}}
 
-    def test_backup(self):  # {{{
-        'Test the automatic backup of changed metadata'
+    def test_dump_metadata_write_failure(self) -> None:  # {{{
+        "Test that failures to write metadata backups are reported and leave books dirty"
+        from unittest.mock import patch
+
+        from calibre.ebooks.metadata.opf2 import OPF
+
+        cache = self.init_cache()
+        cache.dump_metadata()
+        cache.set_field('title', {1: 'Changed first book', 2: 'Changed second book'})
+        backup_path = os.path.join(cache.backend.library_path, cache.field_for('path', 1), METADATA_FILE_NAME)
+        os.remove(backup_path)
+        os.mkdir(backup_path)
+
+        with patch('calibre.db.cache.prints') as prints, patch('calibre.db.cache.traceback.print_exc') as print_exc:
+            cache.dump_metadata(book_ids=(1, 2))
+        prints.assert_called_once_with('Failed to write backup metadata for id:', 1)
+        print_exc.assert_called_once_with()
+        self.assertIn(1, cache.dirtied_cache)
+        self.assertNotIn(2, cache.dirtied_cache)
+        cache.mark_as_dirty({2})
+
+        events = []
+        with patch('calibre.db.cache.prints'), patch('calibre.db.cache.traceback.print_exc'):
+            cache.dump_metadata(book_ids=(1, 2), callback=lambda *args: events.append(args))
+        self.assertEqual(events[0], (2, True, False))
+        self.assertEqual([(book_id, ok) for book_id, mi, ok in events[1:]], [(1, False), (2, True)])
+        self.assertIn(1, cache.dirtied_cache)
+        self.assertNotIn(2, cache.dirtied_cache)
+        self.assertEqual(OPF(BytesIO(cache.read_backup(2))).title, 'Changed second book')
+
+        os.rmdir(backup_path)
+        events.clear()
+        cache.dump_metadata(book_ids=(1,), callback=lambda *args: events.append(args))
+        self.assertEqual(events[0], (1, True, False))
+        self.assertEqual([(book_id, ok) for book_id, mi, ok in events[1:]], [(1, True)])
+        self.assertNotIn(1, cache.dirtied_cache)
+        self.assertEqual(OPF(BytesIO(cache.read_backup(1))).title, 'Changed first book')
+
+    # }}}
+
+    def test_backup(self) -> None:  # {{{
+        "Test the automatic backup of changed metadata"
         cl = self.cloned_library
         cache = self.init_cache(cl)
         ae, af, sf = self.assertEqual, self.assertFalse, cache.set_field
@@ -346,12 +467,16 @@ class WritingTest(BaseTest):
         cache.dump_metadata()
         af(cache.dirtied_cache)
         from calibre.db.backup import MetadataBackup
+
         interval = 0.01
         mb = MetadataBackup(cache, interval=interval, scheduling_interval=0)
         mb.start()
         try:
-            ae(sf('title', {1:'title1', 2:'title2', 3:'title3'}), {1,2,3})
-            ae(sf('authors', {1:'author1 & author2', 2:'author1 & author2', 3:'author1 & author2'}), {1,2,3})
+            ae(sf('title', {1: 'title1', 2: 'title2', 3: 'title3'}), {1, 2, 3})
+            ae(sf('authors', {1: 'author1 & author2', 2: 'author1 & author2', 3: 'author1 & author2'}), {1, 2, 3})
+            ae(sf('tags', {1: 'tag1', 2: 'tag1,tag2', 3: 'XXX'}), {1, 2, 3})
+            ae(cache.set_link_map('authors', {'author1': 'link1'}), {1, 2, 3})
+            ae(cache.set_link_map('tags', {'XXX': 'YYY', 'tag2': 'link2'}), {2, 3})
             count = 6
             while cache.dirty_queue_length() and count > 0:
                 mb.join(2)
@@ -362,39 +487,93 @@ class WritingTest(BaseTest):
         mb.join(2)
         af(mb.is_alive())
         from calibre.ebooks.metadata.opf2 import OPF
-        for book_id in (1, 2, 3):
+
+        book_ids = (1, 2, 3)
+
+        def read_all_formats() -> dict[int, dict[str, bytes]]:
+            fbefore = {}
+            for book_id in book_ids:
+                ff = fbefore[book_id] = {}
+                for fmt in cache.formats(book_id):
+                    ff[fmt] = cache.format(book_id, fmt)
+            return fbefore
+
+        def read_all_extra_files(book_id: int = 1) -> dict[str, bytes]:
+            ans = {}
+            bp = cache.get_book_path(book_id, sep='/')
+            for relpath, fobj, stat_result in cache.backend.iter_extra_files(book_id, bp, cache.fields['formats']):
+                ans[relpath] = fobj.read()
+            return ans
+
+        for book_id in book_ids:
             raw = cache.read_backup(book_id)
             opf = OPF(BytesIO(raw))
-            ae(opf.title, 'title%d'%book_id)
+            ae(opf.title, f'title{book_id}')
             ae(opf.authors, ['author1', 'author2'])
+        tested_fields = 'title authors tags'.split()
+        before = {f: cache.all_field_for(f, book_ids) for f in tested_fields}
+        lbefore = tuple(cache.get_all_link_maps_for_book(i) for i in book_ids)
+        fbefore = read_all_formats()
+        bookdir = os.path.dirname(cache.format_abspath(1, '__COVER_INTERNAL__'))
+        with open(os.path.join(bookdir, 'exf'), 'w') as f:
+            f.write('exf')
+        os.mkdir(os.path.join(bookdir, 'sub'))
+        with open(os.path.join(bookdir, 'sub', 'recurse'), 'w') as f:
+            f.write('recurse')
+        ebefore = read_all_extra_files()
+        authors = sorted(cache.all_field_ids('authors'))
+        h1 = cache.add_notes_resource(b'resource1', 'r1.jpg')
+        h2 = cache.add_notes_resource(b'resource2', 'r2.jpg')
+        doc = f'simple notes for an author <img src="{RESOURCE_URL_SCHEME}://{h1.replace(":", "/", 1)}"> '
+        cache.set_notes_for('authors', authors[0], doc, resource_hashes=(h1,))
+        doc += f'2 <img src="{RESOURCE_URL_SCHEME}://{h2.replace(":", "/", 1)}">'
+        cache.set_notes_for('authors', authors[1], doc, resource_hashes=(h1, h2))
+        notes_before = {cache.get_item_name('authors', aid): cache.export_note('authors', aid) for aid in authors}
+        cache.close()
+        from calibre.db.restore import Restore
+
+        restorer = Restore(cl)
+        restorer.start()
+        restorer.join(60)
+        af(restorer.is_alive())
+        cache = self.init_cache(cl)
+        ae(before, {f: cache.all_field_for(f, book_ids) for f in tested_fields})
+        ae(lbefore, tuple(cache.get_all_link_maps_for_book(i) for i in book_ids))
+        ae(fbefore, read_all_formats())
+        ae(ebefore, read_all_extra_files())
+        authors = sorted(cache.all_field_ids('authors'))
+        notes_after = {cache.get_item_name('authors', aid): cache.export_note('authors', aid) for aid in authors}
+        ae(notes_before, notes_after)
+
     # }}}
 
-    def test_set_cover(self):  # {{{
-        ' Test setting of cover '
+    def test_set_cover(self) -> None:  # {{{
+        "Test setting of cover"
         cache = self.init_cache()
         ae = self.assertEqual
 
         # Test removing a cover
         ae(cache.field_for('cover', 1), 1)
-        ae(cache.set_cover({1:None}), {1})
+        ae(cache.set_cover({1: None}), {1})
         ae(cache.field_for('cover', 1), 0)
         img = IMG
 
         # Test setting a cover
-        ae(cache.set_cover({bid:img for bid in (1, 2, 3)}), {1, 2, 3})
+        ae(cache.set_cover({bid: img for bid in (1, 2, 3)}), {1, 2, 3})
         old = self.init_old()
         for book_id in (1, 2, 3):
-            ae(cache.cover(book_id), img, 'Cover was not set correctly for book %d' % book_id)
+            ae(cache.cover(book_id), img, f'Cover was not set correctly for book {book_id}')
             ae(cache.field_for('cover', book_id), 1)
-            ae(old.cover(book_id, index_is_id=True), img, 'Cover was not set correctly for book %d' % book_id)
+            ae(old.cover(book_id, index_is_id=True), img, f'Cover was not set correctly for book {book_id}')
             self.assertTrue(old.has_cover(book_id))
         old.close()
         old.break_cycles()
         del old
+
     # }}}
 
-    def test_set_metadata(self):  # {{{
-        ' Test setting of metadata '
+    def test_set_metadata(self) -> None:  # {{{
+        "Test setting of metadata"
         ae = self.assertEqual
         cache = self.init_cache(self.cloned_library)
 
@@ -402,10 +581,10 @@ class WritingTest(BaseTest):
         mi = cache.get_metadata(1)
         old_path = cache.field_for('path', 1)
         old_title, old_author = mi.title, mi.authors[0]
-        ae(old_path, '%s/%s (1)' % (old_author, old_title))
+        ae(old_path, f'{old_author}/{old_title} (1)')
         mi.title, mi.authors = 'New Title', ['New Author']
         cache.set_metadata(1, mi)
-        ae(cache.field_for('path', 1), '%s/%s (1)' % (mi.authors[0], mi.title))
+        ae(cache.field_for('path', 1), f'{mi.authors[0]}/{mi.title} (1)')
         p = cache.format_abspath(1, 'FMT1')
         self.assertTrue(mi.authors[0] in p and mi.title in p)
 
@@ -423,13 +602,10 @@ class WritingTest(BaseTest):
         cache.set_metadata(2, mi)
         nmi = cache.get_metadata(2, get_cover=True, cover_as_data=True)
         ae(oldmi.cover_data, nmi.cover_data)
-        self.compare_metadata(nmi, oldmi, exclude={'last_modified', 'format_metadata', 'formats'})
+        self.compare_metadata(nmi, oldmi, exclude={'last_modified', 'format_metadata', 'formats', 'pages'})
         cache.set_metadata(1, mi2, force_changes=True)
         nmi2 = cache.get_metadata(1, get_cover=True, cover_as_data=True)
-        # The new code does not allow setting of #series_index to None, instead
-        # it is reset to 1.0
-        ae(nmi2.get_extra('#series'), 1.0)
-        self.compare_metadata(nmi2, oldmi2, exclude={'last_modified', 'format_metadata', '#series_index', 'formats'})
+        self.compare_metadata(nmi2, oldmi2, exclude={'last_modified', 'format_metadata', 'formats', 'pages'})
 
         cache = self.init_cache(self.cloned_library)
         mi = cache.get_metadata(1)
@@ -442,8 +618,16 @@ class WritingTest(BaseTest):
         # auto-generated authors sort
         mi = Metadata('empty', ['a1', 'a2'])
         cache.set_metadata(1, mi)
+        self.assertEqual(
+            cache.get_item_ids('authors', ('a1', 'a2')),
+            cache.get_item_ids('authors', ('a1', 'a2'), case_sensitive=True),
+        )
+        self.assertEqual(
+            set(cache.get_item_ids('authors', ('A1', 'a2')).values()),
+            set(cache.get_item_ids('authors', ('a1', 'a2'), case_sensitive=True).values()),
+        )
         self.assertEqual('a1 & a2', cache.field_for('author_sort', 1))
-        cache.set_sort_for_authors({cache.get_item_id('authors', 'a1'): 'xy'})
+        cache.set_sort_for_authors({cache.get_item_id('authors', 'a1', case_sensitive=True): 'xy'})
         self.assertEqual('xy & a2', cache.field_for('author_sort', 1))
         mi = Metadata('empty', ['a1'])
         cache.set_metadata(1, mi)
@@ -451,36 +635,53 @@ class WritingTest(BaseTest):
 
     # }}}
 
-    def test_conversion_options(self):  # {{{
-        ' Test saving of conversion options '
+    def test_conversion_options(self) -> None:  # {{{
+        "Test saving of conversion options"
         cache = self.init_cache()
         all_ids = cache.all_book_ids()
         self.assertFalse(cache.has_conversion_options(all_ids))
         self.assertIsNone(cache.conversion_options(1))
         op1, op2 = b"{'xx':'yy'}", b"{'yy':'zz'}"
-        cache.set_conversion_options({1:op1, 2:op2})
+        cache.set_conversion_options({1: op1, 2: op2})
         self.assertTrue(cache.has_conversion_options(all_ids))
         self.assertEqual(cache.conversion_options(1), op1)
         self.assertEqual(cache.conversion_options(2), op2)
-        cache.set_conversion_options({1:op2})
+        cache.set_conversion_options({1: op2})
         self.assertEqual(cache.conversion_options(1), op2)
         cache.delete_conversion_options(all_ids)
         self.assertFalse(cache.has_conversion_options(all_ids))
+
     # }}}
 
-    def test_remove_items(self):  # {{{
-        ' Test removal of many-(many,one) items '
+    def test_remove_items(self) -> None:  # {{{
+        "Test removal of many-(many,one) items"
         cache = self.init_cache()
         tmap = cache.get_id_map('tags')
         self.assertEqual(cache.remove_items('tags', tmap), {1, 2})
         tmap = cache.get_id_map('#tags')
-        t = {v:k for k, v in iteritems(tmap)}['My Tag Two']
+        t = {v: k for k, v in tmap.items()}['My Tag Two']
         self.assertEqual(cache.remove_items('#tags', (t,)), {1, 2})
 
         smap = cache.get_id_map('series')
+        # Book 2 has series index 1.0 already, so removing its series does not change anything else about it
+        self.assertEqual({1, 2}, cache.search('series:true'))
+        last_modified = cache.field_for('last_modified', 2)
+        modified = []
+        orig = cache._update_last_modified
+
+        def update_last_modified(book_ids: Iterable[int], now: datetime.datetime | None = None) -> None:
+            modified.extend(book_ids)
+            orig(book_ids, now=now)
+
+        cache._update_last_modified = update_last_modified
         self.assertEqual(cache.remove_items('series', smap), {1, 2})
+        del cache._update_last_modified
+        # each book is marked as dirty once
+        self.assertEqual([1, 2], sorted(modified))
+        self.assertEqual(set(), cache.search('series:true'))
+        self.assertGreater(cache.field_for('last_modified', 2), last_modified)
         smap = cache.get_id_map('#series')
-        s = {v:k for k, v in iteritems(smap)}['My Series Two']
+        s = {v: k for k, v in smap.items()}['My Series Two']
         self.assertEqual(cache.remove_items('#series', (s,)), {1})
 
         for c in (cache, self.init_cache()):
@@ -508,9 +709,9 @@ class WritingTest(BaseTest):
 
         # Now test with restriction
         cache = self.init_cache()
-        cache.set_field('tags', {1:'a,b,c', 2:'b,a', 3:'x,y,z'})
-        cache.set_field('series', {1:'a', 2:'a', 3:'b'})
-        cache.set_field('series_index', {1:8, 2:9, 3:3})
+        cache.set_field('tags', {1: 'a,b,c', 2: 'b,a', 3: 'x,y,z'})
+        cache.set_field('series', {1: 'a', 2: 'a', 3: 'b'})
+        cache.set_field('series_index', {1: 8, 2: 9, 3: 3})
         tmap, smap = cache.get_id_map('tags'), cache.get_id_map('series')
         self.assertEqual(cache.remove_items('tags', tmap, restrict_to_book_ids=()), set())
         self.assertEqual(cache.remove_items('tags', tmap, restrict_to_book_ids={1}), {1})
@@ -520,7 +721,7 @@ class WritingTest(BaseTest):
         for c in (cache, c2):
             self.assertEqual(c.field_for('tags', 1), ())
             self.assertEqual(c.field_for('tags', 2), ('b', 'a'))
-            self.assertNotIn('c', set(itervalues(c.get_id_map('tags'))))
+            self.assertNotIn('c', set(c.get_id_map('tags').values()))
             self.assertEqual(c.field_for('series', 1), None)
             self.assertEqual(c.field_for('series', 2), 'a')
             self.assertEqual(c.field_for('series_index', 1), 1.0)
@@ -528,15 +729,33 @@ class WritingTest(BaseTest):
 
     # }}}
 
-    def test_rename_items(self):  # {{{
-        ' Test renaming of many-(many,one) items '
+    def test_rename_items(self) -> None:  # {{{
+        "Test renaming of many-(many,one) items"
+        # Test renaming authors removes folders with junk in them
+        cl = self.cloned_library
+        cache = self.init_cache(cl)
+        fmtpath = cache.format_abspath(1, 'FMT1')
+        bookpath = os.path.dirname(fmtpath)
+        authorpath = os.path.dirname(bookpath)
+        self.assertTrue(os.path.exists(authorpath))
+        author = cache.field_for('authors', 1)[0]
+        os.mkdir(os.path.join(authorpath, '.DS_Store'))
+        open(os.path.join(authorpath, 'Thumbs.db'), 'wb').close()
+        amap = {v: k for k, v in cache.get_id_map('authors').items()}
+        cache.rename_items('authors', {amap[author]: 'renamed'})
+        try:
+            items = os.listdir(authorpath)
+        except FileNotFoundError:
+            items = []
+        self.assertFalse(items, 'Items in author folder: ' + ' '.join(items))
+
         cl = self.cloned_library
         cache = self.init_cache(cl)
         # Check that renaming authors updates author sort and path
-        a = {v:k for k, v in iteritems(cache.get_id_map('authors'))}['Unknown']
-        self.assertEqual(cache.rename_items('authors', {a:'New Author'})[0], {3})
-        a = {v:k for k, v in iteritems(cache.get_id_map('authors'))}['Author One']
-        self.assertEqual(cache.rename_items('authors', {a:'Author Two'})[0], {1, 2})
+        a = {v: k for k, v in cache.get_id_map('authors').items()}['Unknown']
+        self.assertEqual(cache.rename_items('authors', {a: 'New Author'})[0], {3})
+        a = {v: k for k, v in cache.get_id_map('authors').items()}['Author One']
+        self.assertEqual(cache.rename_items('authors', {a: 'Author Two'})[0], {1, 2})
         for c in (cache, self.init_cache(cl)):
             self.assertEqual(c.all_field_names('authors'), {'New Author', 'Author Two'})
             self.assertEqual(c.field_for('author_sort', 3), 'Author, New')
@@ -544,52 +763,52 @@ class WritingTest(BaseTest):
             self.assertEqual(c.field_for('authors', 1), ('Author Two',))
             self.assertEqual(c.field_for('author_sort', 1), 'Two, Author')
 
-        t = {v:k for k, v in iteritems(cache.get_id_map('tags'))}['Tag One']
+        t = {v: k for k, v in cache.get_id_map('tags').items()}['Tag One']
         # Test case change
-        self.assertEqual(cache.rename_items('tags', {t:'tag one'}), ({1, 2}, {t:t}))
+        self.assertEqual(cache.rename_items('tags', {t: 'tag one'}), ({1, 2}, {t: t}))
         for c in (cache, self.init_cache(cl)):
             self.assertEqual(c.all_field_names('tags'), {'tag one', 'Tag Two', 'News'})
             self.assertEqual(set(c.field_for('tags', 1)), {'tag one', 'News'})
             self.assertEqual(set(c.field_for('tags', 2)), {'tag one', 'Tag Two'})
         # Test new name
-        self.assertEqual(cache.rename_items('tags', {t:'t1'})[0], {1,2})
+        self.assertEqual(cache.rename_items('tags', {t: 't1'})[0], {1, 2})
         for c in (cache, self.init_cache(cl)):
             self.assertEqual(c.all_field_names('tags'), {'t1', 'Tag Two', 'News'})
             self.assertEqual(set(c.field_for('tags', 1)), {'t1', 'News'})
             self.assertEqual(set(c.field_for('tags', 2)), {'t1', 'Tag Two'})
         # Test rename to existing
-        self.assertEqual(cache.rename_items('tags', {t:'Tag Two'})[0], {1,2})
+        self.assertEqual(cache.rename_items('tags', {t: 'Tag Two'})[0], {1, 2})
         for c in (cache, self.init_cache(cl)):
             self.assertEqual(c.all_field_names('tags'), {'Tag Two', 'News'})
             self.assertEqual(set(c.field_for('tags', 1)), {'Tag Two', 'News'})
             self.assertEqual(set(c.field_for('tags', 2)), {'Tag Two'})
         # Test on a custom column
-        t = {v:k for k, v in iteritems(cache.get_id_map('#tags'))}['My Tag One']
-        self.assertEqual(cache.rename_items('#tags', {t:'My Tag Two'})[0], {2})
+        t = {v: k for k, v in cache.get_id_map('#tags').items()}['My Tag One']
+        self.assertEqual(cache.rename_items('#tags', {t: 'My Tag Two'})[0], {2})
         for c in (cache, self.init_cache(cl)):
             self.assertEqual(c.all_field_names('#tags'), {'My Tag Two'})
             self.assertEqual(set(c.field_for('#tags', 2)), {'My Tag Two'})
 
         # Test a Many-one field
-        s = {v:k for k, v in iteritems(cache.get_id_map('series'))}['A Series One']
+        s = {v: k for k, v in cache.get_id_map('series').items()}['A Series One']
         # Test case change
-        self.assertEqual(cache.rename_items('series', {s:'a series one'}), ({1, 2}, {s:s}))
+        self.assertEqual(cache.rename_items('series', {s: 'a series one'}), ({1, 2}, {s: s}))
         for c in (cache, self.init_cache(cl)):
             self.assertEqual(c.all_field_names('series'), {'a series one'})
             self.assertEqual(c.field_for('series', 1), 'a series one')
             self.assertEqual(c.field_for('series_index', 1), 2.0)
 
         # Test new name
-        self.assertEqual(cache.rename_items('series', {s:'series'})[0], {1, 2})
+        self.assertEqual(cache.rename_items('series', {s: 'series'})[0], {1, 2})
         for c in (cache, self.init_cache(cl)):
             self.assertEqual(c.all_field_names('series'), {'series'})
             self.assertEqual(c.field_for('series', 1), 'series')
             self.assertEqual(c.field_for('series', 2), 'series')
             self.assertEqual(c.field_for('series_index', 1), 2.0)
 
-        s = {v:k for k, v in iteritems(cache.get_id_map('#series'))}['My Series One']
+        s = {v: k for k, v in cache.get_id_map('#series').items()}['My Series One']
         # Test custom column with rename to existing
-        self.assertEqual(cache.rename_items('#series', {s:'My Series Two'})[0], {2})
+        self.assertEqual(cache.rename_items('#series', {s: 'My Series Two'})[0], {2})
         for c in (cache, self.init_cache(cl)):
             self.assertEqual(c.all_field_names('#series'), {'My Series Two'})
             self.assertEqual(c.field_for('#series', 2), 'My Series Two')
@@ -598,8 +817,8 @@ class WritingTest(BaseTest):
 
         # Test renaming many-many items to multiple items
         cache = self.init_cache(self.cloned_library)
-        t = {v:k for k, v in iteritems(cache.get_id_map('tags'))}['Tag One']
-        affected_books, id_map = cache.rename_items('tags', {t:'Something, Else, Entirely'})
+        t = {v: k for k, v in cache.get_id_map('tags').items()}['Tag One']
+        affected_books, id_map = cache.rename_items('tags', {t: 'Something, Else, Entirely'})
         self.assertEqual({1, 2}, affected_books)
         tmap = cache.get_id_map('tags')
         self.assertEqual('Something', tmap[id_map[t]])
@@ -612,78 +831,134 @@ class WritingTest(BaseTest):
 
         # Test with restriction
         cache = self.init_cache()
-        cache.set_field('tags', {1:'a,b,c', 2:'x,y,z', 3:'a,x,z'})
-        tmap = {v:k for k, v in iteritems(cache.get_id_map('tags'))}
-        self.assertEqual(cache.rename_items('tags', {tmap['a']:'r'}, restrict_to_book_ids=()), (set(), {}))
-        self.assertEqual(cache.rename_items('tags', {tmap['a']:'r', tmap['b']:'q'}, restrict_to_book_ids=(1,))[0], {1})
-        self.assertEqual(cache.rename_items('tags', {tmap['x']:'X'}, restrict_to_book_ids=(2,))[0], {2})
+        cache.set_field('tags', {1: 'a,b,c', 2: 'x,y,z', 3: 'a,x,z'})
+        tmap = {v: k for k, v in cache.get_id_map('tags').items()}
+        self.assertEqual(cache.rename_items('tags', {tmap['a']: 'r'}, restrict_to_book_ids=()), (set(), {}))
+        self.assertEqual(cache.rename_items('tags', {tmap['a']: 'r', tmap['b']: 'q'}, restrict_to_book_ids=(1,))[0], {1})
+        self.assertEqual(cache.rename_items('tags', {tmap['x']: 'X'}, restrict_to_book_ids=(2,))[0], {2})
         c2 = self.init_cache()
         for c in (cache, c2):
             self.assertEqual(c.field_for('tags', 1), ('r', 'q', 'c'))
             self.assertEqual(c.field_for('tags', 2), ('X', 'y', 'z'))
             self.assertEqual(c.field_for('tags', 3), ('a', 'X', 'z'))
+
     # }}}
 
-    def test_composite_cache(self):  # {{{
-        ' Test that the composite field cache is properly invalidated on writes '
+    def test_set_custom_column_metadata_editable(self) -> None:  # {{{
+        "Test that making a custom column read-only takes effect immediately"
         cache = self.init_cache()
-        cache.create_custom_column('tc', 'TC', 'composite', False, display={
-            'composite_template':'{title} {author_sort} {title_sort} {formats} {tags} {series} {series_index}'})
+        cache.create_custom_column('ce', 'CE', 'text', False)
+        cache.close()
         cache = self.init_cache()
+        num = cache.backend.custom_column_label_map['ce']['num']
+        self.assertTrue(cache.backend.custom_field_metadata(num=num)['editable'])
+        cache.set_custom_column_metadata(num, is_editable=False)
+        self.assertFalse(cache.backend.custom_field_metadata(num=num)['editable'])
+        cache.close()
 
-        def test_invalidate():
-            c = self.init_cache()
-            for bid in cache.all_book_ids():
-                self.assertEqual(cache.field_for('#tc', bid), c.field_for('#tc', bid))
+    # }}}
 
-        cache.set_field('title', {1:'xx', 3:'yy'})
+    def test_composite_cache(self) -> None:  # {{{
+        "Test that the composite field cache is properly invalidated on writes"
+        cache = self.init_cache()
+        cache.create_custom_column(
+            'tc',
+            'TC',
+            'composite',
+            False,
+            display={'composite_template': '{title} {author_sort} {title_sort} {formats} {tags} {series} {series_index} {pages}'},
+        )
+        cache.close()
+        cache = self.init_cache()
+        all_book_ids = cache.all_book_ids()
+        current = {}
+
+        def test_invalidate() -> None:
+            nonlocal current
+            nc = {bid: cache.field_for('#tc', bid) for bid in all_book_ids}
+            self.assertNotEqual(current, nc)
+            current = nc
+
+        current = {bid: cache.field_for('#tc', bid) for bid in all_book_ids}
+        cache.set_field('title', {1: 'xx', 3: 'yy'})
         test_invalidate()
-        cache.set_field('series_index', {1:9, 3:11})
+        cache.set_field('series_index', {1: 9, 3: 11})
         test_invalidate()
-        cache.rename_items('tags', {cache.get_item_id('tags', 'Tag One'):'xxx', cache.get_item_id('tags', 'News'):'news'})
+        cache.rename_items('tags', {cache.get_item_id('tags', 'Tag One'): 'xxx', cache.get_item_id('tags', 'News'): 'news'})
         test_invalidate()
         cache.remove_items('tags', (cache.get_item_id('tags', 'news'),))
         test_invalidate()
-        cache.set_sort_for_authors({cache.get_item_id('authors', 'Author One'):'meow'})
+        cache.set_sort_for_authors({cache.get_item_id('authors', 'Author One'): 'meow'})
         test_invalidate()
-        cache.remove_formats({1:{'FMT1'}})
+        cache.remove_formats({1: {'FMT1'}})
+        cache.maintain_page_counts.tick_event.wait()
         test_invalidate()
-        cache.add_format(1, 'ADD', BytesIO(b'xxxx'))
+        cache.maintain_page_counts.tick_event.clear()
+        cache.add_format(1, 'TXT', BytesIO(b'xxxx'))
+        cache.maintain_page_counts.tick_event.wait()
         test_invalidate()
+        cache.set_pages(1, 17)
+        test_invalidate()
+        cache.set_field('pages', {1: 11})
+        test_invalidate()
+        cache.close()
+
     # }}}
 
-    def test_dump_and_restore(self):  # {{{
-        ' Test roundtripping the db through SQL '
-        cache = self.init_cache()
-        uv = int(cache.backend.user_version)
-        all_ids = cache.all_book_ids()
-        cache.dump_and_restore()
-        self.assertEqual(cache.set_field('title', {1:'nt'}), {1}, 'database connection broken')
-        cache = self.init_cache()
-        self.assertEqual(cache.all_book_ids(), all_ids, 'dump and restore broke database')
-        self.assertEqual(int(cache.backend.user_version), uv)
+    def test_dump_and_restore(self) -> None:  # {{{
+        "Test roundtripping the db through SQL"
+        try:
+            from apsw import shell
+        except Exception:
+            # apsw frozen without shell module
+            self.skipTest('apsw frozen without shell module')
+            return
+        del shell
+        import warnings
+
+        with warnings.catch_warnings():
+            # on python 3.10 apsw raises a deprecation warning which causes this test to fail on CI
+            warnings.simplefilter('ignore', DeprecationWarning)
+            cache = self.init_cache()
+            uv = int(cache.backend.user_version)
+            all_ids = cache.all_book_ids()
+            cache.dump_and_restore()
+            self.assertEqual(cache.set_field('title', {1: 'nt'}), {1}, 'database connection broken')
+            cache = self.init_cache()
+            self.assertEqual(cache.all_book_ids(), all_ids, 'dump and restore broke database')
+            self.assertEqual(int(cache.backend.user_version), uv)
+
     # }}}
 
-    def test_set_author_data(self):  # {{{
+    def test_set_author_data(self) -> None:  # {{{
         cache = self.init_cache()
         adata = cache.author_data()
-        ldata = {aid:unicode_type(aid) for aid in adata}
-        self.assertEqual({1,2,3}, cache.set_link_for_authors(ldata))
+        ldata = {aid: str(aid) for aid in adata}
+        self.assertEqual({1, 2, 3}, cache.set_link_for_authors(ldata))
         for c in (cache, self.init_cache()):
-            self.assertEqual(ldata, {aid:d['link'] for aid, d in iteritems(c.author_data())})
-        self.assertEqual({3}, cache.set_link_for_authors({aid:'xxx' if aid == max(adata) else unicode_type(aid) for aid in adata}),
-                         'Setting the author link to the same value as before, incorrectly marked some books as dirty')
-        sdata = {aid:'%s, changed' % aid for aid in adata}
-        self.assertEqual({1,2,3}, cache.set_sort_for_authors(sdata))
+            self.assertEqual(ldata, {aid: d['link'] for aid, d in c.author_data().items()})
+        self.assertEqual(
+            {3},
+            cache.set_link_for_authors({aid: 'xxx' if aid == max(adata) else str(aid) for aid in adata}),
+            'Setting the author link to the same value as before, incorrectly marked some books as dirty',
+        )
+        sdata = {aid: f'{aid}, changed' for aid in adata}
+        self.assertEqual({1, 2, 3}, cache.set_sort_for_authors(sdata))
+        self.assertEqual(sdata, cache.author_sorts())
+        self.assertEqual(sdata, cache.author_sorts(sdata))
         for bid in (1, 2, 3):
             self.assertIn(', changed', cache.field_for('author_sort', bid))
-        sdata = {aid:'%s, changed' % (aid*2 if aid == max(adata) else aid) for aid in adata}
-        self.assertEqual({3}, cache.set_sort_for_authors(sdata),
-                         'Setting the author sort to the same value as before, incorrectly marked some books as dirty')
+        sdata = {aid: f'{aid * 2 if aid == max(adata) else aid}, changed' for aid in adata}
+        self.assertEqual(
+            {3},
+            cache.set_sort_for_authors(sdata),
+            'Setting the author sort to the same value as before, incorrectly marked some books as dirty',
+        )
+
     # }}}
 
-    def test_fix_case_duplicates(self):  # {{{
-        ' Test fixing of databases that have items in is_many fields that differ only by case '
+    def test_fix_case_duplicates(self) -> None:  # {{{
+        "Test fixing of databases that have items in is_many fields that differ only by case"
         ae = self.assertEqual
         cache = self.init_cache()
         conn = cache.backend.conn
@@ -692,9 +967,9 @@ class WritingTest(BaseTest):
         conn.execute('INSERT INTO publishers (name) VALUES ("MŪS")')
         uid = conn.last_insert_rowid()
         conn.execute('DELETE FROM books_publishers_link')
-        conn.execute('INSERT INTO books_publishers_link (book,publisher) VALUES (1, %d)' % lid)
-        conn.execute('INSERT INTO books_publishers_link (book,publisher) VALUES (2, %d)' % uid)
-        conn.execute('INSERT INTO books_publishers_link (book,publisher) VALUES (3, %d)' % uid)
+        conn.execute(f'INSERT INTO books_publishers_link (book,publisher) VALUES (1, {lid})')
+        conn.execute(f'INSERT INTO books_publishers_link (book,publisher) VALUES (2, {uid})')
+        conn.execute(f'INSERT INTO books_publishers_link (book,publisher) VALUES (3, {uid})')
         cache.reload_from_db()
         t = cache.fields['publisher'].table
         for x in (lid, uid):
@@ -708,7 +983,7 @@ class WritingTest(BaseTest):
             self.assertNotIn(uid, t.id_map)
             self.assertNotIn(uid, t.col_book_map)
             for bid in (1, 2, 3):
-                ae(c.field_for('publisher', bid), "mūs")
+                ae(c.field_for('publisher', bid), 'mūs')
             c.close()
 
         cache = self.init_cache()
@@ -722,9 +997,8 @@ class WritingTest(BaseTest):
         conn.execute('INSERT INTO tags (name) VALUES ("t")')
         norm = conn.last_insert_rowid()
         conn.execute('DELETE FROM books_tags_link')
-        for book_id, vals in iteritems({1:(lid, uid), 2:(uid, mid), 3:(lid, norm)}):
-            conn.executemany('INSERT INTO books_tags_link (book,tag) VALUES (?,?)',
-                             tuple((book_id, x) for x in vals))
+        for book_id, vals in {1: (lid, uid), 2: (uid, mid), 3: (lid, norm)}.items():
+            conn.executemany('INSERT INTO books_tags_link (book,tag) VALUES (?,?)', tuple((book_id, x) for x in vals))
         cache.reload_from_db()
         t = cache.fields['tags'].table
         for x in (lid, uid, mid):
@@ -739,15 +1013,16 @@ class WritingTest(BaseTest):
             ae(c.field_for('tags', 1), (t.id_map[lid],))
             ae(c.field_for('tags', 2), (t.id_map[lid],), 'failed for book 2')
             ae(c.field_for('tags', 3), (t.id_map[lid], t.id_map[norm]))
+
     # }}}
 
-    def test_preferences(self):  # {{{
-        ' Test getting and setting of preferences, especially with mutable objects '
+    def test_preferences(self) -> None:  # {{{
+        "Test getting and setting of preferences, especially with mutable objects"
         cache = self.init_cache()
         changes = []
         cache.backend.conn.setupdatehook(lambda typ, dbname, tblname, rowid: changes.append(rowid))
         prefs = cache.backend.prefs
-        prefs['test mutable'] =  [1, 2, 3]
+        prefs['test mutable'] = [1, 2, 3]
         self.assertEqual(len(changes), 1)
         a = prefs['test mutable']
         a.append(4)
@@ -756,22 +1031,121 @@ class WritingTest(BaseTest):
         self.assertEqual(len(changes), 2)
         prefs.load_from_db()
         self.assertIn(4, prefs['test mutable'])
-        prefs['test mutable'] = {k:k for k in range(10)}
+        prefs['test mutable'] = {k: k for k in range(10)}
         self.assertEqual(len(changes), 3)
-        prefs['test mutable'] = {k:k for k in reversed(range(10))}
+        prefs['test mutable'] = {k: k for k in reversed(range(10))}
         self.assertEqual(len(changes), 3, 'The database was written to despite there being no change in value')
+
     # }}}
 
-    def test_annotations(self):  # {{{
-        'Test handling of annotations'
-        from calibre.utils.date import utcnow, EPOCH
+    def test_custom_book_data(self) -> None:  # {{{
+        "Test that a failed add_custom_book_data() with delete_first does not lose the old data"
+        cache = self.init_cache()
+        cache.add_custom_book_data('test', {1: {'a': 1}, 2: {'b': 2}})
+        self.assertRaises(TypeError, cache.add_custom_book_data, 'test', {1: {'a': object()}}, delete_first=True)
+        self.assertEqual(cache.get_custom_book_data('test', (1, 2)), {1: {'a': 1}, 2: {'b': 2}})
+        cache.add_custom_book_data('test', {3: {'c': 3}}, delete_first=True)
+        self.assertEqual(cache.get_custom_book_data('test', (1, 2, 3)), {3: {'c': 3}})
+
+    # }}}
+
+    def test_book_storage(self) -> None:  # {{{
+        "Test per book storage used for localStorage in the viewers"
+        from calibre.db.book_storage import (
+            MAX_BOOK_STORAGE_SIZE,
+            InvalidBookStorage,
+            book_storage_size,
+            new_book_storage_entry,
+            newest_book_storage,
+            validate_book_storage,
+        )
+
+        ae = self.assertEqual
+        # Validation
+        e = validate_book_storage({'timestamp': 1, 'data': {'a': 'b'}})
+        ae(e, {'timestamp': 1.0, 'data': {'a': 'b'}})
+        self.assertIsInstance(e['timestamp'], float)
+        for bad in (
+            None,
+            [],
+            {'data': {}},
+            {'timestamp': -1, 'data': {}},
+            {'timestamp': True, 'data': {}},
+            {'timestamp': '1', 'data': {}},
+            {'timestamp': 1, 'data': []},
+            {'timestamp': 1, 'data': {'a': 1}},
+            {'timestamp': 1, 'data': {'a': None}},
+            {'timestamp': 1, 'data': {'a': 'x' * MAX_BOOK_STORAGE_SIZE}},
+        ):
+            with self.assertRaises(InvalidBookStorage, msg=repr(bad)):
+                validate_book_storage(bad)
+        # Size is measured in UTF-16 code units, as in JavaScript
+        ae(book_storage_size({'ab': 'c\U0001f600'}), 5)
+        validate_book_storage({'timestamp': 1, 'data': {'a': 'x' * (MAX_BOOK_STORAGE_SIZE - 1)}})
+        # Newest
+        old, new = new_book_storage_entry({'a': '1'}, 1), new_book_storage_entry({'a': '2'}, 2)
+        ae(newest_book_storage(old, None, new), new)
+        ae(newest_book_storage(new, old), new)
+        self.assertIsNone(newest_book_storage(None, None))
+        tie = new_book_storage_entry({'a': '3'}, 2)
+        self.assertIs(newest_book_storage(new, tie), new)
+
+        # Upgrading a library from before book storage existed
+        library_path = self.cloned_library
+        cache = self.init_cache(library_path)
+        cache.backend.execute('DROP TABLE book_storage; PRAGMA user_version=27')
+        cache.close()
+        cache = self.init_cache(library_path)
+        ae(cache.backend.user_version, 28)
+        self.assertIsNone(cache.book_storage_for_book(1, 'FMT1'))
+        e1 = new_book_storage_entry({'k': 'v', 'unicode': 'ünïcødé \U0001f600', '__proto__': 'x'}, 10)
+        ae(cache.update_book_storage_for_book(1, 'fmt1', e1), e1)
+        ae(cache.book_storage_for_book(1, 'FMT1'), e1)
+        # Storage is per format, per user and per book
+        self.assertIsNone(cache.book_storage_for_book(1, 'FMT2'))
+        self.assertIsNone(cache.book_storage_for_book(2, 'FMT1'))
+        self.assertIsNone(cache.book_storage_for_book(1, 'FMT1', user_type='web', user='x'))
+        # Older entries do not replace newer ones
+        e0 = new_book_storage_entry({'old': 'data'}, 5)
+        ae(cache.update_book_storage_for_book(1, 'FMT1', e0), e1)
+        ae(cache.book_storage_for_book(1, 'FMT1'), e1)
+        # Clearing is represented by an entry with empty data
+        e2 = new_book_storage_entry({}, 11)
+        ae(cache.update_book_storage_for_book(1, 'FMT1', e2), e2)
+        ae(cache.book_storage_for_book(1, 'FMT1'), e2)
+        # Saving from the viewer also saves to the sync user
+        e3 = new_book_storage_entry({'synced': '1'}, 12)
+        cache.save_book_storage(1, 'FMT1', 'webuser', e3)
+        ae(cache.book_storage_for_book(1, 'FMT1'), e3)
+        ae(cache.book_storage_for_book(1, 'FMT1', user_type='web', user='webuser'), e3)
+        cache.save_book_storage(2, 'FMT1', '', e3)
+        ae(cache.book_storage_for_book(2, 'FMT1'), e3)
+        self.assertIsNone(cache.book_storage_for_book(2, 'FMT1', user_type='web', user=''))
+        # Invalid data in the database is ignored
+        cache.backend.execute("UPDATE book_storage SET data='not json' WHERE book=2")
+        self.assertIsNone(cache.book_storage_for_book(2, 'FMT1'))
+        # Storage survives reopening the library
+        cache.close()
+        cache = self.init_cache(library_path)
+        ae(cache.book_storage_for_book(1, 'FMT1'), e3)
+        # Storage is removed when the book is deleted
+        cache.remove_books((1,), permanent=True)
+        ae(cache.backend.execute('SELECT COUNT(*) FROM book_storage WHERE book=1').fetchone()[0], 0)
+        self.assertIsNone(cache.book_storage_for_book(1, 'FMT1'))
+
+    # }}}
+
+    def test_annotations(self) -> None:  # {{{
+        "Test handling of annotations"
+        from calibre.utils.date import EPOCH, utcnow
+
         cl = self.cloned_library
         cache = self.init_cache(cl)
         # First empty dirtied
         cache.dump_metadata()
         self.assertFalse(cache.dirtied_cache)
 
-        def a(**kw):
+        def a(**kw: object) -> tuple[dict[str, object], float]:
             ts = utcnow()
             kw['timestamp'] = utcnow().isoformat()
             return kw, (ts - EPOCH).total_seconds()
@@ -782,15 +1156,21 @@ class WritingTest(BaseTest):
             a(type='highlight', highlighted_text='text2', uuid='2', seq=3, notes='notes2 some word changed again'),
         ]
 
-        def map_as_list(amap):
+        def map_as_list(amap: dict[str, list[dict[str, object]]]) -> list[dict[str, object]]:
             ans = []
             for items in amap.values():
                 ans.extend(items)
-            ans.sort(key=lambda x:x['seq'])
+            ans.sort(key=lambda x: x['seq'])
             return ans
 
         cache.set_annotations_for_book(1, 'moo', annot_list)
         amap = cache.annotations_map_for_book(1, 'moo')
+        self.assertEqual(3, len(cache.all_annotations_for_book(1)))
+        # an unreadable annotation is skipped, not replaced by the one before it
+        raw = cache.backend.get("SELECT annot_data FROM annotations WHERE book=1 AND annot_id='1'", all=False)
+        cache.backend.execute("UPDATE annotations SET annot_data='{' WHERE book=1 AND annot_id='1'")
+        self.assertEqual(['bookmark', 'highlight'], [x['annotation']['type'] for x in cache.all_annotations_for_book(1)])
+        cache.backend.execute("UPDATE annotations SET annot_data=? WHERE book=1 AND annot_id='1'", (raw,))
         self.assertEqual([x[0] for x in annot_list], map_as_list(amap))
         self.assertFalse(cache.dirtied_cache)
         cache.check_dirtied_annotations()
@@ -804,8 +1184,10 @@ class WritingTest(BaseTest):
         self.assertEqual([1, 3], [x['id'] for x in results])
         results = cache.search_annotations('"changed"', annotation_type='bookmark')
         self.assertEqual([1], [x['id'] for x in results])
-        results = cache.search_annotations('"Change"')
+        results = cache.search_annotations('"Changed"')  # changed and change stem differently in english and other euro languages
         self.assertEqual([1, 3], [x['id'] for x in results])
+        results = cache.search_annotations('"SOMe"')
+        self.assertEqual([3], [x['id'] for x in results])
         results = cache.search_annotations('"change"', use_stemming=False)
         self.assertFalse(results)
         results = cache.search_annotations('"bookmark1"', highlight_start='[', highlight_end=']')
@@ -813,6 +1195,12 @@ class WritingTest(BaseTest):
         results = cache.search_annotations('"word"', highlight_start='[', highlight_end=']', snippet_size=3)
         self.assertEqual(results[0]['text'], '…some [word] changed…')
         self.assertRaises(FTSQueryError, cache.search_annotations, 'AND OR')
+        fts_l = [
+            a(type='bookmark', title='路坎坷走来', seq=1),
+        ]
+        cache.set_annotations_for_book(1, 'moo', fts_l)
+        results = cache.search_annotations('路', highlight_start='[', highlight_end=']')
+        self.assertEqual(results[0]['text'], '[路]坎坷走来')
 
         annot_list[0][0]['title'] = 'changed title'
         cache.set_annotations_for_book(1, 'moo', annot_list)
@@ -826,10 +1214,179 @@ class WritingTest(BaseTest):
         cache.check_dirtied_annotations()
         cache.dump_metadata()
         from calibre.ebooks.metadata.opf2 import OPF
+
         raw = cache.read_backup(1)
         opf = OPF(BytesIO(raw))
         cache.restore_annotations(1, list(opf.read_annotations()))
         amap = cache.annotations_map_for_book(1, 'moo')
         self.assertEqual([x[0] for x in annot_list], map_as_list(amap))
+
+        # Test merged highlights are sorted by position in the book
+        from calibre.db.annotations import merge_annot_lists
+
+        def hl(uuid: str, spine_index: int | None, start_cfi: str) -> dict[str, str | int | None]:
+            return {'type': 'highlight', 'uuid': uuid, 'spine_index': spine_index, 'start_cfi': start_cfi, 'timestamp': utcnow().isoformat()}
+
+        merged = merge_annot_lists(
+            [hl('c', 2, '/4/2/1:0'), hl('a', 0, '/4/8/1:10')],
+            [hl('d', None, '/2/1:0'), hl('b', 1, '/4/2/1:5'), hl('a2', 0, '/4/8/1:2')],
+            'highlight',
+        )
+        self.assertEqual(['a2', 'a', 'b', 'c', 'd'], [x['uuid'] for x in merged])
+
+    # }}}
+
+    def test_changed_events(self) -> None:  # {{{
+        def ae(l: object, r: object) -> None:
+            # We need to sleep a bit to allow events to happen on its thread
+            import time
+
+            st = time.monotonic()
+            while time.monotonic() - st < 1:
+                time.sleep(0.01)
+                try:
+                    self.assertEqual(l, r)
+                    return
+                except Exception:
+                    pass
+            self.assertEqual(l, r)
+
+        cache = self.init_cache(self.cloned_library)
+        ae(cache.all_book_ids(), {1, 2, 3})
+
+        event_set = set()
+
+        def event_func(t: EventType, library_id: str, *args: tuple[object, ...]) -> None:
+
+            nonlocal event_set, ae
+            event_set.update(args[0][1])
+
+        cache.add_listener(event_func)
+
+        # Test that setting metadata to itself doesn't generate any events
+        for id_ in cache.all_book_ids():
+            cache.set_metadata(id_, cache.get_metadata(id_))
+
+        ae(event_set, set())
+
+        # test setting a single field
+        cache.set_field('tags', {1: 'foo'})
+        ae(event_set, {1})
+
+        # test setting multiple books. Book 1 shouldn't get an event because it
+        # isn't being changed
+        event_set = set()
+        cache.set_field('tags', {1: 'foo', 2: 'bar', 3: 'mumble'})
+        ae(event_set, {2, 3})
+
+        # test setting a many-many field to empty
+        event_set = set()
+        cache.set_field('tags', {1: ''})
+        ae(
+            event_set,
+            {
+                1,
+            },
+        )
+        event_set = set()
+        cache.set_field('tags', {1: ''})
+        ae(event_set, set())
+
+        # test setting title
+        event_set = set()
+        cache.set_field('title', {1: 'Book 1'})
+        ae(event_set, {1})
+        ae(cache.field_for('title', 1), 'Book 1')
+
+        # test setting series
+        event_set = set()
+        cache.set_field('series', {1: 'GreatBooks [1]'})
+        cache.set_field('series', {2: 'GreatBooks [0]'})
+        ae(event_set, {1, 2})
+        ae(cache.field_for('series', 1), 'GreatBooks')
+        ae(cache.field_for('series_index', 1), 1.0)
+        ae(cache.field_for('series', 2), 'GreatBooks')
+        ae(cache.field_for('series_index', 2), 0.0)
+
+        # now series_index
+        event_set = set()
+        cache.set_field('series_index', {1: 2})
+        ae(event_set, {1})
+        ae(cache.field_for('series_index', 1), 2.0)
+        event_set = set()
+        cache.set_field('series_index', {1: 2, 2: 3.5})  # book 1 isn't changed
+        ae(event_set, {2})
+        ae(cache.field_for('series_index', 1), 2.0)
+        ae(cache.field_for('series_index', 2), 3.5)
+
+    def test_link_maps(self) -> None:
+        cache = self.init_cache()
+
+        # Add two tags
+        cache.set_field('tags', {1: 'foo'})
+        self.assertEqual(('foo',), cache.field_for('tags', 1), 'Setting tag foo failed')
+        cache.set_field('tags', {1: 'foo, bar'})
+        self.assertEqual(('foo', 'bar'), cache.field_for('tags', 1), 'Adding second tag failed')
+
+        # Check adding a link
+        links = cache.get_link_map('tags')
+        self.assertDictEqual(links, {}, 'Initial tags link dict is not empty')
+        links['foo'] = 'url'
+        cache.set_link_map('tags', links)
+        links2 = cache.get_link_map('tags')
+        self.assertDictEqual(links2, links, 'tags link dict mismatch')
+
+        # Check getting links for a book and that links are correct
+        cache.set_field('publisher', {1: 'random'})
+        cache.set_link_map('publisher', {'random': 'url2'})
+        links = cache.get_all_link_maps_for_book(1)
+        self.assertSetEqual(set(links.keys()), {'tags', 'publisher'}, 'Wrong link keys')
+        self.assertSetEqual(
+            set(links['tags'].keys()),
+            {
+                'foo',
+            },
+            'Should be "foo"',
+        )
+        self.assertSetEqual(
+            set(links['publisher'].keys()),
+            {
+                'random',
+            },
+            'Should be "random"',
+        )
+        self.assertEqual('url', links['tags']['foo'], 'link for tag foo is wrong')
+        self.assertEqual('url2', links['publisher']['random'], 'link for publisher random is wrong')
+
+        # Check that renaming a tag keeps the link and clears the link map cache for the book
+        self.assertTrue(1 in cache.link_maps_cache, 'book not in link_map_cache')
+        tag_id = cache.get_item_id('tags', 'foo')
+        cache.rename_items('tags', {tag_id: 'foobar'})
+        self.assertTrue(1 not in cache.link_maps_cache, 'book still in link_map_cache')
+        links = cache.get_link_map('tags')
+        self.assertTrue('foobar' in links, 'rename foo lost the link')
+        self.assertEqual(links['foobar'], 'url', 'The link changed contents')
+        links = cache.get_all_link_maps_for_book(1)
+        self.assertTrue(1 in cache.link_maps_cache, 'book not put back into link_map_cache')
+        self.assertDictEqual({'publisher': {'random': 'url2'}, 'tags': {'foobar': 'url'}}, links, 'book links incorrect after tag rename')
+
+        # Check ProxyMetadata
+        mi = cache.get_proxy_metadata(1)
+        self.assertDictEqual(
+            {'publisher': {'random': 'url2'}, 'tags': {'foobar': 'url'}},
+            mi.link_maps,
+            "ProxyMetadata didn't return the right link map",
+        )
+
+        # Now test deleting the links.
+        links = cache.get_link_map('tags')
+        to_del = {l: '' for l in links.keys()}
+        cache.set_link_map('tags', to_del)
+        self.assertEqual({}, cache.get_link_map('tags'), 'links on tags were not deleted')
+        links = cache.get_link_map('publisher')
+        to_del = {l: '' for l in links.keys()}
+        cache.set_link_map('publisher', to_del)
+        self.assertEqual({}, cache.get_link_map('publisher'), 'links on publisher were not deleted')
+        self.assertEqual({}, cache.get_all_link_maps_for_book(1), 'Not all links for book were deleted')
 
     # }}}

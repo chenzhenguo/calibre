@@ -1,28 +1,21 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
 
 import os
 
-from PyQt5.Qt import Qt, QVBoxLayout, QFormLayout, QDialog
+from qt.core import QDialog, QFormLayout, QInputDialog, Qt, QVBoxLayout
 
-from calibre.gui2.preferences import ConfigWidgetBase, test_widget, \
-    CommaSeparatedList, AbortCommit
-from calibre.gui2.preferences.adding_ui import Ui_Form
-from calibre.utils.config import prefs
-from calibre.gui2.widgets import FilenamePattern
+from calibre.gui2 import choose_dir, error_dialog, gprefs, question_dialog
 from calibre.gui2.auto_add import AUTO_ADDED
-from calibre.gui2 import gprefs, choose_dir, error_dialog, question_dialog
-from polyglot.builtins import unicode_type
+from calibre.gui2.preferences import AbortCommit, CommaSeparatedList, ConfigWidgetBase, test_widget
+from calibre.gui2.preferences.adding_ui import Ui_Form
+from calibre.gui2.widgets import FilenamePattern
+from calibre.utils.config import prefs
+from calibre.utils.localization import _
 
 
 class ConfigWidget(ConfigWidgetBase, Ui_Form):
-
-    def genesis(self, gui):
+    def genesis(self, gui) -> None:
         self.gui = gui
 
         r = self.register
@@ -34,11 +27,13 @@ class ConfigWidget(ConfigWidgetBase, Ui_Form):
         r('preserve_date_on_ctl', gprefs)
         r('manual_add_auto_convert', gprefs)
         choices = [
-                (_('Ignore duplicate incoming formats'), 'ignore'),
-                (_('Overwrite existing duplicate formats'), 'overwrite'),
-                (_('Create new record for each duplicate format'), 'new record')]
+            (_('Ignore duplicate incoming formats'), 'ignore'),
+            (_('Overwrite existing duplicate formats'), 'overwrite'),
+            (_('Create new record for each duplicate format'), 'new record'),
+        ]
         r('automerge', gprefs, choices=choices)
         r('new_book_tags', prefs, setting=CommaSeparatedList)
+        r('add_new_book_tags_when_importing_books', prefs)
         r('mark_new_books', prefs)
         r('auto_add_path', gprefs, restart_required=True)
         r('auto_add_everything', gprefs, restart_required=True)
@@ -47,55 +42,60 @@ class ConfigWidget(ConfigWidgetBase, Ui_Form):
         r('auto_convert_same_fmt', gprefs)
 
         self.filename_pattern = FilenamePattern(self)
-        self.metadata_box.l = QVBoxLayout(self.metadata_box)
-        self.metadata_box.layout().insertWidget(0, self.filename_pattern)
+        mb_layout = QVBoxLayout(self.metadata_box)
+        mb_layout.insertWidget(0, self.filename_pattern)
         self.filename_pattern.changed_signal.connect(self.changed_signal.emit)
         self.auto_add_browse_button.clicked.connect(self.choose_aa_path)
         for signal in ('Activated', 'Changed', 'DoubleClicked', 'Clicked'):
-            signal = getattr(self.opt_blocked_auto_formats, 'item'+signal)
+            signal = getattr(self.opt_blocked_auto_formats, 'item' + signal)
             signal.connect(self.blocked_auto_formats_changed)
         self.tag_map_rules = self.add_filter_rules = self.author_map_rules = None
         self.tag_map_rules_button.clicked.connect(self.change_tag_map_rules)
         self.author_map_rules_button.clicked.connect(self.change_author_map_rules)
         self.add_filter_rules_button.clicked.connect(self.change_add_filter_rules)
         self.tabWidget.setCurrentIndex(0)
-        self.actions_tab.layout().setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        at_layout = self.actions_tab.layout()
+        assert isinstance(at_layout, QFormLayout)
+        at_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.ignore_another_button.clicked.connect(self.add_another_ignored_format)
 
-    def change_tag_map_rules(self):
+    def change_tag_map_rules(self) -> None:
         from calibre.gui2.tag_mapper import RulesDialog
+
         d = RulesDialog(self)
         if gprefs.get('tag_map_on_add_rules'):
             d.rules = gprefs['tag_map_on_add_rules']
-        if d.exec_() == QDialog.DialogCode.Accepted:
+        if d.exec() == QDialog.DialogCode.Accepted:
             self.tag_map_rules = d.rules
             self.changed_signal.emit()
 
-    def change_author_map_rules(self):
+    def change_author_map_rules(self) -> None:
         from calibre.gui2.author_mapper import RulesDialog
+
         d = RulesDialog(self)
         if gprefs.get('author_map_on_add_rules'):
             d.rules = gprefs['author_map_on_add_rules']
-        if d.exec_() == QDialog.DialogCode.Accepted:
+        if d.exec() == QDialog.DialogCode.Accepted:
             self.author_map_rules = d.rules
             self.changed_signal.emit()
 
-    def change_add_filter_rules(self):
+    def change_add_filter_rules(self) -> None:
         from calibre.gui2.add_filters import RulesDialog
+
         d = RulesDialog(self)
         if gprefs.get('add_filter_rules'):
             d.rules = gprefs['add_filter_rules']
-        if d.exec_() == QDialog.DialogCode.Accepted:
+        if d.exec() == QDialog.DialogCode.Accepted:
             self.add_filter_rules = d.rules
             self.changed_signal.emit()
 
-    def choose_aa_path(self):
-        path = choose_dir(self, 'auto add path choose',
-                _('Choose a folder'))
+    def choose_aa_path(self) -> None:
+        path = choose_dir(self, 'auto add path choose', _('Choose a folder'))
         if path:
             self.opt_auto_add_path.setText(path)
             self.opt_auto_add_path.save_history()
 
-    def initialize(self):
+    def initialize(self) -> None:
         ConfigWidgetBase.initialize(self)
         self.filename_pattern.blockSignals(True)
         self.filename_pattern.initialize()
@@ -105,40 +105,62 @@ class ConfigWidget(ConfigWidgetBase, Ui_Form):
         self.tag_map_rules = self.add_filter_rules = self.author_map_rules = None
 
     # Blocked auto formats {{{
-    def blocked_auto_formats_changed(self, *args):
+    def blocked_auto_formats_changed(self, *args) -> None:
         fmts = self.current_blocked_auto_formats
         old = gprefs['blocked_auto_formats']
         if set(fmts) != set(old):
             self.changed_signal.emit()
 
-    def init_blocked_auto_formats(self, defaults=False):
+    def init_blocked_auto_formats(self, defaults=False) -> None:
         if defaults:
             fmts = gprefs.defaults['blocked_auto_formats']
         else:
             fmts = gprefs['blocked_auto_formats']
+        self.set_blocked_auto_formats(set(fmts))
+
+    def set_blocked_auto_formats(self, fmts) -> None:
+        exts = set(AUTO_ADDED) | set(fmts)
         viewer = self.opt_blocked_auto_formats
         viewer.blockSignals(True)
-        exts = set(AUTO_ADDED)
         viewer.clear()
         for ext in sorted(exts):
             viewer.addItem(ext)
-            item = viewer.item(viewer.count()-1)
-            item.setFlags(Qt.ItemFlag.ItemIsEnabled|Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if
-                    ext in fmts else Qt.CheckState.Unchecked)
+            item = viewer.item(viewer.count() - 1)
+            assert item is not None
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if ext in fmts else Qt.CheckState.Unchecked)
         viewer.blockSignals(False)
+
+    def add_another_ignored_format(self) -> None:
+        fmt, ok = QInputDialog.getText(self, _('Add a file extension to ignore'), _('The file extension to ignore:'))
+        if ok:
+            fmt = fmt.lower()
+            viewer = self.opt_blocked_auto_formats
+            existing = set(self.current_blocked_auto_formats)
+            existing.add(fmt)
+            self.set_blocked_auto_formats(existing)
+            for i in range(viewer.count()):
+                _vi = viewer.item(i)
+                assert _vi is not None
+                if _vi.text() == fmt:
+                    viewer.scrollToItem(_vi)
+                    break
+            self.changed_signal.emit()
 
     @property
     def current_blocked_auto_formats(self):
         fmts = []
         viewer = self.opt_blocked_auto_formats
         for i in range(viewer.count()):
-            if viewer.item(i).checkState() == Qt.CheckState.Checked:
-                fmts.append(unicode_type(viewer.item(i).text()))
+            _item = viewer.item(i)
+            assert _item is not None
+            if _item.checkState() == Qt.CheckState.Checked:
+                fmts.append(str(_item.text()))
         return fmts
+
     # }}}
 
-    def restore_defaults(self):
+    def restore_defaults(self, *args) -> None:
         ConfigWidgetBase.restore_defaults(self)
         self.filename_pattern.initialize(defaults=True)
         self.init_blocked_auto_formats(defaults=True)
@@ -146,33 +168,42 @@ class ConfigWidget(ConfigWidgetBase, Ui_Form):
         self.author_map_rules = []
         self.add_filter_rules = []
 
-    def commit(self):
-        path = unicode_type(self.opt_auto_add_path.text()).strip()
+    def commit(self, *args):
+        path = str(self.opt_auto_add_path.text()).strip()
         if path != gprefs['auto_add_path']:
             if path:
                 path = os.path.abspath(path)
                 bname = os.path.basename(path)
                 self.opt_auto_add_path.setText(path)
                 if not os.path.isdir(path):
-                    error_dialog(self, _('Invalid folder'),
-                            _('You must specify an existing folder as your '
-                                'auto-add folder. %s does not exist.')%path,
-                            show=True)
+                    error_dialog(
+                        self,
+                        _('Invalid folder'),
+                        _('You must specify an existing folder as your auto-add folder. %s does not exist.') % path,
+                        show=True,
+                    )
                     raise AbortCommit('invalid auto-add folder')
-                if not os.access(path, os.R_OK|os.W_OK):
-                    error_dialog(self, _('Invalid folder'),
-                            _('You do not have read/write permissions for '
-                                'the folder: %s')%path, show=True)
+                if not os.access(path, os.R_OK | os.W_OK):
+                    error_dialog(
+                        self,
+                        _('Invalid folder'),
+                        _('You do not have read/write permissions for the folder: %s') % path,
+                        show=True,
+                    )
                     raise AbortCommit('invalid auto-add folder')
                 if bname and bname[0] in '._':
-                    error_dialog(self, _('Invalid folder'),
-                            _('Cannot use folders whose names start with a '
-                                'period or underscore: %s')%os.path.basename(path), show=True)
+                    error_dialog(
+                        self,
+                        _('Invalid folder'),
+                        _('Cannot use folders whose names start with a period or underscore: %s') % os.path.basename(path),
+                        show=True,
+                    )
                     raise AbortCommit('invalid auto-add folder')
-                if not question_dialog(self, _('Are you sure?'),
-                        _('<b>WARNING:</b> Any files you place in %s will be '
-                            'automatically deleted after being added to '
-                            'calibre. Are you sure?')%path):
+                if not question_dialog(
+                    self,
+                    _('Are you sure?'),
+                    _('<b>WARNING:</b> Any files you place in %s will be automatically deleted after being added to calibre. Are you sure?') % path,
+                ):
                     return
         pattern = self.filename_pattern.commit()
         prefs['filename_pattern'] = pattern
@@ -199,7 +230,7 @@ class ConfigWidget(ConfigWidgetBase, Ui_Form):
         ret = ConfigWidgetBase.commit(self)
         return changed or ret
 
-    def refresh_gui(self, gui):
+    def refresh_gui(self, gui) -> None:
         # Ensure worker process reads updated settings
         gui.spare_pool().shutdown()
         # Update rules used int he auto adder
@@ -208,5 +239,6 @@ class ConfigWidget(ConfigWidgetBase, Ui_Form):
 
 if __name__ == '__main__':
     from calibre.gui2 import Application
+
     app = Application([])
     test_widget('Import/Export', 'Adding')

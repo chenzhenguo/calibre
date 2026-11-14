@@ -1,38 +1,84 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
 
 
-__license__   = 'GPL v3'
+__license__ = 'GPL v3'
 __copyright__ = '2009, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
 __all__ = [
-    'pot', 'translations', 'get_translations', 'iso639', 'iso3166',
-    'build', 'mathjax', 'man_pages',
-    'gui',
+    'bootstrap',
+    'browser_deps',
+    'build',
+    'build_dep',
+    'cacerts',
+    'check',
+    'check_all',
+    'develop',
+    'export_packages',
+    'extdev',
+    'fmt',
+    'get_translations',
+    'git_hooks',
     'git_version',
-    'develop', 'install',
-    'kakasi', 'rapydscript', 'cacerts', 'recent_uas', 'resources',
-    'check', 'to3', 'unicode_check', 'iterators_check', 'test', 'test_rs',
-    'sdist', 'bootstrap', 'extdev',
-    'manual', 'tag_release',
-    'upload_to_server',
+    'grammar_models',
+    'gui',
+    'hyphenation',
+    'install',
+    'iso639',
+    'iso3166',
+    'iso_data',
+    'kokoro_voices',
+    'liberation_fonts',
+    'linux',
+    'linux64',
+    'linuxarm64',
+    'man_pages',
+    'manual',
+    'mathjax',
+    'osx',
+    'piper_voices',
+    'pot',
+    'publish',
+    'publish_betas',
+    'publish_preview',
+    'rapydscript',
+    'recent_uas',
+    'resources',
+    'reupload',
+    'sdist',
+    'stage1',
+    'stage2',
+    'stage3',
+    'stage4',
+    'stage5',
+    'stylelint',
+    'tag_release',
+    'test',
+    'test_rs',
+    'translations',
+    'type_check',
+    'upgrade_source_code',
+    'upload_demo',
     'upload_installers',
-    'upload_user_manual', 'upload_demo', 'reupload',
-    'stage1', 'stage2', 'stage3', 'stage4', 'stage5', 'publish', 'publish_betas',
-    'linux', 'linux32', 'linux64', 'win', 'win32', 'win64', 'osx', 'build_dep',
-    'export_packages', 'hyphenation', 'liberation_fonts', 'csslint'
+    'upload_to_server',
+    'upload_user_manual',
+    'win',
+    'win64',
+    'xwin',
 ]
 
-from setup.installers import Linux, Win, OSX, Linux32, Linux64, Win32, Win64, ExtDev, BuildDep, ExportPackages
-linux, linux32, linux64 = Linux(), Linux32(), Linux64()
-win, win32, win64 = Win(), Win32(), Win64()
+from setup.installers import OSX, BuildDep, ExportPackages, ExtDev, Linux, Linux64, LinuxArm64, Win, Win64
+
+linux, linux64, linuxarm64 = Linux(), Linux64(), LinuxArm64()
+win, win64 = Win(), Win64()
 osx = OSX()
 extdev = ExtDev()
 build_dep = BuildDep()
 export_packages = ExportPackages()
 
-from setup.translations import POT, GetTranslations, Translations, ISO639, ISO3166
+from setup.iso_codes import iso_data
+from setup.translations import ISO639, ISO3166, POT, GetTranslations, Translations
+
 pot = POT()
 translations = Translations()
 get_translations = GetTranslations()
@@ -40,52 +86,89 @@ iso639 = ISO639()
 iso3166 = ISO3166()
 
 from setup.csslint import CSSLint
-csslint = CSSLint()
+
+stylelint = CSSLint()
 
 from setup.build import Build
+
 build = Build()
 
 from setup.mathjax import MathJax
+
 mathjax = MathJax()
 
 from setup.hyphenation import Hyphenation
+
 hyphenation = Hyphenation()
 
+from setup.piper import PiperVoices
+
+piper_voices = PiperVoices()
+
+from setup.kokoro import KokoroVoices
+
+kokoro_voices = KokoroVoices()
+
+from setup.grammar_models import GrammarModels
+
+grammar_models = GrammarModels()
+
 from setup.liberation import LiberationFonts
+
 liberation_fonts = LiberationFonts()
 
+from setup.git_hooks import GitHooks
+
+git_hooks = GitHooks()
+
 from setup.git_version import GitVersion
+
 git_version = GitVersion()
 
-from setup.install import Develop, Install, Sdist, Bootstrap
+from setup.install import Bootstrap, Develop, Install, Sdist
+
 develop = Develop()
 install = Install()
 sdist = Sdist()
 bootstrap = Bootstrap()
 
+from setup.browser_deps import BrowserDeps
+
+browser_deps = BrowserDeps()
+
 from setup.gui import GUI
+
 gui = GUI()
 
-from setup.check import Check
+from setup.check import Check, CheckAll, UpgradeSourceCode
+
 check = Check()
-from setup.port import To3, UnicodeCheck, IteratorsCheck
-to3 = To3()
-unicode_check = UnicodeCheck()
-iterators_check = IteratorsCheck()
+check_all = CheckAll()
+upgrade_source_code = UpgradeSourceCode()
 
 from setup.test import Test, TestRS
+
 test = Test()
 test_rs = TestRS()
 
-from setup.resources import Resources, Kakasi, CACerts, RapydScript, RecentUAs
+from setup.type_check import TypeCheck
+
+type_check = TypeCheck()
+
+
+from setup.fmt import AutoFormat
+
+fmt = AutoFormat()
+
+from setup.resources import CACerts, RapydScript, RecentUAs, Resources
+
 resources = Resources()
-kakasi = Kakasi()
 cacerts = CACerts()
 recent_uas = RecentUAs()
 rapydscript = RapydScript()
 
-from setup.publish import Manual, TagRelease, Stage1, Stage2, \
-        Stage3, Stage4, Stage5, Publish, PublishBetas, ManPages
+from setup.publish import ManPages, Manual, Publish, PublishBetas, PublishPreview, Stage1, Stage2, Stage3, Stage4, Stage5, TagRelease
+
 manual = Manual()
 tag_release = TagRelease()
 stage1 = Stage1()
@@ -95,15 +178,21 @@ stage4 = Stage4()
 stage5 = Stage5()
 publish = Publish()
 publish_betas = PublishBetas()
+publish_preview = PublishPreview()
 man_pages = ManPages()
 
-from setup.upload import (UploadUserManual, UploadDemo, UploadInstallers,
-        UploadToServer, ReUpload)
+from setup.upload import ReUpload, UploadDemo, UploadInstallers, UploadToServer, UploadUserManual
+
 upload_user_manual = UploadUserManual()
 upload_demo = UploadDemo()
 upload_to_server = UploadToServer()
 upload_installers = UploadInstallers()
 reupload = ReUpload()
+
+
+from setup.xwin import XWin
+
+xwin = XWin()
 
 commands = {}
 for x in __all__:

@@ -1,28 +1,46 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid at kovidgoyal.net>
 
 import re
+from collections import Counter, OrderedDict
 from itertools import groupby
 from operator import itemgetter
-from collections import Counter, OrderedDict
-from polyglot.builtins import iteritems, map, zip, unicode_type, codepoint_to_chr
+from typing import TYPE_CHECKING
 
 from calibre import as_unicode
-from calibre.ebooks.pdf.render.common import (Array, String, Stream,
-    Dictionary, Name)
-from calibre.utils.fonts.sfnt.subset import pdf_subset, UnsupportedFont, NoGlyphs
+from calibre.ebooks.pdf.render.common import Array, Dictionary, Name, Stream, String
+from calibre.utils.fonts.sfnt.subset import NoGlyphs, UnsupportedFont, pdf_subset
 from calibre.utils.short_uuid import uuid4
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+    from calibre.ebooks.pdf.render.common import Reference
+    from calibre.ebooks.pdf.render.serialize import IndirectObjects
+    from calibre.utils.fonts.sfnt.metrics import FontMetrics
+
+    class GlyphMappedFontMetrics(FontMetrics):
+        # FontMetrics with a map of glyph id to the text it represents, as
+        # created by the (now removed) Qt based PDF paint engine
+        glyph_map: dict[int, str]
+
+
 STANDARD_FONTS = {
-    'Times-Roman', 'Helvetica', 'Courier', 'Symbol', 'Times-Bold',
-    'Helvetica-Bold', 'Courier-Bold', 'ZapfDingbats', 'Times-Italic',
-    'Helvetica-Oblique', 'Courier-Oblique', 'Times-BoldItalic',
-    'Helvetica-BoldOblique', 'Courier-BoldOblique', }
+    'Times-Roman',
+    'Helvetica',
+    'Courier',
+    'Symbol',
+    'Times-Bold',
+    'Helvetica-Bold',
+    'Courier-Bold',
+    'ZapfDingbats',
+    'Times-Italic',
+    'Helvetica-Oblique',
+    'Courier-Oblique',
+    'Times-BoldItalic',
+    'Helvetica-BoldOblique',
+    'Courier-BoldOblique',
+}
 
 '''
 Notes
@@ -49,26 +67,24 @@ import textwrap
 
 
 class FontStream(Stream):
-
-    def __init__(self, is_otf, compress=False):
+    def __init__(self, is_otf: bool, compress: bool = False) -> None:
         Stream.__init__(self, compress=compress)
         self.is_otf = is_otf
 
-    def add_extra_keys(self, d):
+    def add_extra_keys(self, d: Dictionary) -> None:
         d['Length1'] = d['DL']
         if self.is_otf:
             d['Subtype'] = Name('CIDFontType0C')
 
 
-def to_hex_string(c):
-    ans = hex(int(c))[2:]
+def to_hex_string(c: int) -> str:
+    ans = f'{int(c):x}'
     if isinstance(ans, bytes):
         ans = ans.decode('ascii')
     return ans.rjust(4, '0')
 
 
 class CMap(Stream):
-
     skeleton = textwrap.dedent('''\
         /CIDInit /ProcSet findresource begin
         12 dict begin
@@ -90,10 +106,10 @@ class CMap(Stream):
         end
         ''')
 
-    def __init__(self, name, glyph_map, compress=False):
+    def __init__(self, name: str, glyph_map: Mapping[int, str], compress: bool = False) -> None:
         Stream.__init__(self, compress)
-        current_map = OrderedDict()
-        maps = []
+        current_map: OrderedDict[str, str] = OrderedDict()
+        maps: list[OrderedDict[str, str]] = []
         for glyph_id in sorted(glyph_map):
             if len(current_map) > 99:
                 maps.append(current_map)
@@ -102,14 +118,14 @@ class CMap(Stream):
             for c in glyph_map[glyph_id]:
                 c = ord(c)
                 val.append(to_hex_string(c))
-            glyph_id = '<%s>'%to_hex_string(glyph_id)
-            current_map[glyph_id] = '<%s>'%''.join(val)
+            glyph_id = f'<{to_hex_string(glyph_id)}>'
+            current_map[glyph_id] = '<{}>'.format(''.join(val))
         if current_map:
             maps.append(current_map)
         mapping = []
         for m in maps:
-            meat = '\n'.join('%s %s'%(k, v) for k, v in iteritems(m))
-            mapping.append('%d beginbfchar\n%s\nendbfchar'%(len(m), meat))
+            meat = '\n'.join(f'{k} {v}' for k, v in m.items())
+            mapping.append(f'{len(m)} beginbfchar\n{meat}\nendbfchar')
         try:
             name = name.encode('ascii').decode('ascii')
         except Exception:
@@ -117,14 +133,11 @@ class CMap(Stream):
         self.write(self.skeleton.format(name=name, mapping='\n'.join(mapping)))
 
 
-class Font(object):
-
-    def __init__(self, metrics, num, objects, compress):
+class Font:
+    def __init__(self, metrics: GlyphMappedFontMetrics, num: int, objects: IndirectObjects, compress: bool) -> None:
         self.metrics, self.compress = metrics, compress
         self.is_otf = self.metrics.is_otf
-        self.subset_tag = unicode_type(
-            re.sub('.', lambda m: codepoint_to_chr(int(m.group())+ord('A')), oct(num).replace('o', '')
-        )).rjust(6, 'A')
+        self.subset_tag = str(re.sub(r'.', lambda m: chr(int(m.group()) + ord('A')), oct(num).replace('o', ''))).rjust(6, 'A')
         self.font_stream = FontStream(metrics.is_otf, compress=compress)
         try:
             psname = metrics.postscript_name
@@ -132,7 +145,7 @@ class Font(object):
             psname = uuid4()
         self.font_descriptor = Dictionary({
             'Type': Name('FontDescriptor'),
-            'FontName': Name('%s+%s'%(self.subset_tag, psname)),
+            'FontName': Name(f'{self.subset_tag}+{psname}'),
             'Flags': 0b100,  # Symbolic font
             'FontBBox': Array(metrics.pdf_bbox),
             'ItalicAngle': metrics.post.italic_angle,
@@ -143,51 +156,52 @@ class Font(object):
             'StemV': metrics.pdf_stemv,
         })
         self.descendant_font = Dictionary({
-            'Type':Name('Font'),
-            'Subtype':Name('CIDFontType' + ('0' if metrics.is_otf else '2')),
+            'Type': Name('Font'),
+            'Subtype': Name('CIDFontType' + ('0' if metrics.is_otf else '2')),
             'BaseFont': self.font_descriptor['FontName'],
-            'FontDescriptor':objects.add(self.font_descriptor),
-            'CIDSystemInfo':Dictionary({
-                'Registry':String('Adobe'),
-                'Ordering':String('Identity'),
-                'Supplement':0,
+            'FontDescriptor': objects.add(self.font_descriptor),
+            'CIDSystemInfo': Dictionary({
+                'Registry': String('Adobe'),
+                'Ordering': String('Identity'),
+                'Supplement': 0,
             }),
         })
         if not self.is_otf:
             self.descendant_font['CIDToGIDMap'] = Name('Identity')
 
         self.font_dict = Dictionary({
-            'Type':Name('Font'),
-            'Subtype':Name('Type0'),
-            'Encoding':Name('Identity-H'),
-            'BaseFont':self.descendant_font['BaseFont'],
-            'DescendantFonts':Array([objects.add(self.descendant_font)]),
+            'Type': Name('Font'),
+            'Subtype': Name('Type0'),
+            'Encoding': Name('Identity-H'),
+            'BaseFont': self.descendant_font['BaseFont'],
+            'DescendantFonts': Array([objects.add(self.descendant_font)]),
         })
 
-        self.used_glyphs = set()
+        self.used_glyphs: set[int] = set()
 
-    def embed(self, objects, debug):
-        self.font_descriptor['FontFile'+('3' if self.is_otf else '2')
-                             ] = objects.add(self.font_stream)
+    def embed(self, objects: IndirectObjects, debug: Callable[[str], object]) -> None:
+        self.font_descriptor['FontFile' + ('3' if self.is_otf else '2')] = objects.add(self.font_stream)
         self.write_widths(objects)
         self.write_to_unicode(objects)
         try:
             pdf_subset(self.metrics.sfnt, self.used_glyphs)
         except UnsupportedFont as e:
-            debug('Subsetting of %s not supported, embedding full font. Error: %s'%(
-                self.metrics.names.get('full_name', 'Unknown'), as_unicode(e)))
+            debug('Subsetting of {} not supported, embedding full font. Error: {}'.format(self.metrics.names.get('full_name', 'Unknown'), as_unicode(e)))
         except NoGlyphs:
             if self.used_glyphs:
                 debug(
-                    'Subsetting of %s failed, font appears to have no glyphs for the %d characters it is used with, some text may not be rendered in the PDF' %
-                    (self.metrics.names.get('full_name', 'Unknown'), len(self.used_glyphs)))
+                    'Subsetting of {} failed, font appears to have no glyphs for the {}'
+                    ' characters it is used with, some text may not be rendered in the PDF'.format(
+                        self.metrics.names.get('full_name', 'Unknown'), len(self.used_glyphs)
+                    )
+                )
         if self.is_otf:
-            self.font_stream.write(self.metrics.sfnt['CFF '].raw)
+            self.font_stream.write(self.metrics.sfnt[b'CFF '].raw)
         else:
             self.metrics.os2.zero_fstype()
             self.metrics.sfnt(self.font_stream)
 
-    def write_to_unicode(self, objects):
+    def write_to_unicode(self, objects: IndirectObjects) -> None:
         try:
             name = self.metrics.postscript_name
         except KeyError:
@@ -195,19 +209,18 @@ class Font(object):
         cmap = CMap(name, self.metrics.glyph_map, compress=self.compress)
         self.font_dict['ToUnicode'] = objects.add(cmap)
 
-    def write_widths(self, objects):
-        glyphs = sorted(self.used_glyphs|{0})
-        widths = {g:self.metrics.pdf_scale(w) for g, w in zip(glyphs,
-                                        self.metrics.glyph_widths(glyphs))}
-        counter = Counter()
-        for g, w in iteritems(widths):
+    def write_widths(self, objects: IndirectObjects) -> None:
+        glyphs = sorted(self.used_glyphs | {0})
+        widths = {g: self.metrics.pdf_scale(w) for g, w in zip(glyphs, self.metrics.glyph_widths(glyphs))}
+        counter: Counter[int] = Counter()
+        for g, w in widths.items():
             counter[w] += 1
         most_common = counter.most_common(1)[0][0]
         self.descendant_font['DW'] = most_common
-        widths = {g:w for g, w in iteritems(widths) if w != most_common}
+        widths = {g: w for g, w in widths.items() if w != most_common}
 
         groups = Array()
-        for k, g in groupby(enumerate(widths), lambda i_x:i_x[0]-i_x[1]):
+        for k, g in groupby(enumerate(widths), lambda i_x: i_x[0] - i_x[1]):
             group = list(map(itemgetter(1), g))
             gwidths = [widths[g] for g in group]
             if len(set(gwidths)) == 1 and len(group) > 1:
@@ -218,19 +231,17 @@ class Font(object):
         self.descendant_font['W'] = objects.add(groups)
 
 
-class FontManager(object):
-
-    def __init__(self, objects, compress):
+class FontManager:
+    def __init__(self, objects: IndirectObjects, compress: bool) -> None:
         self.objects = objects
         self.compress = compress
-        self.std_map = {}
-        self.font_map = {}
-        self.fonts = []
+        self.std_map: dict[str, Reference[Dictionary]] = {}
+        self.font_map: dict[GlyphMappedFontMetrics, tuple[Reference[Dictionary], Font]] = {}
+        self.fonts: list[Font] = []
 
-    def add_font(self, font_metrics, glyph_ids):
+    def add_font(self, font_metrics: GlyphMappedFontMetrics, glyph_ids: set[int]) -> Reference[Dictionary]:
         if font_metrics not in self.font_map:
-            self.fonts.append(Font(font_metrics, len(self.fonts),
-                                   self.objects, self.compress))
+            self.fonts.append(Font(font_metrics, len(self.fonts), self.objects, self.compress))
             d = self.objects.add(self.fonts[-1].font_dict)
             self.font_map[font_metrics] = (d, self.fonts[-1])
 
@@ -238,17 +249,13 @@ class FontManager(object):
         font.used_glyphs |= glyph_ids
         return fontref
 
-    def add_standard_font(self, name):
+    def add_standard_font(self, name: str) -> Reference[Dictionary]:
         if name not in STANDARD_FONTS:
-            raise ValueError('%s is not a standard font'%name)
+            raise ValueError(f'{name} is not a standard font')
         if name not in self.std_map:
-            self.std_map[name] = self.objects.add(Dictionary({
-                'Type':Name('Font'),
-                'Subtype':Name('Type1'),
-                'BaseFont':Name(name)
-            }))
+            self.std_map[name] = self.objects.add(Dictionary({'Type': Name('Font'), 'Subtype': Name('Type1'), 'BaseFont': Name(name)}))
         return self.std_map[name]
 
-    def embed_fonts(self, debug):
+    def embed_fonts(self, debug: Callable[[str], object]) -> None:
         for font in self.fonts:
             font.embed(self.objects, debug)

@@ -15,7 +15,6 @@ class InquirerNet(BasicNewsRecipe):
     description = 'News from Philipines'
     oldest_article = 2
     max_articles_per_feed = 100
-    no_stylesheets = True
     use_embedded_content = False
     encoding = 'utf8'
     publisher = 'inquirer.net'
@@ -23,14 +22,10 @@ class InquirerNet(BasicNewsRecipe):
     lang = 'en'
     language = 'en'
 
-    use_embedded_content = False
-
     no_stylesheets = True
     auto_cleanup = True
 
-    feeds = [
-        (u'Inquirer', u'http://www.inquirer.net/fullfeed')
-    ]
+    feeds = [('Inquirer', 'http://www.inquirer.net/fullfeed')]
 
     def get_browser(self):
         br = BasicNewsRecipe.get_browser(self)

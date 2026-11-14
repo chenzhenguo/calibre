@@ -1,25 +1,43 @@
-# -*- coding: utf-8 -*-
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
 
-
-__license__ = 'GPL 3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
-
-import os, re, time, sys
+import os
+import re
+import sys
+import time
 from functools import cmp_to_key
+from typing import TYPE_CHECKING
 
+from calibre import force_unicode
+from calibre.constants import iswindows, preferred_encoding
+from calibre.devices.interface import BookList as _BookList
+from calibre.devices.mime import mime_type_ext
 from calibre.ebooks.metadata import title_sort
 from calibre.ebooks.metadata.book.base import Metadata
-from calibre.devices.mime import mime_type_ext
-from calibre.devices.interface import BookList as _BookList
-from calibre.constants import preferred_encoding
-from calibre import isbytestring, force_unicode
+from calibre.prints import debug_print
 from calibre.utils.config_base import tweaks
 from calibre.utils.icu import sort_key
-from polyglot.builtins import string_or_bytes, iteritems, itervalues, cmp
+from polyglot.builtins import cmp
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
-def none_cmp(xx, yy):
+def file_datetime(st: os.stat_result) -> time.struct_time:
+    """
+    The date to show for a book file on the device, from its stat result. Uses
+    the creation time on Windows and the inode change time elsewhere, as
+    os.path.getctime() does, falling back to the modification time on
+    filesystems such as sshfs that report zero for it. Returns the current time
+    if the date is out of range.
+    """
+    ctime = st.st_birthtime if iswindows else st.st_ctime  # ty: ignore[deprecated] only deprecated on Windows
+    try:
+        return time.gmtime(ctime or st.st_mtime)
+    except OverflowError, ValueError, OSError:
+        return time.gmtime()
+
+
+def none_cmp(xx: tuple[Metadata, object, object], yy: tuple[Metadata, object, object]) -> int:
     x = xx[1]
     y = yy[1]
     if x is None and y is None:
@@ -32,7 +50,7 @@ def none_cmp(xx, yy):
         return 1
     if y is None:
         return -1
-    if isinstance(x, string_or_bytes) and isinstance(y, string_or_bytes):
+    if isinstance(x, (str, bytes)) and isinstance(y, (str, bytes)):
         x, y = sort_key(force_unicode(x)), sort_key(force_unicode(y))
     try:
         c = cmp(x, y)
@@ -48,8 +66,13 @@ def none_cmp(xx, yy):
 
 
 class Book(Metadata):
-
-    def __init__(self, prefix, lpath, size=None, other=None):
+    def __init__(self, prefix: str, lpath: str, size: int | None = None, other: Metadata | None = None, defer_datetime: bool = False) -> None:
+        """
+        :param defer_datetime: Do not stat() the file to get its date, the
+            caller will set :attr:`datetime` itself. Used when loading the
+            device metadata cache, as the date is then filled in from the
+            directory listing, avoiding a filesystem call per book.
+        """
         from calibre.ebooks.metadata.meta import path_to_ext
 
         Metadata.__init__(self, '')
@@ -63,57 +86,50 @@ class Book(Metadata):
         else:
             self.lpath = lpath
         self.mime = mime_type_ext(path_to_ext(lpath))
+        # The database id in the application database that this file corresponds to.
+        # Note that db_id cannot be a property as Metadata.__getattribute__()
+        # handles all standard field names itself.
+        match = re.search(r'_(\d+)$', lpath.rpartition('.')[0])
+        self.db_id = int(match.group(1)) if match else None
         self.size = size  # will be set later if None
-        try:
-            self.datetime = time.gmtime(os.path.getctime(self.path))
-        except:
-            self.datetime = time.gmtime()
+        self.datetime = time.gmtime()
+        if not defer_datetime:
+            try:
+                self.datetime = file_datetime(os.stat(self.path))
+            except OSError, ValueError:
+                pass  # the file does not exist (yet) or the path is invalid, keep the current time
         if other:
             self.smart_update(other)
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         # use lpath because the prefix can change, changing path
         return self.lpath == getattr(other, 'lpath', None)
 
     @property
-    def db_id(self):
-        '''The database id in the application database that this file corresponds to'''
-
-        match = re.search(r'_(\d+)$', self.lpath.rpartition('.')[0])
-        if match:
-            return int(match.group(1))
-        return None
-
-    @property
-    def title_sorter(self):
-        '''String to sort the title. If absent, title is returned'''
+    def title_sorter(self) -> str:
+        """String to sort the title. If absent, title is returned"""
         return title_sort(self.title)
-
-    @property
-    def thumbnail(self):
-        return None
 
 
 class BookList(_BookList):
-
-    def __init__(self, oncard, prefix, settings):
+    def __init__(self, oncard: str | None, prefix: str | None, settings: object) -> None:
         _BookList.__init__(self, oncard, prefix, settings)
-        self._bookmap = {}
+        self._bookmap: dict[str, Book] = {}
 
-    def supports_collections(self):
+    def supports_collections(self) -> bool:
         return False
 
-    def add_book(self, book, replace_metadata):
+    def add_book(self, book: Metadata, replace_metadata: bool) -> Metadata | None:
         return self.add_book_extended(book, replace_metadata, check_for_duplicates=True)
 
-    def add_book_extended(self, book, replace_metadata, check_for_duplicates):
-        '''
+    def add_book_extended(self, book: Metadata, replace_metadata: bool, check_for_duplicates: bool) -> Metadata | None:
+        """
         Add the book to the booklist, if needed. Return None if the book is
         already there and not updated, otherwise return the book.
-        '''
+        """
         try:
             b = self.index(book) if check_for_duplicates else None
-        except (ValueError, IndexError):
+        except ValueError, IndexError:
             b = None
         if b is None:
             self.append(book)
@@ -123,27 +139,27 @@ class BookList(_BookList):
             return self[b]
         return None
 
-    def remove_book(self, book):
+    def remove_book(self, book: Metadata) -> None:
         self.remove(book)
 
-    def get_collections(self):
+    def get_collections(self, collection_attributes: Sequence[str] | None = None) -> dict[str, list[Metadata]]:
         return {}
 
 
 class CollectionsBookList(BookList):
-
-    def supports_collections(self):
+    def supports_collections(self) -> bool:
         return True
 
-    def in_category_sort_rules(self, attr):
+    def in_category_sort_rules(self, attr: str) -> str | None:
         sorts = tweaks['sony_collection_sorting_rules']
-        for attrs,sortattr in sorts:
+        for attrs, sortattr in sorts:
             if attr in attrs or '*' in attrs:
                 return sortattr
         return None
 
-    def compute_category_name(self, field_key, field_value, field_meta):
+    def compute_category_name(self, field_key: str, field_value: str, field_meta: dict[str, object]) -> str:
         from calibre.utils.formatter import EvalFormatter
+
         renames = tweaks['sony_collection_renaming_rules']
         field_name = renames.get(field_key, None)
         if field_name is None:
@@ -152,14 +168,16 @@ class CollectionsBookList(BookList):
             else:
                 field_name = ''
         cat_name = EvalFormatter().safe_format(
-                        fmt=tweaks['sony_collection_name_template'],
-                        kwargs={'category':field_name, 'value':field_value},
-                        error_value='GET_CATEGORY', book=None)
+            tweaks['sony_collection_name_template'],
+            kwargs={'category': field_name, 'value': field_value},
+            error_value='GET_CATEGORY',
+            book=None,
+        )
         return cat_name.strip()
 
-    def get_collections(self, collection_attributes):
-        from calibre.devices.usbms.driver import debug_print
+    def get_collections(self, collection_attributes: Sequence[str] | None = None) -> dict[str, list[Metadata]]:
         from calibre.utils.config import device_prefs
+
         debug_print('Starting get_collections:', device_prefs['manage_device_metadata'])
         debug_print('Renaming rules:', tweaks['sony_collection_renaming_rules'])
         debug_print('Formatting template:', tweaks['sony_collection_name_template'])
@@ -170,14 +188,14 @@ class CollectionsBookList(BookList):
         # right decisions
         use_renaming_rules = device_prefs['manage_device_metadata'] == 'on_connect'
 
-        collections = {}
+        collections: dict[str, dict[str, tuple[Metadata, object, object]]] = {}
 
         # get the special collection names
         all_by_author = ''
         all_by_title = ''
-        ca = []
-        all_by_something = []
-        for c in collection_attributes:
+        ca: list[str] = []
+        all_by_something: list[tuple[str, str]] = []
+        for c in collection_attributes or []:
             if c.startswith('aba:') and c[4:].strip():
                 all_by_author = c[4:].strip()
             elif c.startswith('abt:') and c[4:].strip():
@@ -194,8 +212,7 @@ class CollectionsBookList(BookList):
         collection_attributes = ca
 
         for book in self:
-            tsval = book.get('_pb_title_sort',
-                             book.get('title_sort', book.get('title', 'zzzz')))
+            tsval = book.get('_pb_title_sort', book.get('title_sort', book.get('title', 'zzzz')))
             asval = book.get('_pb_author_sort', book.get('author_sort', ''))
             # Make sure we can identify this book via the lpath
             lpath = getattr(book, 'lpath', None)
@@ -232,7 +249,7 @@ class CollectionsBookList(BookList):
 
                 if not val:
                     continue
-                if isbytestring(val):
+                if isinstance(val, bytes):
                     val = val.decode(preferred_encoding, 'replace')
                 if isinstance(val, (list, tuple)):
                     val = list(val)
@@ -241,8 +258,7 @@ class CollectionsBookList(BookList):
                 elif fm['datatype'] == 'text' and fm['is_multiple']:
                     val = orig_val
                 elif fm['datatype'] == 'composite' and fm['is_multiple']:
-                    val = [v.strip() for v in
-                           val.split(fm['is_multiple']['ui_to_list'])]
+                    val = [v.strip() for v in val.split(fm['is_multiple']['ui_to_list'])]
                 else:
                     val = [val]
 
@@ -255,18 +271,14 @@ class CollectionsBookList(BookList):
                         if category == book.series:
                             is_series = True
                     elif fm['is_custom']:  # is a custom field
-                        if fm['datatype'] == 'text' and len(category) > 1 and \
-                                category[0] == '[' and category[-1] == ']':
+                        if fm['datatype'] == 'text' and len(category) > 1 and category[0] == '[' and category[-1] == ']':
                             continue
                         if fm['datatype'] == 'series':
                             is_series = True
-                    else:                       # is a standard field
-                        if attr == 'tags' and len(category) > 1 and \
-                                category[0] == '[' and category[-1] == ']':
+                    else:  # is a standard field
+                        if attr == 'tags' and len(category) > 1 and category[0] == '[' and category[-1] == ']':
                             continue
-                        if attr == 'series' or \
-                                ('series' in collection_attributes and
-                                 book.get('series', None) == category):
+                        if attr == 'series' or ('series' in collection_attributes and book.get('series', None) == category):
                             is_series = True
                     if use_renaming_rules:
                         cat_name = self.compute_category_name(attr, category, fm)
@@ -280,14 +292,11 @@ class CollectionsBookList(BookList):
                         collections[cat_name][lpath] = (book, sort_val, tsval)
                     elif is_series:
                         if doing_dc:
-                            collections[cat_name][lpath] = \
-                                (book, book.get('series_index', sys.maxsize), tsval)
+                            collections[cat_name][lpath] = (book, book.get('series_index', sys.maxsize), tsval)
                         else:
-                            collections[cat_name][lpath] = \
-                                (book, book.get(attr+'_index', sys.maxsize), tsval)
-                    else:
-                        if lpath not in collections[cat_name]:
-                            collections[cat_name][lpath] = (book, tsval, tsval)
+                            collections[cat_name][lpath] = (book, book.get(attr + '_index', sys.maxsize), tsval)
+                    elif lpath not in collections[cat_name]:
+                        collections[cat_name][lpath] = (book, tsval, tsval)
 
             # All books by author
             if all_by_author:
@@ -299,21 +308,21 @@ class CollectionsBookList(BookList):
                 if all_by_title not in collections:
                     collections[all_by_title] = {}
                 collections[all_by_title][lpath] = (book, tsval, asval)
-            for (n, sb) in all_by_something:
+            for n, sb in all_by_something:
                 if n not in collections:
                     collections[n] = {}
                 collections[n][lpath] = (book, book.get(sb, ''), tsval)
 
         # Sort collections
-        result = {}
+        result: dict[str, list[Metadata]] = {}
 
-        for category, lpaths in iteritems(collections):
-            books = sorted(itervalues(lpaths), key=cmp_to_key(none_cmp))
+        for category, lpaths in collections.items():
+            books = sorted(lpaths.values(), key=cmp_to_key(none_cmp))
             result[category] = [x[0] for x in books]
         return result
 
-    def rebuild_collections(self, booklist, oncard):
-        '''
+    def rebuild_collections(self, booklist: BookList, oncard: str | None) -> None:
+        """
         For each book in the booklist for the card oncard, remove it from all
         its current collections, then add it to the collections specified in
         device_collections.
@@ -322,5 +331,5 @@ class CollectionsBookList(BookList):
         etc.
 
         booklist is the object created by the :method:`books` call above.
-        '''
+        """
         pass

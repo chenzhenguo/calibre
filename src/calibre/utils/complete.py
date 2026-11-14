@@ -1,75 +1,79 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2009, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-
-'''
+"""
 BASH completion for calibre commands that are too complex for simple
 completion.
-'''
+"""
 
-import sys, os, shlex, glob, re
+import glob
+import os
+import re
+import shlex
+import sys
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
+    from optparse import Option, OptionParser
 
 prints = print
 
 
-def split(src):
+def split(src: str) -> list[str]:
     try:
         return shlex.split(src)
     except ValueError:
         try:
-            return shlex.split(src+'"')
+            return shlex.split(src + '"')
         except ValueError:
-            return shlex.split(src+"'")
+            return shlex.split(src + "'")
 
 
-def files_and_dirs(prefix, allowed_exts=[]):
+def files_and_dirs(prefix: str, allowed_exts: Iterable[str] | None = None) -> Iterator[str]:
+    if allowed_exts is None:
+        allowed_exts = []
     prefix = os.path.expanduser(prefix)
-    for i in glob.iglob(prefix+'*'):
+    for i in glob.iglob(prefix + '*'):
         _, ext = os.path.splitext(i)
         ext = ext.lower().replace('.', '')
         if os.path.isdir(i):
-            yield i+os.sep
+            yield i + os.sep
         elif allowed_exts is None or ext in allowed_exts:
-            yield i+' '
+            yield i + ' '
 
 
-def get_opts_from_parser(parser, prefix):
-    def do_opt(opt):
+def get_opts_from_parser(parser: OptionParser, prefix: str) -> Iterator[str]:
+    def do_opt(opt: Option) -> Iterator[str]:
         for x in opt._long_opts:
             if x.startswith(prefix):
                 yield x
         for x in opt._short_opts:
             if x.startswith(prefix):
                 yield x
+
     for o in parser.option_list:
         for x in do_opt(o):
-            yield x+' '
+            yield x + ' '
     for g in parser.option_groups:
         for o in g.option_list:
             for x in do_opt(o):
-                yield x+' '
+                yield x + ' '
 
 
-def send(ans):
-    pat = re.compile('([^0-9a-zA-Z_./-])')
+def send(ans: Iterable[str]) -> None:
+    pat = re.compile(r'([^0-9a-zA-Z_./-])')
     for x in sorted(set(ans)):
-        x = pat.sub(lambda m : '\\'+m.group(1), x)
+        x = pat.sub(lambda m: '\\' + m.group(1), x)
         if x.endswith('\\ '):
-            x = x[:-2]+' '
+            x = x[:-2] + ' '
         prints(x)
 
 
-class EbookConvert(object):
-
-    def __init__(self, comp_line, pos):
+class EbookConvert:
+    def __init__(self, comp_line: str, pos: int) -> None:
         words = split(comp_line[:pos])
-        char_before = comp_line[pos-1]
+        char_before = comp_line[pos - 1]
         prefix = words[-1] if words[-1].endswith(char_before) else ''
         wc = len(words)
         if not prefix:
@@ -78,11 +82,12 @@ class EbookConvert(object):
         self.prefix = prefix
         self.previous = words[-2 if prefix else -1]
         from calibre.utils.serialize import msgpack_loads
-        self.cache = msgpack_loads(open(os.path.join(sys.resources_location,
-            'ebook-convert-complete.calibre_msgpack'), 'rb').read(), use_list=False)
+
+        with open(os.path.join(getattr(sys, 'resources_location'), 'ebook-convert-complete.calibre_msgpack'), 'rb') as f:
+            self.cache = msgpack_loads(f.read(), use_list=False)
         self.complete(wc)
 
-    def complete(self, wc):
+    def complete(self, wc: int) -> None:
         if wc == 2:
             self.complete_input()
         elif wc == 3:
@@ -98,6 +103,7 @@ class EbookConvert(object):
             else:
                 from calibre.ebooks.conversion.cli import create_option_parser
                 from calibre.utils.logging import Log
+
                 log = Log()
                 log.outputs = []
                 ans = []
@@ -105,26 +111,25 @@ class EbookConvert(object):
                     try:
                         parser, _ = create_option_parser(self.words[:3], log)
                         ans += list(get_opts_from_parser(parser, self.prefix))
-                    except:
+                    except Exception:
                         pass
             if self.previous.startswith('-'):
                 ans += list(files_and_dirs(self.prefix, None))
             send(ans)
 
-    def complete_input(self):
+    def complete_input(self) -> None:
         ans = list(files_and_dirs(self.prefix, self.cache['input_fmts']))
-        ans += [t for t in self.cache['input_recipes'] if
-                t.startswith(self.prefix)]
+        ans += [t for t in self.cache['input_recipes'] if t.startswith(self.prefix)]
         send(ans)
 
-    def complete_output(self):
+    def complete_output(self) -> None:
         fmts = self.cache['output']
         ans = list(files_and_dirs(self.prefix, fmts))
-        ans += ['.'+x+' ' for x in fmts if ('.'+x).startswith(self.prefix)]
+        ans += ['.' + x + ' ' for x in fmts if ('.' + x).startswith(self.prefix)]
         send(ans)
 
 
-def main(args=sys.argv):
+def main(args: list[str] = sys.argv) -> int:
     comp_line, pos = os.environ['COMP_LINE'], int(os.environ['COMP_POINT'])
     module = split(comp_line)[0].split(os.sep)[-1]
     if module == 'ebook-convert':

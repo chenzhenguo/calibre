@@ -1,24 +1,24 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid at kovidgoyal.net>
 
 from math import sqrt
-from collections import namedtuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
-from PyQt5.Qt import (
-    QBrush, QPen, Qt, QPointF, QTransform, QPaintEngine, QImage)
+from qt.core import QBrush, QImage, QPaintEngine, QPainterPath, QPen, QPointF, Qt, QTransform
 
-from calibre.ebooks.pdf.render.common import (
-    Name, Array, fmtnum, Stream, Dictionary)
-from calibre.ebooks.pdf.render.serialize import Path
+from calibre.ebooks.pdf.render.common import Array, Dictionary, Name, Stream, fmtnum
 from calibre.ebooks.pdf.render.gradients import LinearGradientPattern
+from calibre.ebooks.pdf.render.serialize import Path
+
+if TYPE_CHECKING:
+    from collections.abc import Hashable
+
+    from qt.core import QPaintEngineState, QPainter, QPixmap, QRectF
+
+    from calibre.ebooks.pdf.render.serialize import PDFStream
 
 
-def convert_path(path):  # {{{
+def convert_path(path: QPainterPath) -> Path:  # {{{
     p = Path()
     i = 0
     while i < path.elementCount():
@@ -31,34 +31,36 @@ def convert_path(path):  # {{{
             p.line_to(*em)
         elif elem.isCurveTo():
             added = False
-            if path.elementCount() > i+1:
-                c1, c2 = path.elementAt(i), path.elementAt(i+1)
-                if (c1.type == path.CurveToDataElement and c2.type ==
-                    path.CurveToDataElement):
+            if path.elementCount() > i + 1:
+                c1, c2 = path.elementAt(i), path.elementAt(i + 1)
+                if c1.type == QPainterPath.ElementType.CurveToDataElement and c2.type == QPainterPath.ElementType.CurveToDataElement:
                     i += 2
                     p.curve_to(em[0], em[1], c1.x, c1.y, c2.x, c2.y)
                     added = True
             if not added:
                 raise ValueError('Invalid curve to operation')
     return p
+
+
 # }}}
 
 
-Brush = namedtuple('Brush', 'origin brush color')
+class Brush(NamedTuple):
+    origin: QPointF
+    brush: LinearGradientPattern | TexturePattern | QtPattern | None
+    color: tuple[float, float, float] | None
 
 
 class TilingPattern(Stream):
-
-    def __init__(self, cache_key, matrix, w=8, h=8, paint_type=2, compress=False):
+    def __init__(self, cache_key: Hashable, matrix: QTransform, w: int = 8, h: int = 8, paint_type: int = 2, compress: bool = False) -> None:
         Stream.__init__(self, compress=compress)
         self.paint_type = paint_type
         self.w, self.h = w, h
-        self.matrix = (matrix.m11(), matrix.m12(), matrix.m21(), matrix.m22(),
-                       matrix.dx(), matrix.dy())
+        self.matrix = (matrix.m11(), matrix.m12(), matrix.m21(), matrix.m22(), matrix.dx(), matrix.dy())
         self.resources = Dictionary()
         self.cache_key = (self.__class__.__name__, cache_key, self.matrix)
 
-    def add_extra_keys(self, d):
+    def add_extra_keys(self, d: Dictionary) -> None:
         d['Type'] = Name('Pattern')
         d['PatternType'] = 1
         d['PaintType'] = self.paint_type
@@ -71,192 +73,49 @@ class TilingPattern(Stream):
 
 
 class QtPattern(TilingPattern):
-
     qt_patterns = (  # {{{
-        "0 J\n"
-        "6 w\n"
-        "[] 0 d\n"
-        "4 0 m\n"
-        "4 8 l\n"
-        "0 4 m\n"
-        "8 4 l\n"
-        "S\n",  # Dense1Pattern
-
-        "0 J\n"
-        "2 w\n"
-        "[6 2] 1 d\n"
-        "0 0 m\n"
-        "0 8 l\n"
-        "8 0 m\n"
-        "8 8 l\n"
-        "S\n"
-        "[] 0 d\n"
-        "2 0 m\n"
-        "2 8 l\n"
-        "6 0 m\n"
-        "6 8 l\n"
-        "S\n"
-        "[6 2] -3 d\n"
-        "4 0 m\n"
-        "4 8 l\n"
-        "S\n",  # Dense2Pattern
-
-        "0 J\n"
-        "2 w\n"
-        "[6 2] 1 d\n"
-        "0 0 m\n"
-        "0 8 l\n"
-        "8 0 m\n"
-        "8 8 l\n"
-        "S\n"
-        "[2 2] -1 d\n"
-        "2 0 m\n"
-        "2 8 l\n"
-        "6 0 m\n"
-        "6 8 l\n"
-        "S\n"
-        "[6 2] -3 d\n"
-        "4 0 m\n"
-        "4 8 l\n"
-        "S\n",  # Dense3Pattern
-
-        "0 J\n"
-        "2 w\n"
-        "[2 2] 1 d\n"
-        "0 0 m\n"
-        "0 8 l\n"
-        "8 0 m\n"
-        "8 8 l\n"
-        "S\n"
-        "[2 2] -1 d\n"
-        "2 0 m\n"
-        "2 8 l\n"
-        "6 0 m\n"
-        "6 8 l\n"
-        "S\n"
-        "[2 2] 1 d\n"
-        "4 0 m\n"
-        "4 8 l\n"
-        "S\n",  # Dense4Pattern
-
-        "0 J\n"
-        "2 w\n"
-        "[2 6] -1 d\n"
-        "0 0 m\n"
-        "0 8 l\n"
-        "8 0 m\n"
-        "8 8 l\n"
-        "S\n"
-        "[2 2] 1 d\n"
-        "2 0 m\n"
-        "2 8 l\n"
-        "6 0 m\n"
-        "6 8 l\n"
-        "S\n"
-        "[2 6] 3 d\n"
-        "4 0 m\n"
-        "4 8 l\n"
-        "S\n",  # Dense5Pattern
-
-        "0 J\n"
-        "2 w\n"
-        "[2 6] -1 d\n"
-        "0 0 m\n"
-        "0 8 l\n"
-        "8 0 m\n"
-        "8 8 l\n"
-        "S\n"
-        "[2 6] 3 d\n"
-        "4 0 m\n"
-        "4 8 l\n"
-        "S\n",  # Dense6Pattern
-
-        "0 J\n"
-        "2 w\n"
-        "[2 6] -1 d\n"
-        "0 0 m\n"
-        "0 8 l\n"
-        "8 0 m\n"
-        "8 8 l\n"
-        "S\n",  # Dense7Pattern
-
-        "1 w\n"
-        "0 4 m\n"
-        "8 4 l\n"
-        "S\n",  # HorPattern
-
-        "1 w\n"
-        "4 0 m\n"
-        "4 8 l\n"
-        "S\n",  # VerPattern
-
-        "1 w\n"
-        "4 0 m\n"
-        "4 8 l\n"
-        "0 4 m\n"
-        "8 4 l\n"
-        "S\n",  # CrossPattern
-
-        "1 w\n"
-        "-1 5 m\n"
-        "5 -1 l\n"
-        "3 9 m\n"
-        "9 3 l\n"
-        "S\n",  # BDiagPattern
-
-        "1 w\n"
-        "-1 3 m\n"
-        "5 9 l\n"
-        "3 -1 m\n"
-        "9 5 l\n"
-        "S\n",  # FDiagPattern
-
-        "1 w\n"
-        "-1 3 m\n"
-        "5 9 l\n"
-        "3 -1 m\n"
-        "9 5 l\n"
-        "-1 5 m\n"
-        "5 -1 l\n"
-        "3 9 m\n"
-        "9 3 l\n"
-        "S\n",  # DiagCrossPattern
+        '0 J\n6 w\n[] 0 d\n4 0 m\n4 8 l\n0 4 m\n8 4 l\nS\n',  # Dense1Pattern
+        '0 J\n2 w\n[6 2] 1 d\n0 0 m\n0 8 l\n8 0 m\n8 8 l\nS\n[] 0 d\n2 0 m\n2 8 l\n6 0 m\n6 8 l\nS\n[6 2] -3 d\n4 0 m\n4 8 l\nS\n',  # Dense2Pattern
+        '0 J\n2 w\n[6 2] 1 d\n0 0 m\n0 8 l\n8 0 m\n8 8 l\nS\n[2 2] -1 d\n2 0 m\n2 8 l\n6 0 m\n6 8 l\nS\n[6 2] -3 d\n4 0 m\n4 8 l\nS\n',  # Dense3Pattern
+        '0 J\n2 w\n[2 2] 1 d\n0 0 m\n0 8 l\n8 0 m\n8 8 l\nS\n[2 2] -1 d\n2 0 m\n2 8 l\n6 0 m\n6 8 l\nS\n[2 2] 1 d\n4 0 m\n4 8 l\nS\n',  # Dense4Pattern
+        '0 J\n2 w\n[2 6] -1 d\n0 0 m\n0 8 l\n8 0 m\n8 8 l\nS\n[2 2] 1 d\n2 0 m\n2 8 l\n6 0 m\n6 8 l\nS\n[2 6] 3 d\n4 0 m\n4 8 l\nS\n',  # Dense5Pattern
+        '0 J\n2 w\n[2 6] -1 d\n0 0 m\n0 8 l\n8 0 m\n8 8 l\nS\n[2 6] 3 d\n4 0 m\n4 8 l\nS\n',  # Dense6Pattern
+        '0 J\n2 w\n[2 6] -1 d\n0 0 m\n0 8 l\n8 0 m\n8 8 l\nS\n',  # Dense7Pattern
+        '1 w\n0 4 m\n8 4 l\nS\n',  # HorPattern
+        '1 w\n4 0 m\n4 8 l\nS\n',  # VerPattern
+        '1 w\n4 0 m\n4 8 l\n0 4 m\n8 4 l\nS\n',  # CrossPattern
+        '1 w\n-1 5 m\n5 -1 l\n3 9 m\n9 3 l\nS\n',  # BDiagPattern
+        '1 w\n-1 3 m\n5 9 l\n3 -1 m\n9 5 l\nS\n',  # FDiagPattern
+        '1 w\n-1 3 m\n5 9 l\n3 -1 m\n9 5 l\n-1 5 m\n5 -1 l\n3 9 m\n9 3 l\nS\n',  # DiagCrossPattern
     )  # }}}
 
-    def __init__(self, pattern_num, matrix):
-        super(QtPattern, self).__init__(pattern_num, matrix)
-        self.write(self.qt_patterns[pattern_num-2])
+    def __init__(self, pattern_num: Qt.BrushStyle, matrix: QTransform) -> None:
+        super().__init__(pattern_num, matrix)
+        self.write(self.qt_patterns[pattern_num.value - 2])
 
 
 class TexturePattern(TilingPattern):
-
-    def __init__(self, pixmap, matrix, pdf, clone=None):
+    def __init__(self, pixmap: QPixmap | None, matrix: QTransform, pdf: PDFStream, clone: TexturePattern | None = None) -> None:
         if clone is None:
+            assert pixmap is not None  # the only caller with clone=None passes a QPixmap
             image = pixmap.toImage()
             cache_key = pixmap.cacheKey()
             imgref = pdf.add_image(image, cache_key)
-            paint_type = (2 if image.format() in {QImage.Format.Format_MonoLSB,
-                                                QImage.Format.Format_Mono} else 1)
-            super(TexturePattern, self).__init__(
-                cache_key, matrix, w=image.width(), h=image.height(),
-                paint_type=paint_type)
+            paint_type = 2 if image.format() in {QImage.Format.Format_MonoLSB, QImage.Format.Format_Mono} else 1
+            super().__init__(cache_key, matrix, w=image.width(), h=image.height(), paint_type=paint_type)
             m = (self.w, 0, 0, -self.h, 0, self.h)
-            self.resources['XObject'] = Dictionary({'Texture':imgref})
-            self.write_line('%s cm /Texture Do'%(' '.join(map(fmtnum, m))))
+            self.resources['XObject'] = Dictionary({'Texture': imgref})
+            self.write_line('{} cm /Texture Do'.format(' '.join(map(fmtnum, m))))
         else:
-            super(TexturePattern, self).__init__(
-                clone.cache_key[1], matrix, w=clone.w, h=clone.h,
-                paint_type=clone.paint_type)
+            super().__init__(clone.cache_key[1], matrix, w=clone.w, h=clone.h, paint_type=clone.paint_type)
             self.resources['XObject'] = Dictionary(clone.resources['XObject'])
             self.write(clone.getvalue())
 
 
-class GraphicsState(object):
+class GraphicsState:
+    FIELDS = ('fill', 'stroke', 'opacity', 'transform', 'brush_origin', 'clip_updated', 'do_fill', 'do_stroke')
 
-    FIELDS = ('fill', 'stroke', 'opacity', 'transform', 'brush_origin',
-                  'clip_updated', 'do_fill', 'do_stroke')
-
-    def __init__(self):
+    def __init__(self) -> None:
         self.fill = QBrush(Qt.GlobalColor.white)
         self.stroke = QPen()
         self.opacity = 1.0
@@ -265,15 +124,12 @@ class GraphicsState(object):
         self.clip_updated = False
         self.do_fill = False
         self.do_stroke = True
-        self.qt_pattern_cache = {}
+        self.qt_pattern_cache: dict[object, object] = {}
 
-    def __eq__(self, other):
-        for x in self.FIELDS:
-            if getattr(other, x) != getattr(self, x):
-                return False
-        return True
+    def __eq__(self, other: object) -> bool:
+        return all(getattr(other, x) == getattr(self, x) for x in self.FIELDS)
 
-    def copy(self):
+    def copy(self) -> GraphicsState:
         ans = GraphicsState()
         ans.fill = QBrush(self.fill)
         ans.stroke = QPen(self.stroke)
@@ -285,18 +141,17 @@ class GraphicsState(object):
         return ans
 
 
-class Graphics(object):
-
-    def __init__(self, page_width_px, page_height_px):
+class Graphics:
+    def __init__(self, page_width_px: float, page_height_px: float) -> None:
         self.base_state = GraphicsState()
         self.current_state = GraphicsState()
-        self.pending_state = None
+        self.pending_state: GraphicsState | None = None
         self.page_width_px, self.page_height_px = (page_width_px, page_height_px)
 
-    def begin(self, pdf):
+    def begin(self, pdf: PDFStream) -> None:
         self.pdf = pdf
 
-    def update_state(self, state, painter):
+    def update_state(self, state: QPaintEngineState, painter: QPainter) -> None:
         flags = state.state()
         if self.pending_state is None:
             self.pending_state = self.current_state.copy()
@@ -321,11 +176,11 @@ class Graphics(object):
         if flags & QPaintEngine.DirtyFlag.DirtyClipPath or flags & QPaintEngine.DirtyFlag.DirtyClipRegion:
             s.clip_updated = True
 
-    def reset(self):
+    def reset(self) -> None:
         self.current_state = GraphicsState()
         self.pending_state = None
 
-    def __call__(self, pdf_system, painter):
+    def __call__(self, pdf_system: QTransform, painter: QPainter) -> None:
         # Apply the currently pending state to the PDF
         if self.pending_state is None:
             return
@@ -339,14 +194,13 @@ class Graphics(object):
             pdf.save_stack()
             pdf_state = self.base_state
 
-        if (pdf_state.transform != ps.transform):
+        if pdf_state.transform != ps.transform:
             pdf.transform(ps.transform)
 
-        if (pdf_state.opacity != ps.opacity or pdf_state.stroke != ps.stroke):
+        if pdf_state.opacity != ps.opacity or pdf_state.stroke != ps.stroke:
             self.apply_stroke(ps, pdf_system, painter)
 
-        if (pdf_state.opacity != ps.opacity or pdf_state.fill != ps.fill or
-            pdf_state.brush_origin != ps.brush_origin):
+        if pdf_state.opacity != ps.opacity or pdf_state.fill != ps.fill or pdf_state.brush_origin != ps.brush_origin:
             self.apply_fill(ps, pdf_system, painter)
 
         if ps.clip_updated:
@@ -354,15 +208,15 @@ class Graphics(object):
             path = painter.clipPath()
             if not path.isEmpty():
                 p = convert_path(path)
-                fill_rule = {Qt.FillRule.OddEvenFill:'evenodd',
-                            Qt.FillRule.WindingFill:'winding'}[path.fillRule()]
+                fill_rule = {Qt.FillRule.OddEvenFill: 'evenodd', Qt.FillRule.WindingFill: 'winding'}[path.fillRule()]
                 pdf.add_clip(p, fill_rule=fill_rule)
 
         self.current_state = self.pending_state
         self.pending_state = None
 
-    def convert_brush(self, brush, brush_origin, global_opacity,
-                      pdf_system, qt_system):
+    def convert_brush(
+        self, brush: QBrush, brush_origin: QPointF, global_opacity: float, pdf_system: QTransform, qt_system: QTransform
+    ) -> tuple[tuple[float, float, float] | None, float, str | None, bool]:
         # Convert a QBrush to PDF operators
         style = brush.style()
         pdf = self.pdf
@@ -371,15 +225,16 @@ class Graphics(object):
         opacity = global_opacity
         do_fill = True
 
-        matrix = (QTransform.fromTranslate(brush_origin.x(), brush_origin.y()) * pdf_system * qt_system.inverted()[0])
-        vals = list(brush.color().getRgbF())
+        matrix = QTransform.fromTranslate(brush_origin.x(), brush_origin.y()) * pdf_system * qt_system.inverted()[0]
+        # getRgbF() never returns None components, the stubs are overly broad
+        vals = cast('tuple[float, float, float, float]', brush.color().getRgbF())
         self.brushobj = None
 
-        if style <= Qt.BrushStyle.DiagCrossPattern:
+        if style.value <= Qt.BrushStyle.DiagCrossPattern.value:
             opacity *= vals[-1]
             color = vals[:3]
 
-            if style > Qt.BrushStyle.SolidPattern:
+            if style.value > Qt.BrushStyle.SolidPattern.value:
                 pat = QtPattern(style, matrix)
 
         elif style == Qt.BrushStyle.TexturePattern:
@@ -389,8 +244,7 @@ class Graphics(object):
                 color = vals[:3]
 
         elif style == Qt.BrushStyle.LinearGradientPattern:
-            pat = LinearGradientPattern(brush, matrix, pdf, self.page_width_px,
-                                        self.page_height_px)
+            pat = LinearGradientPattern(brush, matrix, pdf, self.page_width_px, self.page_height_px)
             opacity *= pat.const_opacity
         # TODO: Add support for radial/conical gradient fills
 
@@ -402,9 +256,10 @@ class Graphics(object):
             pattern = pdf.add_pattern(pat)
         return color, opacity, pattern, do_fill
 
-    def apply_stroke(self, state, pdf_system, painter):
+    def apply_stroke(self, state: GraphicsState, pdf_system: QTransform, painter: QPainter) -> None:
         # TODO: Support miter limit by using QPainterPathStroker
         pen = state.stroke
+        assert self.pending_state is not None
         self.pending_state.do_stroke = True
         pdf = self.pdf
 
@@ -413,56 +268,57 @@ class Graphics(object):
         if pen.isCosmetic():
             t = painter.transform()
             try:
-                w /= sqrt(t.m11()**2 + t.m22()**2)
+                w /= sqrt(t.m11() ** 2 + t.m22() ** 2)
             except ZeroDivisionError:
                 pass
         pdf.serialize(w)
         pdf.current_page.write(' w ')
 
         # Line cap
-        cap = {Qt.PenCapStyle.FlatCap:0, Qt.PenCapStyle.RoundCap:1, Qt.PenCapStyle.SquareCap:
-               2}.get(pen.capStyle(), 0)
-        pdf.current_page.write('%d J '%cap)
+        cap = {Qt.PenCapStyle.FlatCap: 0, Qt.PenCapStyle.RoundCap: 1, Qt.PenCapStyle.SquareCap: 2}.get(pen.capStyle(), 0)
+        pdf.current_page.write(f'{cap} J ')
 
         # Line join
-        join = {Qt.PenJoinStyle.MiterJoin:0, Qt.PenJoinStyle.RoundJoin:1,
-                Qt.PenJoinStyle.BevelJoin:2}.get(pen.joinStyle(), 0)
-        pdf.current_page.write('%d j '%join)
+        join = {Qt.PenJoinStyle.MiterJoin: 0, Qt.PenJoinStyle.RoundJoin: 1, Qt.PenJoinStyle.BevelJoin: 2}.get(pen.joinStyle(), 0)
+        pdf.current_page.write(f'{join} j ')
 
         # Dash pattern
         if pen.style() == Qt.PenStyle.CustomDashLine:
             pdf.serialize(Array(pen.dashPattern()))
-            pdf.current_page.write(' %d d ' % pen.dashOffset())
+            pdf.current_page.write(f' {pen.dashOffset()} d ')
         else:
-            ps = {Qt.PenStyle.DashLine:[3], Qt.PenStyle.DotLine:[1,2], Qt.PenStyle.DashDotLine:[3,2,1,2],
-                  Qt.PenStyle.DashDotDotLine:[3, 2, 1, 2, 1, 2]}.get(pen.style(), [])
+            ps = {
+                Qt.PenStyle.DashLine: [3],
+                Qt.PenStyle.DotLine: [1, 2],
+                Qt.PenStyle.DashDotLine: [3, 2, 1, 2],
+                Qt.PenStyle.DashDotDotLine: [3, 2, 1, 2, 1, 2],
+            }.get(pen.style(), [])
             pdf.serialize(Array(ps))
             pdf.current_page.write(' 0 d ')
 
         # Stroke fill
         color, opacity, pattern, self.pending_state.do_stroke = self.convert_brush(
-            pen.brush(), state.brush_origin, state.opacity, pdf_system,
-            painter.transform())
+            pen.brush(), state.brush_origin, state.opacity, pdf_system, painter.transform()
+        )
         self.pdf.apply_stroke(color, pattern, opacity)
         if pen.style() == Qt.PenStyle.NoPen:
             self.pending_state.do_stroke = False
 
-    def apply_fill(self, state, pdf_system, painter):
+    def apply_fill(self, state: GraphicsState, pdf_system: QTransform, painter: QPainter) -> None:
+        assert self.pending_state is not None
         self.pending_state.do_fill = True
-        color, opacity, pattern, self.pending_state.do_fill = self.convert_brush(
-            state.fill, state.brush_origin, state.opacity, pdf_system,
-            painter.transform())
+        color, opacity, pattern, self.pending_state.do_fill = self.convert_brush(state.fill, state.brush_origin, state.opacity, pdf_system, painter.transform())
         self.pdf.apply_fill(color, pattern, opacity)
         self.last_fill = self.brushobj
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         self.pdf.save_stack()
 
-    def __exit__(self, *args):
+    def __exit__(self, *args: object) -> None:
         self.pdf.restore_stack()
 
-    def resolve_fill(self, rect, pdf_system, qt_system):
-        '''
+    def resolve_fill(self, rect: QRectF, pdf_system: QTransform, qt_system: QTransform) -> None:
+        """
         Qt's paint system does not update brushOrigin when using
         TexturePatterns and it also uses TexturePatterns to emulate gradients,
         leading to brokenness. So this method allows the paint engine to update
@@ -471,17 +327,19 @@ class Graphics(object):
         border, then QtWebKit generates an image of the rect size - border but
         fills the full rect, and there's no way for the paint engine to know
         that and adjust the brush origin.
-        '''
+        """
         if not hasattr(self, 'last_fill') or not self.current_state.do_fill:
             return
 
-        if isinstance(self.last_fill.brush, TexturePattern):
+        last_fill = self.last_fill
+        assert last_fill is not None
+        if isinstance(last_fill.brush, TexturePattern):
             tl = rect.topLeft()
-            if tl == self.last_fill.origin:
+            if tl == last_fill.origin:
                 return
 
-            matrix = (QTransform.fromTranslate(tl.x(), tl.y()) * pdf_system * qt_system.inverted()[0])
+            matrix = QTransform.fromTranslate(tl.x(), tl.y()) * pdf_system * qt_system.inverted()[0]
 
-            pat = TexturePattern(None, matrix, self.pdf, clone=self.last_fill.brush)
+            pat = TexturePattern(None, matrix, self.pdf, clone=last_fill.brush)
             pattern = self.pdf.add_pattern(pat)
-            self.pdf.apply_fill(self.last_fill.color, pattern)
+            self.pdf.apply_fill(last_fill.color, pattern)

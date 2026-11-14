@@ -1,20 +1,22 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
 
 
-__license__ = 'GPL v3'
-__copyright__ = '2015, Kovid Goyal <kovid at kovidgoyal.net>'
+from typing import TYPE_CHECKING
 
 from calibre.utils.run_tests import find_tests_in_package, run_tests
 
+if TYPE_CHECKING:
+    import unittest
 
-def find_tests():
+
+def find_tests() -> unittest.TestSuite:
     return find_tests_in_package('calibre.srv.tests')
 
 
 if __name__ == '__main__':
     try:
-        import init_calibre  # noqa
+        import init_calibre  # ruff: ignore[unused-import]
     except ImportError:
         pass
     run_tests(find_tests)

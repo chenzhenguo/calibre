@@ -1,29 +1,27 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
 import textwrap
 from math import ceil
+from typing import TYPE_CHECKING, cast
 
-from PyQt5.Qt import (
-    QWidget, Qt, QStaticText, QTextOption, QSize, QPainter, QTimer, QPalette, QEvent, QTextCursor)
+from qt.core import QEvent, QPainter, QPalette, QSize, QStaticText, Qt, QTextCursor, QTextOption, QTimer, QWidget
 
-from calibre import prints, prepare_string_for_xml
+if TYPE_CHECKING:
+    from calibre.gui2.tweak_book.editor.text import TextEdit
+
+from calibre import prepare_string_for_xml, prints
 from calibre.gui2 import error_dialog
 from calibre.gui2.tweak_book.widgets import make_highlighted_text
 from calibre.utils.icu import string_length
-from polyglot.builtins import iteritems
+from calibre.utils.localization import _
 
 
 class ChoosePopupWidget(QWidget):
-
     TOP_MARGIN = BOTTOM_MARGIN = 2
     SIDE_MARGIN = 4
 
-    def __init__(self, parent, max_height=1000):
+    def __init__(self, parent, max_height=1000) -> None:
         QWidget.__init__(self, parent)
 
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -32,7 +30,8 @@ class ChoosePopupWidget(QWidget):
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        self.current_results = self.current_size_hint = None
+        self.current_results: tuple = ()
+        self.current_size_hint = None
 
         self.max_text_length = 0
         self.current_index = -1
@@ -48,11 +47,11 @@ class ChoosePopupWidget(QWidget):
         self.relayout_timer = t = QTimer(self)
         t.setSingleShot(True), t.setInterval(25), t.timeout.connect(self.layout)
 
-    def clear_caches(self):
+    def clear_caches(self) -> None:
         self.rendered_text_cache.clear()
         self.current_size_hint = None
 
-    def set_items(self, items, descriptions=None):
+    def set_items(self, items, descriptions=None) -> None:
         self.current_results = items
         self.current_size_hint = None
         self.descriptions = descriptions or {}
@@ -70,13 +69,15 @@ class ChoosePopupWidget(QWidget):
             text = make_highlighted_text('color: magenta', text, positions)
             desc = self.descriptions.get(otext)
             if desc:
-                text += ' - <i>%s</i>' % prepare_string_for_xml(desc)
+                text += f' - <i>{prepare_string_for_xml(desc)}</i>'
             color = self.palette().color(QPalette.ColorRole.Text).name()
-            text = '<span style="color: %s">%s</span>' % (color, text)
+            text = f'<span style="color: {color}">{text}</span>'
             st = self.rendered_text_cache[otext] = QStaticText(text)
             st.setTextOption(self.text_option)
             st.setTextFormat(Qt.TextFormat.RichText)
-            st.prepare(font=self.parent().font())
+            parent_widget = self.parent()
+            assert isinstance(parent_widget, QWidget)
+            st.prepare(font=parent_widget.font())
         return st
 
     def sizeHint(self):
@@ -84,17 +85,18 @@ class ChoosePopupWidget(QWidget):
             max_width = height = 0
             for text, positions in self.current_results:
                 sz = self.get_static_text(text, positions).size()
-                height += int(ceil(sz.height())) + self.BOTTOM_MARGIN
-                max_width = max(max_width, int(ceil(sz.width())))
+                height += ceil(sz.height()) + self.BOTTOM_MARGIN
+                max_width = max(max_width, ceil(sz.width()))
             self.current_size_hint = QSize(max_width + 2 * self.SIDE_MARGIN, height + self.BOTTOM_MARGIN + self.TOP_MARGIN)
+        assert self.current_size_hint is not None
         return self.current_size_hint
 
     def iter_visible_items(self):
         y = self.TOP_MARGIN
         bottom = self.rect().bottom()
-        for i, (text, positions) in enumerate(self.current_results[self.current_top_index:]):
+        for i, (text, positions) in enumerate(self.current_results[self.current_top_index :]):
             st = self.get_static_text(text, positions)
-            height = self.BOTTOM_MARGIN + int(ceil(st.size().height()))
+            height = self.BOTTOM_MARGIN + ceil(st.size().height())
             if y + height > bottom:
                 break
             yield i + self.current_top_index, st, y, height
@@ -105,15 +107,17 @@ class ChoosePopupWidget(QWidget):
             if top <= y < top + height:
                 return idx
 
-    def paintEvent(self, ev):
+    def paintEvent(self, a0) -> None:
         painter = QPainter(self)
-        painter.setClipRect(ev.rect())
+        painter.setClipRect(a0.rect())
         pal = self.palette()
         painter.fillRect(self.rect(), pal.color(QPalette.ColorRole.Text))
         crect = self.rect().adjusted(1, 1, -1, -1)
         painter.fillRect(crect, pal.color(QPalette.ColorRole.Base))
         painter.setClipRect(crect)
-        painter.setFont(self.parent().font())
+        parent_widget = self.parent()
+        assert isinstance(parent_widget, QWidget)
+        painter.setFont(parent_widget.font())
         width = self.rect().width()
         for i, st, y, height in self.iter_visible_items():
             painter.save()
@@ -122,19 +126,22 @@ class ChoosePopupWidget(QWidget):
                 color = pal.color(QPalette.ColorRole.HighlightedText).name()
                 st = QStaticText(st)
                 text = st.text().partition('>')[2]
-                st.setText('<span style="color: %s">%s' % (color, text))
+                st.setText(f'<span style="color: {color}">{text}')
             painter.drawStaticText(self.SIDE_MARGIN, y, st)
             painter.restore()
         painter.end()
         if self.current_size_hint is None:
             QTimer.singleShot(0, self.layout)
 
-    def layout(self, cursor_rect=None):
-        p = self.parent()
+    def layout(self, cursor_rect=None) -> None:
+        p_raw = self.parent()
+        assert p_raw is not None
+        p = cast('TextEdit', p_raw)
         if cursor_rect is None:
             cursor_rect = p.cursorRect().adjusted(0, 0, 0, 2)
         gutter_width = p.gutter_width
         vp = p.viewport()
+        assert vp is not None
         above = cursor_rect.top() > vp.height() - cursor_rect.bottom()
         max_height = min(self.max_height, (cursor_rect.top() if above else vp.height() - cursor_rect.bottom()) - 15)
         max_width = vp.width() - 25 - gutter_width
@@ -150,7 +157,7 @@ class ChoosePopupWidget(QWidget):
         self.move(left, top)
         self.update()
 
-    def ensure_index_visible(self, index):
+    def ensure_index_visible(self, index) -> None:
         if index < self.current_top_index:
             self.current_top_index = max(0, index)
         else:
@@ -161,30 +168,31 @@ class ChoosePopupWidget(QWidget):
             if i < index:
                 self.current_top_index += index - i
 
-    def show(self):
+    def show(self) -> None:
         if self.current_results:
             self.layout()
             QWidget.show(self)
-            self.raise_()
+            self.raise_without_focus()
 
-    def hide(self):
+    def hide(self) -> None:
         QWidget.hide(self)
         self.relayout_timer.stop()
+
     abort = hide
 
     def activate_current_result(self):
         raise NotImplementedError('You must implement this method in a subclass')
 
-    def handle_keypress(self, ev):
+    def handle_keypress(self, ev) -> bool:
         key = ev.key()
         if key == Qt.Key.Key_Escape:
             self.abort(), ev.accept()
             return True
-        if key == Qt.Key.Key_Tab and not ev.modifiers() & Qt.Modifier.CTRL:
+        if key == Qt.Key.Key_Tab and not ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.choose_next_result(previous=ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             ev.accept()
             return True
-        if key == Qt.Key.Key_Backtab and not ev.modifiers() & Qt.Modifier.CTRL:
+        if key == Qt.Key.Key_Backtab and not ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.choose_next_result(previous=ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             return True
         if key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
@@ -192,92 +200,94 @@ class ChoosePopupWidget(QWidget):
             return True
         return False
 
-    def eventFilter(self, obj, ev):
-        if obj is self.parent() and self.isVisible():
-            etype = ev.type()
+    def eventFilter(self, a0, a1):
+        if a0 is self.parent() and self.isVisible():
+            etype = a1.type()
             if etype == QEvent.Type.KeyPress:
-                ret = self.handle_keypress(ev)
+                ret = self.handle_keypress(a1)
                 if ret:
-                    ev.accept()
+                    a1.accept()
                 return ret
             elif etype == QEvent.Type.Resize:
                 self.relayout_timer.start()
         return False
 
-    def mouseMoveEvent(self, ev):
-        y = ev.pos().y()
+    def mouseMoveEvent(self, a0) -> None:
+        y = a0.pos().y()
         idx = self.index_for_y(y)
         if idx is not None and idx != self.current_index:
             self.current_index = idx
             self.update()
-            ev.accept()
+            a0.accept()
 
-    def mouseReleaseEvent(self, ev):
-        y = ev.pos().y()
+    def mouseReleaseEvent(self, a0) -> None:
+        y = a0.pos().y()
         idx = self.index_for_y(y)
         if idx is not None:
             self.activate_current_result()
             self.hide()
-        ev.accept()
+        a0.accept()
 
-    def choose_next_result(self, previous=False):
+    def choose_next_result(self, previous=False) -> None:
         if self.current_results:
             if previous:
                 if self.current_index == -1:
                     self.current_index = len(self.current_results) - 1
                 else:
                     self.current_index -= 1
+            elif self.current_index == len(self.current_results) - 1:
+                self.current_index = -1
             else:
-                if self.current_index == len(self.current_results) - 1:
-                    self.current_index = -1
-                else:
-                    self.current_index += 1
+                self.current_index += 1
             self.ensure_index_visible(self.current_index)
             self.update()
 
 
 class CompletionPopup(ChoosePopupWidget):
-
-    def __init__(self, parent, max_height=1000):
+    def __init__(self, parent, max_height=1000) -> None:
         ChoosePopupWidget.__init__(self, parent, max_height=max_height)
         self.completion_error_shown = False
 
         self.current_query = self.current_completion = None
 
-    def set_items(self, items, descriptions=None, query=None):
+    def set_items(self, items, descriptions=None, query=None) -> None:
         self.current_query = query
-        ChoosePopupWidget.set_items(self, tuple(iteritems(items)), descriptions=descriptions)
+        ChoosePopupWidget.set_items(self, tuple(items.items()), descriptions=descriptions)
 
-    def choose_next_result(self, previous=False):
+    def choose_next_result(self, previous=False) -> None:
         ChoosePopupWidget.choose_next_result(self, previous=previous)
         self.activate_current_result()
 
-    def activate_current_result(self):
+    def activate_current_result(self) -> None:
         if self.current_completion is not None:
             c = self.current_completion
-            text = self.current_query if self.current_index == -1 else self.current_results[self.current_index][0]
+            text = (self.current_query or '') if self.current_index == -1 else self.current_results[self.current_index][0]
             c.insertText(text)
             chars = string_length(text)
             c.setPosition(c.position() - chars)
             c.setPosition(c.position() + chars, QTextCursor.MoveMode.KeepAnchor)
 
-    def abort(self):
+    def abort(self) -> None:
         ChoosePopupWidget.abort(self)
         self.current_completion = self.current_query = None
 
-    def mark_completion(self, editor, query):
+    def mark_completion(self, editor, query) -> None:
         self.current_completion = c = editor.textCursor()
         chars = string_length(query or '')
         c.setPosition(c.position() - chars), c.setPosition(c.position() + chars, QTextCursor.MoveMode.KeepAnchor)
         self.hide()
 
-    def handle_result(self, result):
+    def handle_result(self, result) -> None:
         if result.traceback:
             prints(result.traceback)
             if not self.completion_error_shown:
-                error_dialog(self, _('Completion failed'), _(
-                    'Failed to get completions, click "Show Details" for more information.'
-                    ' Future errors during completion will be suppressed.'), det_msg=result.traceback, show=True)
+                error_dialog(
+                    self,
+                    _('Completion failed'),
+                    _('Failed to get completions, click "Show details" for more information. Future errors during completion will be suppressed.'),
+                    det_msg=result.traceback,
+                    show=True,
+                )
                 self.completion_error_shown = True
             self.hide()
             return
@@ -295,13 +305,15 @@ class CompletionPopup(ChoosePopupWidget):
 if __name__ == '__main__':
     from calibre.utils.matcher import Matcher
 
-    def test(editor):
+    def test(editor) -> None:
         c = editor.__c = CompletionPopup(editor.editor, max_height=100)
         items = 'a ab abc abcd abcde abcdef abcdefg abcdefgh'.split()
         m = Matcher(items)
-        c.set_items(m('a'), descriptions={x:x for x in items})
+        c.set_items(m('a'), descriptions={x: x for x in items})
         QTimer.singleShot(100, c.show)
+
     from calibre.gui2.tweak_book.editor.widget import launch_editor
+
     raw = textwrap.dedent('''\
     Is the same as saying through shrinking from toil and pain. These
     cases are perfectly simple and easy to distinguish. In a free hour, when

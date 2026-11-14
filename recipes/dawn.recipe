@@ -1,16 +1,21 @@
 from calibre.web.feeds.news import BasicNewsRecipe
 
 
+def classes(classes):
+    q = frozenset(classes.split(' '))
+    return dict(attrs={'class': lambda x: x and frozenset(x.split()).intersection(q)})
+
+
 class DawnRecipe(BasicNewsRecipe):
     __license__ = 'GPL v3'
     __author__ = 'kwetal'
     language = 'en_PK'
     version = 1
 
-    title = u'Dawn'
-    publisher = u'Dawn Media Group'
-    category = u'News, Pakistan'
-    description = u'Leading English Newspaper of Pakistan covering national & international news'
+    title = 'Dawn'
+    publisher = 'Dawn Media Group'
+    category = 'News, Pakistan'
+    description = 'Leading English Newspaper of Pakistan covering national & international news'
 
     use_embedded_content = False
     remove_empty_feeds = True
@@ -20,17 +25,13 @@ class DawnRecipe(BasicNewsRecipe):
     no_stylesheets = True
     remove_javascript = True
     encoding = 'utf-8'
-    keep_only_tags = [
-        dict(name='div', attrs={'class': 'push-half--sides  push--top'}),
-        dict(name='article', attrs={'class': 'story  story--single  push-half'})]
-
+    keep_only_tags = [classes('template__header template__main')]
     # Feeds from
     # http://www.dawn.com/wps/wcm/connect/dawn-content-library/dawn/services/rss
     feeds = []
-    feeds.append((u'Latest News', u'http://feeds.feedburner.com/dawn-news'))
+    feeds.append(('Latest News', 'http://feeds.feedburner.com/dawn-news'))
 
-    conversion_options = {'comments': description, 'tags': category, 'language': 'en',
-                          'publisher': publisher}
+    conversion_options = {'comments': description, 'tags': category, 'language': 'en', 'publisher': publisher}
 
     extra_css = '''
                 body{font-family:verdana,arial,helvetica,geneva,sans-serif;}

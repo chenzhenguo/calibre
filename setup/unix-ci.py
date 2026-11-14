@@ -1,15 +1,18 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2017, Kovid Goyal <kovid at kovidgoyal.net>
 
 
 import glob
+import io
+import lzma
 import os
 import shlex
 import subprocess
 import sys
+import tarfile
 import time
 from tempfile import NamedTemporaryFile
+from urllib.request import Request, urlopen
 
 _plat = sys.platform.lower()
 ismacos = 'darwin' in _plat
@@ -20,18 +23,31 @@ def setenv(key, val):
     os.environ[key] = os.path.expandvars(val)
 
 
-if ismacos:
+def download_with_retry(url: str | Request, count: int = 5) -> bytes:
+    for i in range(count):
+        try:
+            print('Downloading', getattr(url, 'full_url', url), flush=True)
+            with urlopen(url) as f:
+                ans: bytes = f.read()
+            return ans
+        except Exception as err:
+            if getattr(err, 'code', -1) == 403:
+                raise
+            if i >= count - 1:
+                raise
+            print(f'Download failed with error {err} retrying...', file=sys.stderr)
+            time.sleep(1)
+    return b''
 
+
+if ismacos:
     SWBASE = '/Users/Shared/calibre-build/sw'
     SW = SWBASE + '/sw'
 
     def install_env():
         setenv('SWBASE', SWBASE)
         setenv('SW', SW)
-        setenv(
-            'PATH',
-            '$SW/bin:$SW/qt/bin:$SW/python/Python.framework/Versions/2.7/bin:$PWD/node_modules/.bin:$PATH'
-        )
+        setenv('PATH', '$SW/bin:$SW/qt/bin:$SW/python/Python.framework/Versions/2.7/bin:$PWD/node_modules/.bin:$PATH')
         setenv('CFLAGS', '-I$SW/include')
         setenv('LDFLAGS', '-L$SW/lib')
         setenv('QMAKE', '$SW/qt/bin/qmake')
@@ -41,8 +57,9 @@ if ismacos:
         if old:
             old += ':'
         setenv('DYLD_FALLBACK_LIBRARY_PATH', old + '$SW/lib')
-else:
+        setenv('CALIBRE_ESPEAK_DATA_DIR', '$SW/share/espeak-ng-data')
 
+else:
     SWBASE = '/sw'
     SW = SWBASE + '/sw'
 
@@ -51,18 +68,48 @@ else:
         setenv('PATH', '$SW/bin:$PATH')
         setenv('CFLAGS', '-I$SW/include')
         setenv('LDFLAGS', '-L$SW/lib')
-        setenv('LD_LIBRARY_PATH', '$SW/qt/lib:$SW/lib')
+        setenv('LD_LIBRARY_PATH', '$SW/qt/lib:$SW/ffmpeg/lib:$SW/lib')
         setenv('PKG_CONFIG_PATH', '$SW/lib/pkgconfig')
         setenv('QMAKE', '$SW/qt/bin/qmake')
         setenv('CALIBRE_QT_PREFIX', '$SW/qt')
+        setenv('CALIBRE_ESPEAK_DATA_DIR', '$SW/share/espeak-ng-data')
 
 
-def run(*args):
+def do_print_crash_reports() -> None:
+    print('Printing available crash reports...', flush=True)
+    if ismacos:
+        end_time = time.monotonic() + 90
+        while time.monotonic() < end_time:
+            time.sleep(1)
+            items = glob.glob(os.path.join(os.path.expanduser('~/Library/Logs/DiagnosticReports'), 'Python-*.ips'))
+            if items:
+                break
+        if items:
+            time.sleep(1)
+            print(os.path.basename(items[0]), flush=True)
+            sdir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            subprocess.check_call([sys.executable, os.path.join(sdir, '.github', 'workflows', 'macos_crash_report.py'), items[0]])
+    else:
+        run('sh -c "echo bt | coredumpctl debug"')
+    print(flush=True)
+
+
+def run(*args, timeout=1200, print_crash_reports: bool = False):
     if len(args) == 1:
         args = shlex.split(args[0])
-    print(' '.join(args))
-    ret = subprocess.Popen(args).wait()
+    print(' '.join(args), flush=True)
+    p = subprocess.Popen(args)
+    try:
+        ret = p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as err:
+        ret = 1
+        print(err, file=sys.stderr, flush=True)
+        print('Timed out running:', ' '.join(args), flush=True, file=sys.stderr)
+        p.kill()
+
     if ret != 0:
+        if print_crash_reports:
+            do_print_crash_reports()
         raise SystemExit(ret)
 
 
@@ -88,71 +135,232 @@ def download_and_decompress(url, dest, compression=None):
 def install_qt_source_code():
     dest = os.path.expanduser('~/qt-base')
     os.mkdir(dest)
-    download_and_decompress('https://download.qt.io/official_releases/qt/5.15/5.15.0/submodules/qtbase-everywhere-src-5.15.0.tar.xz', dest, 'J')
+    download_and_decompress('https://download.calibre-ebook.com/qtbase-everywhere-src-6.4.2.tar.xz', dest, 'J')
     qdir = glob.glob(dest + '/*')[0]
     os.environ['QT_SRC'] = qdir
 
 
-def run_python(*args):
+def run_python(*args, timeout=1200, print_crash_reports: bool = True):
     python = os.path.expandvars('$SW/bin/python')
     if len(args) == 1:
         args = shlex.split(args[0])
     args = [python] + list(args)
-    return run(*args)
+    run(*args, timeout=timeout, print_crash_reports=print_crash_reports)
+
+
+def runtime_env():
+    """The environment needed to run calibre code, as opposed to merely build it."""
+    os.environ['CI'] = 'true'
+    os.environ['OPENSSL_MODULES'] = os.path.join(SW, 'lib', 'ossl-modules')
+    os.environ['PIPER_TTS_DIR'] = os.path.join(SW, 'piper')
+    # The bundled OpenSSL is deliberately built with an ssl dir that does not exist
+    # on the CI runners, so without this, any HTTPS connection made from calibre code
+    # fails with CERTIFICATE_VERIFY_FAILED. The certs are generated by the cacerts
+    # sub-command of bootstrap, which is run before this.
+    cadir = os.path.abspath('resources/mozilla-ca-certs')
+    if not os.path.isdir(cadir):
+        raise SystemExit(f'The Mozilla CA certs are missing from: {cadir}')
+    os.environ['SSL_CERT_DIR'] = cadir
+    if ismacos:
+        # needed to ensure correct libxml2 is loaded
+        os.environ['DYLD_INSERT_LIBRARIES'] = ':'.join(os.path.join(SW, 'lib', x) for x in 'libxml2.dylib libxslt.dylib libexslt.dylib'.split())
+        os.environ['OPENSSL_ENGINES'] = os.path.join(SW, 'lib', 'engines-3')
+    install_env()
 
 
 def install_linux_deps():
     run('sudo', 'apt-get', 'update', '-y')
     # run('sudo', 'apt-get', 'upgrade', '-y')
-    run('sudo', 'apt-get', 'install', '-y', 'gettext', 'libgl1-mesa-dev')
+    run(
+        'sudo',
+        'apt-get',
+        'install',
+        '-y',
+        'gettext',
+        'libgl1-mesa-dev',
+        'libxkbcommon-dev',
+        'libxkbcommon-x11-dev',
+        'libfreetype-dev',
+        'pulseaudio',
+        'libasound2t64',
+        'libflite1',
+        'libspeechd2',
+        # needed by the Camoufox browser, which is a fork of Firefox
+        'libdbus-glib-1-2',
+        'libgtk-3-0t64',
+    )
+
+
+def get_tx():
+    url = 'https://github.com/transifex/cli/releases/latest/download/tx-linux-amd64.tar.gz'
+    print('Downloading:', url)
+    raw = download_with_retry(url)
+    with tarfile.open(fileobj=io.BytesIO(raw), mode='r') as tf:
+        tf.extract('tx', filter='fully_trusted')
+
+
+def install_grype(exe: str = '/tmp/grype') -> str:
+    raw = download_with_retry('https://download.calibre-ebook.com/ci/grype.xz')
+    raw = lzma.decompress(raw)
+    with open(exe, 'wb') as f:
+        f.write(raw)
+        os.fchmod(f.fileno(), 0o755)
+    subprocess.check_call([exe, 'db', 'update'])
+    return exe
+
+
+IGNORED_DEPENDENCY_CVES = [
+    # python stdlib all these are erroneously marked as fixed in python 3.15
+    # when it hasnt even been released. Sigh.
+    'CVE-2026-1299',
+    'CVE-2026-0865',
+    'CVE-2026-0672',
+    'CVE-2025-15282',
+    'CVE-2025-15366',
+    'CVE-2025-15367',
+    'CVE-2025-12781',
+    'CVE-2025-11468',
+    'CVE-2026-2297',
+    'CVE-2026-3644',
+    'CVE-2026-1502',
+    'CVE-2026-4224',  # expat parser unused
+    'CVE-2026-4519',  # webbrowser() unused
+    'CVE-2026-7210',  # DoS in unused XML parser
+    'CVE-2026-3276',  # DoS in unicodedata.normalize()
+    'CVE-2026-7774',  # tarfile.data_filter path traversal bypass
+    'CVE-2026-12003',  # bug in release builds irrelevant to us
+    'CVE-2026-15308',  # bug in stdlib html parser unused by us
+    'CVE-2026-11940',  # tarfile, unused
+    'CVE-2026-11972',  # tarfile, unused
+    'CVE-2026-0864',  # configparser unused
+    'CVE-2026-17084',  # idna encoding, unused
+    'CVE-2026-15806',  # HTTPPasswordMgr unused
+    'CVE-2026-15310',  # DoS in unzip
+    'CVE-2026-87910',  # tarfile extract on systems without links irrelevant
+    'CVE-2026-12345',  # tempfile.TemporaryDirectory cleanup symlink attack
+    'CVE-2026-103995',  # http response header parsing in stdlib, inapplicable
+    'CVE-2026-116566',  # getaddrinfo null bytes, utterly irrelevant
+    'CVE-2026-119170',  # openssl fips mode inapplicable
+    # libtiff
+    'CVE-2025-8851',  # this is erroneously marked as fixed in the database but no release of libtiff has been made with the fix
+    # hyphen
+    'CVE-2017-1000376',  # false match in the database
+    # espeak
+    'CVE-2023-4990',  # false match because we currently build with a specific commit pending release of espeak 1.53
+]
+IGNORED_DEPENDENCY_PACKAGES = [
+    'nodejs',  # only used at build time
+    'ffmpeg',  # cannot be updated till we update Qt
+]
+
+
+LINUX_BUNDLE = 'linux-64'
+MACOS_BUNDLE = 'macos-64'
+WINDOWS_BUNDLE = 'windows-64'
+
+
+def install_bundle(dest=SW, which=''):
+    run('sudo', 'mkdir', '-p', dest)
+    run('sudo', 'chown', '-R', os.environ['USER'], SWBASE)
+    tball = which or (MACOS_BUNDLE if ismacos else LINUX_BUNDLE)
+    download_and_decompress(f'https://download.calibre-ebook.com/ci/calibre7/{tball}.tar.xz', dest)
+
+
+def check_dependencies() -> None:
+    dest = os.path.join(SW, LINUX_BUNDLE)
+    install_bundle(dest, os.path.basename(dest))
+    dest = os.path.join(SW, MACOS_BUNDLE)
+    install_bundle(dest, os.path.basename(dest))
+    dest = os.path.join(SW, WINDOWS_BUNDLE)
+    install_bundle(dest, os.path.basename(dest))
+    grype = install_grype()
+    with open((gc := os.path.expanduser('~/.grype.yml')), 'w') as f:
+        print('ignore:', file=f)
+        for x in IGNORED_DEPENDENCY_CVES:
+            print('  - vulnerability:', x, file=f)
+        for x in IGNORED_DEPENDENCY_PACKAGES:
+            print('  - package:', file=f)
+            print(f'      name: {x}', file=f)
+    cmdline = [grype, '--by-cve', '--config', gc, '--fail-on', 'medium', '--only-fixed', '--add-cpes-if-none']
+    # disable testing against dir as it raises false positives on sqlite
+    # embedded in dependencies we dont use at runtime
+    # print('Testing against the bundle directories', flush=True)
+    # if (cp := subprocess.run(cmdline + ['dir:' + SW])).returncode != 0:
+    #     raise SystemExit(cp.returncode)
+    # Test against the SBOM
+    print('Testing against the SBOM', flush=True)
+    import runpy
+
+    orig = sys.argv, sys.stdout
+    sys.argv = ['bypy', 'sbom', 'kovidgoyal/calibre', '1.0.0']
+    buf = io.StringIO()
+    sys.stdout = buf
+    runpy.run_path('bypy-src')
+    sys.argv, sys.stdout = orig
+    print(buf.getvalue())
+    if (cp := subprocess.run(cmdline, input=buf.getvalue().encode())).returncode != 0:
+        raise SystemExit(cp.returncode)
 
 
 def main():
+    action = sys.argv[1]
+
+    if action == 'install':
+        # WebEngine is flaky in macOS CI so install rapydscript so bootstrap wont fail
+        import sysconfig
+
+        run(sys.executable, '-m', 'pip', 'install', 'rapydscript-ng')
+        with open(os.environ['GITHUB_PATH'], 'a') as f:
+            print(sysconfig.get_path('scripts'), file=f)
+
     if iswindows:
         import runpy
+
         m = runpy.run_path('setup/win-ci.py')
         return m['main']()
-    action = sys.argv[1]
-    if action == 'install':
-        run('sudo', 'mkdir', '-p', SW)
-        run('sudo', 'chown', '-R', os.environ['USER'], SWBASE)
 
-        tball = 'macos-64' if ismacos else 'linux-64'
-        download_and_decompress(
-            'https://download.calibre-ebook.com/ci/calibre3/{}.tar.xz'.format(tball), SW
-        )
+    if action == 'install':
+        install_bundle()
         if not ismacos:
             install_linux_deps()
 
     elif action == 'bootstrap':
+        run('rapydscript', '--version')
         install_env()
         run_python('setup.py bootstrap --ephemeral')
+
+    elif action == 'check-dependencies':
+        check_dependencies()
 
     elif action == 'pot':
         transifexrc = '''\
 [https://www.transifex.com]
-api_hostname = https://api.transifex.com
+api_hostname  = https://api.transifex.com
+rest_hostname = https://rest.api.transifex.com
 hostname = https://www.transifex.com
 password = PASSWORD
+token = PASSWORD
 username = api
 '''.replace('PASSWORD', os.environ['tx'])
         with open(os.path.expanduser('~/.transifexrc'), 'w') as f:
             f.write(transifexrc)
         install_qt_source_code()
         install_env()
-        run(sys.executable, '-m', 'pip', 'install', 'transifex-client')
-        run(sys.executable, 'setup.py', 'pot')
-    elif action == 'test':
-        os.environ['CI'] = 'true'
-        if ismacos:
-            os.environ['SSL_CERT_FILE'] = os.path.abspath(
-                'resources/mozilla-ca-certs.pem')
+        get_tx()
+        os.environ['TX'] = os.path.abspath('tx')
+        run(sys.executable, 'setup.py', 'pot', timeout=30 * 60)
+    elif action == 'browser-deps':
+        runtime_env()
+        # Hundreds of megabytes of browser, so allow plenty of time for it
+        run_python('setup.py browser_deps', timeout=1800, print_crash_reports=False)
 
-        install_env()
+    elif action == 'test':
+        runtime_env()
         run_python('setup.py test')
-        run_python('setup.py test_rs')
+        if not ismacos:  # webengine is flaky on macOS
+            run_python('setup.py test_rs')
     else:
-        raise SystemExit('Unknown action: {}'.format(action))
+        raise SystemExit(f'Unknown action: {action}')
 
 
 if __name__ == '__main__':

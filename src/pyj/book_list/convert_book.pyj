@@ -6,12 +6,11 @@ from elementmaker import E
 from gettext import gettext as _
 
 from ajax import ajax, ajax_send
-from book_list.book_details import report_load_failure
 from book_list.conversion_widgets import create_option_group, entry_points, commit_changes
 from book_list.library_data import download_url, load_status, url_books_query
 from book_list.router import back, open_book, report_a_load_failure
 from book_list.top_bar import create_top_bar, set_title
-from book_list.ui import set_panel_handler
+from book_list.ui import report_load_failure, set_panel_handler
 from dom import add_extra_css, build_rule, clear
 from modals import error_dialog
 from utils import conditional_timeout, human_readable, parse_url_params
@@ -22,7 +21,7 @@ current_state = 'initializing'
 overall_container_id = None
 initializers = {}
 
-add_extra_css(def():
+add_extra_css(def ():
     sel = '.' + CLASS_NAME + ' '
     style = build_rule(sel, padding='1ex 1rem')
     style += build_rule(sel + 'h3', margin_bottom='1ex')
@@ -33,7 +32,7 @@ add_extra_css(def():
 
 
 conversion_data = None
-conversion_data_load_status = {'loading':True, 'ok':False, 'error_html':None, 'current_fetch':None}
+conversion_data_load_status = {'loading': True, 'ok': False, 'error_html': None, 'current_fetch': None}
 
 
 def container_for_current_state():
@@ -43,7 +42,6 @@ def container_for_current_state():
 
 
 def create_converted_markup():
-
     def init(container):
         clear(container)
         container.appendChild(E.h3('Conversion successful!'))
@@ -212,7 +210,7 @@ def create_configuring_markup():
     tcell = 'display: table-cell; padding-top: 1em; padding-left: 1em'
 
     start_conv = E.div(
-        style='border-bottom: solid 1px currentColor; margin-bottom: 1em',
+        style='border-bottom: var(--calibre-border-style); margin-bottom: 1em',
         E.div(
             E.label(
                 style='display: table-row',
@@ -351,12 +349,23 @@ def create_configure_group_markup():
         elif g is 'output_fmt':
             g = conversion_data.conversion_options.output_plugin_name
             ui_data = conversion_data.conversion_options.output_ui_data
-        create_option_group(g, ui_data, conversion_data.profiles, container, get_option_value, get_option_default_value, is_option_disabled, get_option_help, on_close)
+        create_option_group(
+            g,
+            ui_data,
+            conversion_data.profiles,
+            container,
+            get_option_value,
+            get_option_default_value,
+            is_option_disabled,
+            get_option_help,
+            on_close
+        )
 
     return ans, init
 
 
 # Initialization {{{
+
 
 def on_data_loaded(end_type, xhr, ev):
     nonlocal conversion_data
@@ -479,5 +488,6 @@ def init(container_id):
     enable_escape_key(container, on_close.bind(None, container_id))
 
 
-set_panel_handler('convert_book', init)
-# }}}
+def set_panel_handlers():
+    set_panel_handler('convert_book', init)
+    # }}}

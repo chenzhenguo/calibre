@@ -1,48 +1,71 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2011, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-import unittest, os, shutil, tempfile, atexit, gc, time
+import gc
+import os
+import shutil
+import tempfile
+import unittest
 from functools import partial
 from io import BytesIO
-from polyglot.builtins import map, unicode_type
+from typing import TYPE_CHECKING
+
+from calibre.constants import iswindows
+from calibre.utils.resources import get_image_path as I
+
+if TYPE_CHECKING:
+    from collections.abc import Container
+
+    from calibre.db.cache import Cache
+    from calibre.db.legacy import LibraryDatabase
+    from calibre.ebooks.metadata.book.base import Metadata
+    from calibre.library.database2 import LibraryDatabase2
 
 rmtree = partial(shutil.rmtree, ignore_errors=True)
 
-IMG = b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00\xff\xe1\x00\x16Exif\x00\x00II*\x00\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xdb\x00C\x00\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\xff\xdb\x00C\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01"\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00\x15\x00\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\n\xff\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xc4\x00\x14\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xc4\x00\x14\x11\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00?\x00\xbf\x80\x01\xff\xd9'  # noqa {{{ }}}
+IMG = b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00\xff\xe1\x00\x16Exif\x00\x00II*\x00\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xdb\x00C\x00\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\xff\xdb\x00C\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01"\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00\x15\x00\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\n\xff\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xc4\x00\x14\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xc4\x00\x14\x11\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00?\x00\xbf\x80\x01\xff\xd9'  # ruff: ignore[line-too-long]
 
 
 class BaseTest(unittest.TestCase):
-
     longMessage = True
     maxDiff = None
 
-    def setUp(self):
+    def setUp(self) -> None:
         from calibre.utils.recycle_bin import nuke_recycle
+
         nuke_recycle()
+        self.paths_to_remove = []
+        self.objects_to_close = []
         self.library_path = self.mkdtemp()
         self.create_db(self.library_path)
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         from calibre.utils.recycle_bin import restore_recyle
-        restore_recyle()
-        gc.collect(), gc.collect()
-        try:
-            shutil.rmtree(self.library_path)
-        except EnvironmentError:
-            # Try again in case something transient has a file lock on windows
-            gc.collect(), gc.collect()
-            time.sleep(2)
-            shutil.rmtree(self.library_path)
 
-    def create_db(self, library_path):
+        restore_recyle()
+        for x in self.objects_to_close:
+            x.close()
+        self.objects_to_close = []
+        gc.collect(), gc.collect()
+        for x in self.paths_to_remove:
+            try:
+                shutil.rmtree(x)
+            except OSError:
+                if iswindows:
+                    import atexit
+
+                    atexit.register(shutil.rmtree, x)
+                else:
+                    import time
+
+                    time.sleep(1)
+                    shutil.rmtree(x)
+
+    def create_db(self, library_path: str) -> str:
         from calibre.library.database2 import LibraryDatabase2
+
         if LibraryDatabase2.exists_at(library_path):
-            raise ValueError('A library already exists at %r'%library_path)
+            raise ValueError(f'A library already exists at {library_path!r}')
         src = os.path.join(os.path.dirname(__file__), 'metadata.db')
         dest = os.path.join(library_path, 'metadata.db')
         shutil.copyfile(src, dest)
@@ -55,61 +78,75 @@ class BaseTest(unittest.TestCase):
         db.conn.close()
         return dest
 
-    def init_cache(self, library_path=None):
+    def init_cache(self, library_path: str | None = None) -> Cache:
         from calibre.db.backend import DB
         from calibre.db.cache import Cache
+
         backend = DB(library_path or self.library_path)
         cache = Cache(backend)
         cache.init()
+        self.objects_to_close.append(cache)
         return cache
 
-    def mkdtemp(self):
+    def mkdtemp(self) -> str:
         ans = tempfile.mkdtemp(prefix='db_test_')
-        atexit.register(rmtree, ans)
+        self.paths_to_remove.append(ans)
         return ans
 
-    def init_old(self, library_path=None):
+    def init_old(self, library_path: str | None = None) -> LibraryDatabase2:
         from calibre.library.database2 import LibraryDatabase2
-        return LibraryDatabase2(library_path or self.library_path)
 
-    def init_legacy(self, library_path=None):
+        ans = LibraryDatabase2(library_path or self.library_path)
+        self.objects_to_close.append(ans)
+        return ans
+
+    def init_legacy(self, library_path: str | None = None) -> LibraryDatabase:
         from calibre.db.legacy import LibraryDatabase
-        return LibraryDatabase(library_path or self.library_path)
 
-    def clone_library(self, library_path):
+        ans = LibraryDatabase(library_path or self.library_path)
+        self.objects_to_close.append(ans)
+        return ans
+
+    def clone_library(self, library_path: str) -> str:
         if not hasattr(self, 'clone_dir'):
             self.clone_dir = tempfile.mkdtemp()
-            atexit.register(rmtree, self.clone_dir)
+            self.paths_to_remove.append(self.clone_dir)
             self.clone_count = 0
         self.clone_count += 1
-        dest = os.path.join(self.clone_dir, unicode_type(self.clone_count))
+        dest = os.path.join(self.clone_dir, str(self.clone_count))
         shutil.copytree(library_path, dest)
         return dest
 
     @property
-    def cloned_library(self):
+    def cloned_library(self) -> str:
         return self.clone_library(self.library_path)
 
-    def compare_metadata(self, mi1, mi2, exclude=()):
+    def compare_metadata(self, mi1: Metadata, mi2: Metadata, exclude: Container[str] = ()) -> None:
         allfk1 = mi1.all_field_keys()
         allfk2 = mi2.all_field_keys()
         self.assertEqual(allfk1, allfk2)
 
-        all_keys = {'format_metadata', 'id', 'application_id',
-                    'author_sort_map', 'author_link_map', 'book_size',
-                    'ondevice_col', 'last_modified', 'has_cover',
-                    'cover_data'}.union(allfk1)
+        all_keys = {
+            'format_metadata',
+            'id',
+            'application_id',
+            'author_sort_map',
+            'link_maps',
+            'book_size',
+            'ondevice_col',
+            'last_modified',
+            'has_cover',
+            'cover_data',
+        }.union(allfk1)
         for attr in all_keys:
             if attr in {'user_metadata', 'book_size', 'ondevice_col', 'db_approx_formats'} or attr in exclude:
                 continue
             attr1, attr2 = getattr(mi1, attr), getattr(mi2, attr)
             if attr == 'formats':
-                attr1, attr2 = map(lambda x:tuple(x) if x else (), (attr1, attr2))
+                attr1, attr2 = (tuple(x) if x else () for x in (attr1, attr2))
             if isinstance(attr1, (tuple, list)) and 'authors' not in attr and 'languages' not in attr:
                 attr1, attr2 = set(attr1), set(attr2)
-            self.assertEqual(attr1, attr2,
-                    '%s not the same: %r != %r'%(attr, attr1, attr2))
+            self.assertEqual(attr1, attr2, f'{attr} not the same: {attr1!r} != {attr2!r}')
             if attr.startswith('#') and attr + '_index' not in exclude:
                 attr1, attr2 = mi1.get_extra(attr), mi2.get_extra(attr)
-                self.assertEqual(attr1, attr2,
-                    '%s {#extra} not the same: %r != %r'%(attr, attr1, attr2))
+                self.assertEqual(attr1, attr2, f'{attr} {{#extra}} not the same: {attr1!r} != {attr2!r}')

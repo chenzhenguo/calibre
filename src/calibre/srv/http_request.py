@@ -1,31 +1,46 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2015, Kovid Goyal <kovid at kovidgoyal.net>'
-
+import http.client
 import re
-from io import BytesIO, DEFAULT_BUFFER_SIZE
+import reprlib
+from io import DEFAULT_BUFFER_SIZE, BytesIO
+from typing import IO, TYPE_CHECKING
 
 from calibre import as_unicode, force_unicode
 from calibre.ptempfile import SpooledTemporaryFile
 from calibre.srv.errors import HTTPSimpleResponse
-from calibre.srv.loop import Connection, READ, WRITE
-from calibre.srv.utils import MultiDict, HTTP1, HTTP11, Accumulator
-from polyglot import http_client, reprlib
+from calibre.srv.loop import READ, WRITE, Connection
+from calibre.srv.utils import HTTP1, HTTP11, Accumulator, MultiDict, connection_header_tokens, header_as_str
+from polyglot.builtins import error_message
 from polyglot.urllib import unquote
-from polyglot.builtins import error_message, filter
 
-protocol_map = {(1, 0):HTTP1, (1, 1):HTTP11}
-quoted_slash = re.compile(br'%2[fF]')
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
+    from calibre.srv.http_response import RequestData, StaticOutput
+    from calibre.srv.loop import ConnectionEvent
+    from calibre.srv.utils import TranslatorCache
+    from calibre.utils.speedups import ReadOnlyFileBuffer
+
+    # Request headers. The values of headers not in decoded_headers are bytes
+    # if they are not valid UTF-8
+    type InHeaders = MultiDict[str | bytes]
+    # A file like object whose contents are written to the socket
+    type OutputBuffer = IO[bytes] | ReadOnlyFileBuffer
+
+protocol_map = {(1, 0): HTTP1, (1, 1): HTTP11}
+quoted_slash = re.compile(rb'%2[fF]')
+# RFC 9112: chunk-size = 1*HEXDIG. Note that int(x, 16) is too lenient as it
+# also accepts signs, underscores, whitespace and a 0x prefix.
+chunk_size_pat = re.compile(rb'[0-9a-fA-F]+')
 HTTP_METHODS = {'HEAD', 'GET', 'PUT', 'POST', 'TRACE', 'DELETE', 'OPTIONS'}
 
 # Parse URI {{{
 
 
-def parse_request_uri(uri):
-    """Parse a Request-URI into (scheme, authority, path).
+def parse_request_uri(uri: bytes) -> tuple[bytes | None, bytes | None, bytes | None]:
+    '''Parse a Request-URI into (scheme, authority, path).
 
     Note that Request-URI's must be one of::
 
@@ -43,7 +58,7 @@ def parse_request_uri(uri):
         path_segments = segment *( "/" segment )
         segment       = *pchar *( ";" param )
         param         = *pchar
-    """
+    '''
     if uri == b'*':
         return None, None, uri
 
@@ -53,7 +68,7 @@ def parse_request_uri(uri):
         # If there's a scheme (and it must be http or https), then:
         # http_URL = "http:" "//" host [ ":" port ] [ abs_path [ "?" query
         # ]]
-        scheme, remainder = uri[:i].lower(), uri[i + 3:]
+        scheme, remainder = uri[:i].lower(), uri[i + 3 :]
         authority, path = remainder.partition(b'/')[::2]
         path = b'/' + path
         return scheme, authority, path
@@ -66,56 +81,83 @@ def parse_request_uri(uri):
         return None, uri, None
 
 
-def parse_uri(uri, parse_query=True, unquote_func=unquote):
+def parse_uri(
+    uri: bytes, parse_query: bool = True, unquote_func: Callable[[bytes], bytes] = unquote
+) -> tuple[str | None, tuple[str, ...], MultiDict[str] | None]:
     scheme, authority, path = parse_request_uri(uri)
     if path is None:
-        raise HTTPSimpleResponse(http_client.BAD_REQUEST, "No path component")
+        raise HTTPSimpleResponse(http.client.BAD_REQUEST, 'No path component')
     if b'#' in path:
-        raise HTTPSimpleResponse(http_client.BAD_REQUEST, "Illegal #fragment in Request-URI.")
+        raise HTTPSimpleResponse(http.client.BAD_REQUEST, 'Illegal #fragment in Request-URI.')
 
+    decoded_scheme = None
     if scheme:
         try:
-            scheme = scheme.decode('ascii')
+            decoded_scheme = scheme.decode('ascii')
         except ValueError:
-            raise HTTPSimpleResponse(http_client.BAD_REQUEST, 'Un-decodeable scheme')
+            raise HTTPSimpleResponse(http.client.BAD_REQUEST, 'Un-decodeable scheme')
 
     path, qs = path.partition(b'?')[::2]
     if parse_query:
         try:
             query = MultiDict.create_from_query_string(qs)
         except Exception:
-            raise HTTPSimpleResponse(http_client.BAD_REQUEST, 'Unparseable query string')
+            raise HTTPSimpleResponse(http.client.BAD_REQUEST, 'Unparsable query string')
     else:
         query = None
 
     try:
         path = '%2F'.join(unquote_func(x).decode('utf-8') for x in quoted_slash.split(path))
     except ValueError as e:
-        raise HTTPSimpleResponse(http_client.BAD_REQUEST, as_unicode(e))
+        raise HTTPSimpleResponse(http.client.BAD_REQUEST, as_unicode(e))
     path = tuple(filter(None, (x.replace('%2F', '/') for x in path.split('/'))))
 
-    return scheme, path, query
-# }}}
+    return decoded_scheme, path, query
 
+
+# }}}
 
 # HTTP Header parsing {{{
 comma_separated_headers = {
-    'Accept', 'Accept-Charset', 'Accept-Encoding',
-    'Accept-Language', 'Accept-Ranges', 'Allow', 'Cache-Control',
-    'Connection', 'Content-Encoding', 'Content-Language', 'Expect',
-    'If-Match', 'If-None-Match', 'Pragma', 'Proxy-Authenticate', 'TE',
-    'Trailer', 'Transfer-Encoding', 'Upgrade', 'Vary', 'Via', 'Warning',
+    'Accept',
+    'Accept-Charset',
+    'Accept-Encoding',
+    'Accept-Language',
+    'Accept-Ranges',
+    'Allow',
+    'Cache-Control',
+    'Connection',
+    'Content-Encoding',
+    'Content-Language',
+    'Expect',
+    'If-Match',
+    'If-None-Match',
+    'Pragma',
+    'Proxy-Authenticate',
+    'TE',
+    'Trailer',
+    'Transfer-Encoding',
+    'Upgrade',
+    'Vary',
+    'Via',
+    'Warning',
 }
 
 decoded_headers = {
-    'Transfer-Encoding', 'Keep-Alive', 'Expect', 'WWW-Authenticate', 'Authorization',
-    'Sec-WebSocket-Key', 'Sec-WebSocket-Version', 'Sec-WebSocket-Protocol',
+    'Transfer-Encoding',
+    'Keep-Alive',
+    'Expect',
+    'WWW-Authenticate',
+    'Authorization',
+    'Sec-WebSocket-Key',
+    'Sec-WebSocket-Version',
+    'Sec-WebSocket-Protocol',
 } | comma_separated_headers
 
 uppercase_headers = {'WWW', 'TE'}
 
 
-def normalize_header_name(name):
+def normalize_header_name(name: str) -> str:
     parts = [x.capitalize() for x in name.split('-')]
     q = parts[0].upper()
     if q in uppercase_headers:
@@ -125,31 +167,31 @@ def normalize_header_name(name):
     return '-'.join(parts)
 
 
-class HTTPHeaderParser(object):
-
-    '''
+class HTTPHeaderParser:
+    """
     Parse HTTP headers. Use this class by repeatedly calling the created object
     with a single line at a time and checking the finished attribute. Can raise ValueError
     for malformed headers, in which case you should probably return BAD_REQUEST.
 
     Headers which are repeated are folded together using a comma if their
     specification so dictates.
-    '''
-    __slots__ = ('hdict', 'lines', 'finished')
+    """
 
-    def __init__(self):
-        self.hdict = MultiDict()
-        self.lines = []
+    __slots__ = ('finished', 'hdict', 'lines')
+
+    def __init__(self) -> None:
+        self.hdict: InHeaders = MultiDict()
+        self.lines: list[bytes] = []
         self.finished = False
 
-    def push(self, *lines):
+    def push(self, *lines: bytes) -> None:
         for line in lines:
             self(line)
 
-    def __call__(self, line):
-        'Process a single line'
+    def __call__(self, line: bytes) -> None:
+        "Process a single line"
 
-        def safe_decode(hname, value):
+        def safe_decode(hname: str, value: bytes) -> str | bytes:
             try:
                 return value.decode('utf-8')
             except UnicodeDecodeError:
@@ -157,7 +199,7 @@ class HTTPHeaderParser(object):
                     raise
             return value
 
-        def commit():
+        def commit() -> None:
             if not self.lines:
                 return
             line = b' '.join(self.lines)
@@ -166,12 +208,13 @@ class HTTPHeaderParser(object):
             k, v = line.partition(b':')[::2]
             key = normalize_header_name(k.strip().decode('ascii'))
             val = safe_decode(key, v.strip())
-            if not key or not val:
-                raise ValueError('Malformed header line: %s' % reprlib.repr(line))
+            if not key:
+                raise ValueError(f'Malformed header line: {reprlib.repr(line)}')
             if key in comma_separated_headers:
                 existing = self.hdict.pop(key)
                 if existing is not None:
-                    val = existing + ', ' + val
+                    # comma separated headers are always decoded to str
+                    val = header_as_str(existing) + ', ' + header_as_str(val)
             self.hdict[key] = val
 
         if self.finished:
@@ -193,28 +236,60 @@ class HTTPHeaderParser(object):
             self.lines.append(line)
 
 
-def read_headers(readline):
+def read_headers(readline: Callable[[], bytes]) -> InHeaders:
     p = HTTPHeaderParser()
     while not p.finished:
         p(readline())
     return p.hdict
+
+
 # }}}
 
 
+def parse_content_length(values: Iterable[str | bytes]) -> int:
+    ans = None
+    for value in values:
+        try:
+            if isinstance(value, bytes):
+                raw = value.strip()
+            else:
+                raw = value.strip().encode('ascii')
+        except UnicodeEncodeError:
+            raise ValueError('Content-Length is not a valid decimal integer')
+        if not raw.isdigit():
+            raise ValueError('Content-Length is not a valid decimal integer')
+        val = int(raw)
+        if ans is None:
+            ans = val
+        elif val != ans:
+            raise ValueError('Conflicting Content-Length headers')
+    return 0 if ans is None else ans
+
+
 class HTTPRequest(Connection):
+    request_handler: Callable[[RequestData], object] | None = None
+    static_cache: dict[str, StaticOutput] | None = None
+    translator_cache: TranslatorCache | None = None
 
-    request_handler = None
-    static_cache = None
-    translator_cache = None
+    # Set by connection_ready() and parse_request_line()
+    method: str | None
+    request_line: bytes | None
+    response_protocol: str
+    request_protocol: str
+    scheme: str | None
+    path: tuple[str, ...] | None
+    query: MultiDict[str] | None
+    close_after_response: bool
+    header_line_too_long_error_code: int
 
-    def __init__(self, *args, **kwargs):
-        Connection.__init__(self, *args, **kwargs)
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        Connection.__init__(self, *args, **kwargs)  # ty: ignore[invalid-argument-type]
         self.max_header_line_size = int(1024 * self.opts.max_header_line_size)
         self.max_request_body_size = int(1024 * 1024 * self.opts.max_request_body_size)
-        self.forwarded_for = None
-        self.request_original_uri = None
+        self.forwarded_for: str | bytes | None = None
+        self.request_original_uri: bytes | None = None
 
-    def read(self, buf, endpos):
+    def read(self, buf: IO[bytes], endpos: int) -> bool:
         size = endpos - buf.tell()
         if size > 0:
             data = self.recv(size)
@@ -226,7 +301,7 @@ class HTTPRequest(Connection):
         else:
             return True
 
-    def readline(self, buf):
+    def readline(self, buf: Accumulator) -> bytes | None:
         line = self.read_buffer.readline()
         buf.append(line)
         if buf.total_length > self.max_header_line_size:
@@ -235,25 +310,25 @@ class HTTPRequest(Connection):
         if line.endswith(b'\n'):
             line = buf.getvalue()
             if not line.endswith(b'\r\n'):
-                self.simple_response(http_client.BAD_REQUEST, 'HTTP requires CRLF line terminators')
+                self.simple_response(http.client.BAD_REQUEST, 'HTTP requires CRLF line terminators')
                 return
             return line
         if not line:
             # read buffer is empty, fill it
             self.fill_read_buffer()
 
-    def connection_ready(self):
-        'Become ready to read an HTTP request'
+    def connection_ready(self) -> None:
+        "Become ready to read an HTTP request"
         self.method = self.request_line = None
         self.response_protocol = self.request_protocol = HTTP1
         self.forwarded_for = None
         self.path = self.query = None
         self.close_after_response = False
-        self.header_line_too_long_error_code = http_client.REQUEST_URI_TOO_LONG
+        self.header_line_too_long_error_code = http.client.REQUEST_URI_TOO_LONG
         self.response_started = False
         self.set_state(READ, self.parse_request_line, Accumulator(), first=True)
 
-    def parse_request_line(self, buf, event, first=False):  # {{{
+    def parse_request_line(self, buf: Accumulator, event: ConnectionEvent, first: bool = False) -> None:  # {{{
         line = self.readline(buf)
         if line is None:
             return
@@ -262,7 +337,7 @@ class HTTPRequest(Connection):
             # Ignore a single leading empty line, as per RFC 2616 sec 4.1
             if first:
                 return self.set_state(READ, self.parse_request_line, Accumulator())
-            return self.simple_response(http_client.BAD_REQUEST, 'Multiple leading empty lines not allowed')
+            return self.simple_response(http.client.BAD_REQUEST, 'Multiple leading empty lines not allowed')
 
         try:
             method, uri, req_protocol = line.strip().split(b' ', 2)
@@ -270,152 +345,166 @@ class HTTPRequest(Connection):
             rp = int(req_protocol[5]), int(req_protocol[7])
             self.method = method.decode('ascii').upper()
         except Exception:
-            return self.simple_response(http_client.BAD_REQUEST, "Malformed Request-Line")
+            return self.simple_response(http.client.BAD_REQUEST, 'Malformed Request-Line')
 
         if self.method not in HTTP_METHODS:
-            return self.simple_response(http_client.BAD_REQUEST, "Unknown HTTP method")
+            return self.simple_response(http.client.BAD_REQUEST, 'Unknown HTTP method')
 
         try:
             self.request_protocol = protocol_map[rp]
         except KeyError:
-            return self.simple_response(http_client.HTTP_VERSION_NOT_SUPPORTED)
+            return self.simple_response(http.client.HTTP_VERSION_NOT_SUPPORTED)
         self.response_protocol = protocol_map[min((1, 1), rp)]
         self.request_original_uri = uri
         try:
             self.scheme, self.path, self.query = parse_uri(uri)
         except HTTPSimpleResponse as e:
             return self.simple_response(e.http_code, error_message(e), close_after_response=False)
-        self.header_line_too_long_error_code = http_client.REQUEST_ENTITY_TOO_LARGE
+        self.header_line_too_long_error_code = http.client.REQUEST_ENTITY_TOO_LARGE
         self.set_state(READ, self.parse_header_line, HTTPHeaderParser(), Accumulator())
+
     # }}}
 
     @property
-    def state_description(self):
-        return 'State: %s Client: %s:%s Request: %s' % (
+    def state_description(self) -> str:
+        return 'State: {} Client: {}:{} Request: {}'.format(
             getattr(self.handle_event, '__name__', None),
-            self.remote_addr, self.remote_port,
-            force_unicode(getattr(self, 'request_line', 'WebSocketConnection'), 'utf-8'))
+            self.remote_addr,
+            self.remote_port,
+            force_unicode(getattr(self, 'request_line', 'WebSocketConnection'), 'utf-8'),
+        )
 
-    def parse_header_line(self, parser, buf, event):
+    def parse_header_line(self, parser: HTTPHeaderParser, buf: Accumulator, event: ConnectionEvent) -> None:
         line = self.readline(buf)
         if line is None:
             return
         try:
             parser(line)
         except ValueError:
-            self.simple_response(http_client.BAD_REQUEST, 'Failed to parse header line')
+            self.simple_response(http.client.BAD_REQUEST, 'Failed to parse header line')
             return
         if parser.finished:
             self.finalize_headers(parser.hdict)
 
-    def finalize_headers(self, inheaders):
-        request_content_length = int(inheaders.get('Content-Length', 0))
-        if request_content_length > self.max_request_body_size:
-            return self.simple_response(http_client.REQUEST_ENTITY_TOO_LARGE,
-                "The entity sent with the request exceeds the maximum "
-                "allowed bytes (%d)." % self.max_request_body_size)
+    def finalize_headers(self, inheaders: InHeaders) -> None:
+        content_length_values = inheaders.get('Content-Length', all=True)
+        try:
+            request_content_length = parse_content_length(content_length_values)
+        except ValueError as e:
+            return self.simple_response(http.client.BAD_REQUEST, str(e))
         # Persistent connection support
-        if self.response_protocol is HTTP11:
-            # Both server and client are HTTP/1.1
-            if inheaders.get("Connection", "") == "close":
-                self.close_after_response = True
-        else:
-            # Either the server or client (or both) are HTTP/1.0
-            if inheaders.get("Connection", "") != "Keep-Alive":
-                self.close_after_response = True
+        connection = connection_header_tokens(header_as_str(inheaders.get('Connection', '')))
+        if 'close' in connection:
+            self.close_after_response = True
+        # Either the server or client (or both) are HTTP/1.0
+        elif self.response_protocol is not HTTP11 and 'keep-alive' not in connection:
+            self.close_after_response = True
 
         # Transfer-Encoding support
         te = ()
         if self.response_protocol is HTTP11:
-            rte = inheaders.get("Transfer-Encoding")
+            rte = header_as_str(inheaders.get('Transfer-Encoding', ''))
             if rte:
-                te = [x.strip().lower() for x in rte.split(",") if x.strip()]
+                te = [x.strip().lower() for x in rte.split(',') if x.strip()]
         chunked_read = False
         if te:
+            if content_length_values:
+                return self.simple_response(http.client.BAD_REQUEST, 'Cannot specify both Transfer-Encoding and Content-Length')
             for enc in te:
-                if enc == "chunked":
+                if enc == 'chunked':
                     chunked_read = True
                 else:
                     # Note that, even if we see "chunked", we must reject
                     # if there is an extension we don't recognize.
-                    return self.simple_response(http_client.NOT_IMPLEMENTED, "Unknown transfer encoding: %r" % enc)
+                    return self.simple_response(http.client.NOT_IMPLEMENTED, f'Unknown transfer encoding: {enc!r}')
 
-        if inheaders.get("Expect", '').lower() == "100-continue":
-            buf = BytesIO((HTTP11 + " 100 Continue\r\n\r\n").encode('ascii'))
+        if request_content_length > self.max_request_body_size:
+            return self.simple_response(
+                http.client.REQUEST_ENTITY_TOO_LARGE,
+                f'The entity sent with the request exceeds the maximum allowed bytes ({self.max_request_body_size}).',
+            )
+
+        if inheaders.get('Expect', '').lower() == '100-continue':
+            buf = BytesIO((HTTP11 + ' 100 Continue\r\n\r\n').encode('ascii'))
             return self.set_state(WRITE, self.write_continue, buf, inheaders, request_content_length, chunked_read)
         self.forwarded_for = inheaders.get('X-Forwarded-For')
 
         self.read_request_body(inheaders, request_content_length, chunked_read)
 
-    def write_continue(self, buf, inheaders, request_content_length, chunked_read, event):
+    def write_continue(self, buf: BytesIO, inheaders: InHeaders, request_content_length: int, chunked_read: bool, event: ConnectionEvent) -> None:
         if self.write(buf):
             self.read_request_body(inheaders, request_content_length, chunked_read)
 
-    def read_request_body(self, inheaders, request_content_length, chunked_read):
+    def read_request_body(self, inheaders: InHeaders, request_content_length: int, chunked_read: bool) -> None:
         buf = SpooledTemporaryFile(prefix='rq-body-', max_size=DEFAULT_BUFFER_SIZE, dir=self.tdir)
         if chunked_read:
             self.set_state(READ, self.read_chunk_length, inheaders, Accumulator(), buf, [0])
+        elif request_content_length > 0:
+            self.set_state(READ, self.sized_read, inheaders, buf, request_content_length)
         else:
-            if request_content_length > 0:
-                self.set_state(READ, self.sized_read, inheaders, buf, request_content_length)
-            else:
-                self.prepare_response(inheaders, BytesIO())
+            self.prepare_response(inheaders, BytesIO())
 
-    def sized_read(self, inheaders, buf, request_content_length, event):
+    def sized_read(self, inheaders: InHeaders, buf: IO[bytes], request_content_length: int, event: ConnectionEvent) -> None:
         if self.read(buf, request_content_length):
             self.prepare_response(inheaders, buf)
 
-    def read_chunk_length(self, inheaders, line_buf, buf, bytes_read, event):
+    def read_chunk_length(self, inheaders: InHeaders, line_buf: Accumulator, buf: IO[bytes], bytes_read: list[int], event: ConnectionEvent) -> None:
         line = self.readline(line_buf)
         if line is None:
             return
         bytes_read[0] += len(line)
-        try:
-            chunk_size = int(line.strip(), 16)
-        except Exception:
-            return self.simple_response(http_client.BAD_REQUEST, '%s is not a valid chunk size' % reprlib.repr(line.strip()))
+        raw_size = line.strip()
+        if chunk_size_pat.fullmatch(raw_size) is None:
+            return self.simple_response(http.client.BAD_REQUEST, f'{reprlib.repr(raw_size)} is not a valid chunk size')
+        chunk_size = int(raw_size, 16)
         if bytes_read[0] + chunk_size + 2 > self.max_request_body_size:
-            return self.simple_response(http_client.REQUEST_ENTITY_TOO_LARGE,
-                                        'Chunked request is larger than %d bytes' % self.max_request_body_size)
+            return self.simple_response(
+                http.client.REQUEST_ENTITY_TOO_LARGE,
+                f'Chunked request is larger than {self.max_request_body_size} bytes',
+            )
         if chunk_size == 0:
             self.set_state(READ, self.read_chunk_separator, inheaders, Accumulator(), buf, bytes_read, last=True)
         else:
             self.set_state(READ, self.read_chunk, inheaders, buf, chunk_size, buf.tell() + chunk_size, bytes_read)
 
-    def read_chunk(self, inheaders, buf, chunk_size, end, bytes_read, event):
+    def read_chunk(self, inheaders: InHeaders, buf: IO[bytes], chunk_size: int, end: int, bytes_read: list[int], event: ConnectionEvent) -> None:
         if not self.read(buf, end):
             return
         bytes_read[0] += chunk_size
         self.set_state(READ, self.read_chunk_separator, inheaders, Accumulator(), buf, bytes_read)
 
-    def read_chunk_separator(self, inheaders, line_buf, buf, bytes_read, event, last=False):
+    def read_chunk_separator(
+        self, inheaders: InHeaders, line_buf: Accumulator, buf: IO[bytes], bytes_read: list[int], event: ConnectionEvent, last: bool = False
+    ) -> None:
         line = self.readline(line_buf)
         if line is None:
             return
         if line != b'\r\n':
-            return self.simple_response(http_client.BAD_REQUEST, 'Chunk does not have trailing CRLF')
+            return self.simple_response(http.client.BAD_REQUEST, 'Chunk does not have trailing CRLF')
         bytes_read[0] += len(line)
         if bytes_read[0] > self.max_request_body_size:
-            return self.simple_response(http_client.REQUEST_ENTITY_TOO_LARGE,
-                                        'Chunked request is larger than %d bytes' % self.max_request_body_size)
+            return self.simple_response(
+                http.client.REQUEST_ENTITY_TOO_LARGE,
+                f'Chunked request is larger than {self.max_request_body_size} bytes',
+            )
         if last:
             self.prepare_response(inheaders, buf)
         else:
             self.set_state(READ, self.read_chunk_length, inheaders, Accumulator(), buf, bytes_read)
 
-    def handle_timeout(self):
+    def handle_timeout(self) -> bool:
         if not hasattr(self, 'response_protocol') or self.response_started:
             # Either connection is not ready or a response has already bee
             # started
             return False
-        self.simple_response(http_client.REQUEST_TIMEOUT)
+        self.simple_response(http.client.REQUEST_TIMEOUT)
         return True
 
-    def write(self, buf, end=None):
+    def write(self, buf: OutputBuffer, end: int | None = None) -> bool:
         raise NotImplementedError()
 
-    def simple_response(self, status_code, msg='', close_after_response=True):
+    def simple_response(self, status_code: int, msg: str = '', close_after_response: bool = True) -> None:
         raise NotImplementedError()
 
-    def prepare_response(self, inheaders, request_body_file):
+    def prepare_response(self, inheaders: InHeaders, request_body_file: IO[bytes]) -> None:
         raise NotImplementedError()

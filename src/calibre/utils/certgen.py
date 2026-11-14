@@ -1,95 +1,140 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2015, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
 
 import socket
-from polyglot.builtins import unicode_type
+from typing import IO, TYPE_CHECKING
+
 from calibre_extensions import certgen
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
-def create_key_pair(size=2048):
+
+def create_key_pair(size: int = 2048) -> object:
     return certgen.create_rsa_keypair(size)
 
 
 def create_cert_request(
-    key_pair, common_name,
-    country='IN', state='Maharashtra', locality='Mumbai', organization=None,
-    organizational_unit=None, email_address=None, alt_names=(), basic_constraints=None
-):
-    def enc(x):
-        if isinstance(x, unicode_type):
-            x = x.encode('ascii')
-        return x or None
-
+    key_pair: object,
+    common_name: str,
+    country: str | None = 'IN',
+    state: str | None = 'Maharashtra',
+    locality: str | None = 'Mumbai',
+    organization: str | None = None,
+    organizational_unit: str | None = None,
+    email_address: str | None = None,
+    alt_names: Sequence[str] = (),
+    basic_constraints: str | None = None,
+    digital_key_usage: str | None = None,
+    ext_key_usage: str | None = None,
+) -> object:
     return certgen.create_rsa_cert_req(
-        key_pair, tuple(enc(x) for x in alt_names if x), common_name,
-        country, state, locality, organization, organizational_unit, email_address, basic_constraints
+        key_pair,
+        tuple(alt_names),
+        common_name,
+        country,
+        state,
+        locality,
+        organization,
+        organizational_unit,
+        email_address,
+        basic_constraints,
+        digital_key_usage,
+        ext_key_usage,
     )
 
 
-def create_cert(req, ca_cert, ca_keypair, expire=365, not_before=0):
+def create_cert(req: object, ca_cert: object, ca_keypair: object, expire: int = 365, not_before: int = 0) -> object:
     return certgen.create_rsa_cert(req, ca_cert, ca_keypair, not_before, expire)
 
 
-def create_ca_cert(req, ca_keypair, expire=365, not_before=0):
+def create_ca_cert(req: object, ca_keypair: object, expire: int = 365, not_before: int = 0) -> object:
     return certgen.create_rsa_cert(req, None, ca_keypair, not_before, expire)
 
 
-def serialize_cert(cert):
+def serialize_cert(cert: object) -> bytes:
     return certgen.serialize_cert(cert)
 
 
-def serialize_key(key_pair, password=None):
+def serialize_key(key_pair: object, password: str | None = None) -> bytes:
     return certgen.serialize_rsa_key(key_pair, password)
 
 
-def cert_info(cert):
-    return certgen.cert_info(cert).decode('utf-8')
+def cert_info(cert: object) -> bytes:
+    return certgen.cert_info(cert)
 
 
 def create_server_cert(
-    domain_or_ip, ca_cert_file=None, server_cert_file=None, server_key_file=None,
-    expire=365, ca_key_file=None, ca_name='Dummy Certificate Authority', key_size=2048,
-    country='IN', state='Maharashtra', locality='Mumbai', organization=None,
-    organizational_unit=None, email_address=None, alt_names=(), encrypt_key_with_password=None,
-):
+    domain_or_ip: str,
+    ca_cert_file: str | IO[bytes] | None = None,
+    server_cert_file: str | IO[bytes] | None = None,
+    server_key_file: str | IO[bytes] | None = None,
+    expire: int = 365,
+    ca_key_file: str | IO[bytes] | None = None,
+    ca_name: str = 'Dummy Certificate Authority',
+    key_size: int = 2048,
+    country: str | None = 'IN',
+    state: str | None = 'Maharashtra',
+    locality: str | None = 'Mumbai',
+    organization: str | None = None,
+    organizational_unit: str | None = None,
+    email_address: str | None = None,
+    alt_names: Sequence[str] = (),
+    encrypt_key_with_password: str | None = None,
+) -> tuple[object, object, object, object]:
     is_ip = False
     try:
         socket.inet_pton(socket.AF_INET, domain_or_ip)
         is_ip = True
     except Exception:
         try:
-            socket.inet_aton(socket.AF_INET6, domain_or_ip)
+            socket.inet_pton(socket.AF_INET6, domain_or_ip)
             is_ip = True
         except Exception:
             pass
     if not alt_names:
         prefix = 'IP' if is_ip else 'DNS'
-        alt_names = ('{}:{}'.format(prefix, domain_or_ip),)
+        alt_names = (f'{prefix}:{domain_or_ip}',)
 
     # Create the Certificate Authority
     cakey = create_key_pair(key_size)
-    careq = create_cert_request(cakey, ca_name, basic_constraints='CA:TRUE')
+    careq = create_cert_request(
+        cakey,
+        ca_name,
+        basic_constraints='critical,CA:TRUE',
+        digital_key_usage='critical,keyCertSign,cRLSign',
+        ext_key_usage='critical,serverAuth,clientAuth',
+    )
     cacert = create_ca_cert(careq, cakey)
 
     # Create the server certificate issued by the newly created CA
     pkey = create_key_pair(key_size)
-    req = create_cert_request(pkey, domain_or_ip, country, state, locality, organization, organizational_unit, email_address, alt_names)
+    req = create_cert_request(
+        pkey,
+        domain_or_ip,
+        country,
+        state,
+        locality,
+        organization,
+        organizational_unit,
+        email_address,
+        alt_names,
+        digital_key_usage='critical,keyEncipherment,digitalSignature',
+        ext_key_usage='critical,serverAuth,clientAuth',
+    )
     cert = create_cert(req, cacert, cakey, expire=expire)
 
-    def export(dest, obj, func, *args):
+    def export(dest: str | IO[bytes] | None, obj: object, func: Callable[..., bytes | str], *args: str | None) -> None:
         if dest is not None:
             data = func(obj, *args)
-            if isinstance(data, unicode_type):
+            if isinstance(data, str):
                 data = data.encode('utf-8')
-            if hasattr(dest, 'write'):
+            if not isinstance(dest, str) and hasattr(dest, 'write'):
                 dest.write(data)
             else:
                 with open(dest, 'wb') as f:
                     f.write(data)
+
     export(ca_cert_file, cacert, serialize_cert)
     export(server_cert_file, cert, serialize_cert)
     export(server_key_file, pkey, serialize_key, encrypt_key_with_password)
@@ -97,10 +142,16 @@ def create_server_cert(
     return cacert, cakey, cert, pkey
 
 
-if __name__ == '__main__':
-    cacert, cakey, cert, pkey = create_server_cert('test.me', alt_names=['1.test.me', '*.all.test.me'])
-    print("CA Certificate")
-    print(cert_info(cacert).encode('utf-8'))
+def develop() -> None:
+    cacert, cakey, cert, pkey = create_server_cert('test.me', alt_names=['DNS:moose.cat', 'DNS:huge.bat'])
+    print('CA Certificate')
+    print(cert_info(cacert))
     print(), print(), print()
     print('Server Certificate')
-    print(cert_info(cert).encode('utf-8'))
+    print(cert_info(cert))
+    certgen.verify_cert(cacert, cacert)
+    certgen.verify_cert(cacert, cert)
+
+
+if __name__ == '__main__':
+    develop()

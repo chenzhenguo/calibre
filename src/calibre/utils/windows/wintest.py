@@ -1,40 +1,39 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPL v3 Copyright: 2019, Kovid Goyal <kovid at kovidgoyal.net>
-
 
 import os
 import unittest
-from polyglot.builtins import unicode_type
 
 
 class TestWinutil(unittest.TestCase):
-
-    def setUp(self):
+    def setUp(self) -> None:
         from calibre_extensions import winutil
+
         self.winutil = winutil
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         del self.winutil
 
-    def test_add_to_recent_docs(self):
-        path = unicode_type(os.path.abspath(__file__))
+    def test_add_to_recent_docs(self) -> None:
+        path = str(os.path.abspath(__file__))
         self.winutil.add_to_recent_docs(path, None)
         self.winutil.add_to_recent_docs(path, 'some-app-uid')
 
-    def test_file_association(self):
+    def test_file_association(self) -> None:
         q = self.winutil.file_association('.txt')
+        assert q is not None
         self.assertIn('notepad.exe', q.lower())
         self.assertNotIn('\0', q)
         q = self.winutil.friendly_name(None, 'notepad.exe')
-        self.assertEqual('Notepad', q)
+        if os.environ.get('CI', '').lower() != 'true':
+            self.assertEqual('Notepad', q)
 
-    def test_special_folder_path(self):
+    def test_special_folder_path(self) -> None:
         self.assertEqual(os.path.expanduser('~'), self.winutil.special_folder_path(self.winutil.CSIDL_PROFILE))
 
-    def test_associations_changed(self):
+    def test_associations_changed(self) -> None:
         self.assertIsNone(self.winutil.notify_associations_changed())
 
 
-def find_tests():
+def find_tests() -> unittest.TestSuite:
     return unittest.defaultTestLoader.loadTestsFromTestCase(TestWinutil)

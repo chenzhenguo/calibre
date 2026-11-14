@@ -1,27 +1,33 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
 
 
-__license__   = 'GPL v3'
+__license__ = 'GPL v3'
 __copyright__ = '2009, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
-import os, subprocess, hashlib, shutil, glob, stat, sys, time, json
+import glob
+import hashlib
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import time
 from subprocess import check_call
-from tempfile import NamedTemporaryFile, mkdtemp, gettempdir
+from tempfile import NamedTemporaryFile, mkdtemp
+from urllib.request import Request, urlopen
 from zipfile import ZipFile
-from polyglot.builtins import iteritems
-from polyglot.urllib import urlopen, Request
 
 if __name__ == '__main__':
     d = os.path.dirname
     sys.path.insert(0, d(d(os.path.abspath(__file__))))
 
-from setup import Command, __version__, installer_name, __appname__
+from setup import Command, __appname__, __version__, installer_names, manual_build_dir
 
 DOWNLOADS = '/srv/main/downloads'
-HTML2LRF = "calibre/ebooks/lrf/html/demo"
-TXT2LRF = "src/calibre/ebooks/lrf/txt/demo"
+HTML2LRF = 'calibre/ebooks/lrf/html/demo'
+TXT2LRF = 'src/calibre/ebooks/lrf/txt/demo'
 STAGING_HOST = 'download.calibre-ebook.com'
 BACKUP_HOST = 'code.calibre-ebook.com'
 STAGING_USER = BACKUP_USER = 'root'
@@ -29,28 +35,15 @@ STAGING_DIR = '/root/staging'
 BACKUP_DIR = '/binaries'
 
 
-def installers(include_source=True):
-    installers = list(map(installer_name, ('dmg', 'msi', 'txz')))
-    installers.append(installer_name('txz', is64bit=True))
-    installers.append(installer_name('msi', is64bit=True))
-    if include_source:
-        installers.insert(0, 'dist/%s-%s.tar.xz' % (__appname__, __version__))
-    installers.append(
-        'dist/%s-portable-installer-%s.exe' % (__appname__, __version__)
-    )
-    return installers
-
-
 def installer_description(fname):
     if fname.endswith('.tar.xz'):
         return 'Source code'
     if fname.endswith('.txz'):
-        bits = '32' if 'i686' in fname else '64'
-        return bits + 'bit Linux binary'
+        return ('ARM' if 'arm64' in fname else 'AMD') + ' 64-bit Linux binary'
     if fname.endswith('.msi'):
-        return 'Windows %sinstaller' % ('64bit ' if '64bit' in fname else '')
+        return 'Windows installer'
     if fname.endswith('.dmg'):
-        return 'OS X dmg'
+        return 'macOS dmg'
     if fname.endswith('.exe'):
         return 'Calibre Portable'
     return 'Unknown file'
@@ -60,15 +53,12 @@ def upload_signatures():
     tdir = mkdtemp()
     scp = ['scp']
     try:
-        for installer in installers():
+        for installer in installer_names():
             if not os.path.exists(installer):
                 continue
             sig = os.path.join(tdir, os.path.basename(installer + '.sig'))
             scp.append(sig)
-            check_call([
-                os.environ['PENV'] + '/gpg-as-kovid', '--output', sig,
-                '--detach-sig', installer
-            ])
+            check_call([os.environ['PENV'] + '/gpg-as-kovid', '--output', sig, '--detach-sig', installer])
             with open(installer, 'rb') as f:
                 raw = f.read()
             fingerprint = hashlib.sha512(raw).hexdigest()
@@ -77,29 +67,26 @@ def upload_signatures():
                 f.write(fingerprint)
             scp.append(sha512)
         for srv in 'code main'.split():
-            check_call(scp + ['{0}:/srv/{0}/signatures/'.format(srv)])
-            check_call(
-                ['ssh', srv, 'chown', '-R', 'http:http', '/srv/%s/signatures' % srv]
-            )
+            check_call(scp + [f'{srv}:/srv/{srv}/signatures/'])
+            check_call(['ssh', srv, 'chown', '-R', 'http:http', f'/srv/{srv}/signatures'])
     finally:
         shutil.rmtree(tdir)
 
 
 class ReUpload(Command):  # {{{
-
     description = 'Re-upload any installers present in dist/'
 
     sub_commands = ['upload_installers']
 
     def pre_sub_commands(self, opts):
         opts.replace = True
-        exists = {x for x in installers() if os.path.exists(x)}
+        exists = {x for x in installer_names() if os.path.exists(x)}
         if not exists:
             print('There appear to be no installers!')
             raise SystemExit(1)
 
     def run(self, opts):
-        for x in installers():
+        for x in installer_names():
             if os.path.exists(x):
                 os.remove(x)
 
@@ -125,8 +112,17 @@ def get_fosshub_data():
 
 def send_data(loc):
     subprocess.check_call([
-        'rsync', '--inplace', '--delete', '-r', '-zz', '-h', '--info=progress2', '-e',
-        'ssh -x', loc + '/', '%s@%s:%s' % (STAGING_USER, STAGING_HOST, STAGING_DIR)
+        'rsync',
+        '--inplace',
+        '--delete',
+        '-r',
+        '-zz',
+        '-h',
+        '--info=progress2',
+        '-e',
+        'ssh -x',
+        loc + '/',
+        f'{STAGING_USER}@{STAGING_HOST}:{STAGING_DIR}',
     ])
 
 
@@ -134,35 +130,32 @@ def send_to_backup(loc):
     host = f'{BACKUP_USER}@{BACKUP_HOST}'
     dest = f'{BACKUP_DIR}/{__version__}'
     subprocess.check_call(['ssh', '-x', host, 'mkdir', '-p', dest])
-    subprocess.check_call([
-        'rsync', '--inplace', '--delete', '-r', '-zz', '-h', '--info=progress2', '-e',
-        'ssh -x', loc + '/', f'{host}:{dest}/'
-    ])
+    subprocess.check_call(['rsync', '--inplace', '--delete', '-r', '-zz', '-h', '--info=progress2', '-e', 'ssh -x', loc + '/', f'{host}:{dest}/'])
 
 
 def gh_cmdline(ver, data):
-    return [
-        __appname__, ver, 'fmap', 'github', __appname__, data['username'],
-        data['password']
+    safe = [
+        __appname__,
+        ver,
+        'fmap',
+        'github',
+        __appname__,
+        data['username'],
     ]
+    return safe + [data['password']], safe + ['PASSWORD_REDACTED']
 
 
 def sf_cmdline(ver, sdata):
-    return [
-        __appname__, ver, 'fmap', 'sourceforge', sdata['project'], sdata['username']
-    ]
+    return [__appname__, ver, 'fmap', 'sourceforge', sdata['project'], sdata['username']]
 
 
 def calibre_cmdline(ver):
     return [__appname__, ver, 'fmap', 'calibre']
 
 
-def run_remote_upload(args):
-    print('Running remotely:', ' '.join(args))
-    subprocess.check_call([
-        'ssh', '-x', '%s@%s' % (STAGING_USER, STAGING_HOST), 'cd', STAGING_DIR, '&&',
-        'python', 'hosting.py'
-    ] + args)
+def run_remote_upload(args, safe=None):
+    print('Running remotely:', ' '.join(safe or args))
+    subprocess.check_call(['ssh', '-x', f'{STAGING_USER}@{STAGING_HOST}', 'cd', STAGING_DIR, '&&', 'python', 'hosting.py'] + args)
 
 
 # }}}
@@ -174,18 +167,15 @@ def upload_to_fosshub():
     api_key = get_fosshub_data()
 
     def request(path, data=None):
-        r = Request('https://api.fosshub.com/rest/' + path.lstrip('/'),
-                headers={
-                    'Content-Type': 'application/json',
-                    'X-auth-key': api_key,
-                    'User-Agent': 'calibre'
-        })
+        r = Request(
+            'https://api.fosshub.com/rest/' + path.lstrip('/'), headers={'Content-Type': 'application/json', 'X-auth-key': api_key, 'User-Agent': 'calibre'}
+        )
         res = urlopen(r, data=data)
         ans = json.loads(res.read())
         if ans.get('error'):
             raise SystemExit(ans['error'])
         if res.getcode() != 200:
-            raise SystemExit('Request to {} failed with response code: {}'.format(path, res.getcode()))
+            raise SystemExit(f'Request to {path} failed with response code: {res.getcode()}')
         # from pprint import pprint
         # pprint(ans)
         return ans['status'] if 'status' in ans else ans['data']
@@ -200,13 +190,11 @@ def upload_to_fosshub():
     else:
         raise SystemExit('No calibre project found')
 
-    files = set(installers())
+    files = set(installer_names())
     entries = []
     for fname in files:
         desc = installer_description(fname)
-        url = 'https://download.calibre-ebook.com/%s/%s' % (
-            __version__, os.path.basename(fname)
-        )
+        url = f'https://download.calibre-ebook.com/{__version__}/{os.path.basename(fname)}'
         entries.append({
             'fileUrl': url,
             'type': desc,
@@ -221,28 +209,19 @@ def upload_to_fosshub():
     data = json.dumps(jq)
     # print(data)
     data = data.encode('utf-8')
-    if not request('projects/{}/releases/'.format(project_id), data=data):
+    if not request(f'projects/{project_id}/releases/', data=data):
         raise SystemExit('Failed to queue publish job with fosshub')
 
 
 class UploadInstallers(Command):  # {{{
-
     def add_options(self, parser):
-        parser.add_option(
-            '--replace',
-            default=False,
-            action='store_true',
-            help='Replace existing installers'
-        )
+        parser.add_option('--replace', default=False, action='store_true', help='Replace existing installers')
 
     def run(self, opts):
         # return upload_to_fosshub()
-        all_possible = set(installers())
+        all_possible = set(installer_names())
         available = set(glob.glob('dist/*'))
-        files = {
-            x: installer_description(x)
-            for x in all_possible.intersection(available)
-        }
+        files = {x: installer_description(x) for x in all_possible.intersection(available)}
         for x in files:
             os.chmod(x, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
         sizes = {os.path.basename(x): os.path.getsize(x) for x in files}
@@ -255,42 +234,35 @@ class UploadInstallers(Command):  # {{{
                 upload_signatures()
                 check_call('ssh code /apps/update-calibre-version.py'.split())
             # self.upload_to_sourceforge()
-            upload_to_fosshub()
+            # upload_to_fosshub()
             self.upload_to_github(opts.replace)
         finally:
             shutil.rmtree(tdir, ignore_errors=True)
 
     def record_sizes(self, sizes):
         print('\nRecording dist sizes')
-        args = [
-            '%s:%s:%s' % (__version__, fname, size)
-            for fname, size in iteritems(sizes)
-        ]
+        args = [f'{__version__}:{fname}:{size}' for fname, size in sizes.items()]
         check_call(['ssh', 'code', '/usr/local/bin/dist_sizes'] + args)
 
     def upload_to_staging(self, tdir, files):
         os.mkdir(tdir + '/dist')
-        hosting = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), 'hosting.py'
-        )
+        hosting = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hosting.py')
         shutil.copyfile(hosting, os.path.join(tdir, 'hosting.py'))
 
         for f in files:
             for x in (tdir + '/dist',):
                 dest = os.path.join(x, os.path.basename(f))
                 shutil.copy2(f, x)
-                os.chmod(
-                    dest, stat.S_IREAD | stat.S_IWRITE | stat.S_IRGRP | stat.S_IROTH
-                )
+                os.chmod(dest, stat.S_IREAD | stat.S_IWRITE | stat.S_IRGRP | stat.S_IROTH)
 
         with open(os.path.join(tdir, 'fmap'), 'wb') as fo:
-            for f, desc in iteritems(files):
-                fo.write(('%s: %s\n' % (f, desc)).encode('utf-8'))
+            for f, desc in files.items():
+                fo.write((f'{f}: {desc}\n').encode())
 
         while True:
             try:
                 send_data(tdir)
-            except:
+            except Exception:
                 print('\nUpload to staging failed, retrying in a minute')
                 time.sleep(60)
             else:
@@ -299,7 +271,7 @@ class UploadInstallers(Command):  # {{{
         while True:
             try:
                 send_to_backup(tdir)
-            except:
+            except Exception:
                 print('\nUpload to backup failed, retrying in a minute')
                 time.sleep(60)
             else:
@@ -307,10 +279,11 @@ class UploadInstallers(Command):  # {{{
 
     def upload_to_github(self, replace):
         data = get_github_data()
-        args = gh_cmdline(__version__, data)
+        args, safe = gh_cmdline(__version__, data)
         if replace:
             args = ['--replace'] + args
-        run_remote_upload(args)
+            safe = ['--replace'] + safe
+        run_remote_upload(args, safe)
 
     def upload_to_sourceforge(self):
         sdata = get_sourceforge_data()
@@ -330,11 +303,9 @@ class UploadUserManual(Command):  # {{{
 
     def build_plugin_example(self, path):
         from calibre import CurrentDir
+
         with NamedTemporaryFile(suffix='.zip') as f:
-            os.fchmod(
-                f.fileno(), stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH |
-                stat.S_IWRITE
-            )
+            os.fchmod(f.fileno(), stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH | stat.S_IWRITE)
             with CurrentDir(path):
                 with ZipFile(f, 'w') as zf:
                     for x in os.listdir('.'):
@@ -345,7 +316,7 @@ class UploadUserManual(Command):  # {{{
                             for y in os.listdir(x):
                                 zf.write(os.path.join(x, y))
             bname = self.b(path) + '_plugin.zip'
-            dest = '%s/%s' % (DOWNLOADS, bname)
+            dest = f'{DOWNLOADS}/{bname}'
             subprocess.check_call(['scp', f.name, 'main:' + dest])
 
     def run(self, opts):
@@ -353,48 +324,37 @@ class UploadUserManual(Command):  # {{{
         for x in glob.glob(self.j(path, '*')):
             self.build_plugin_example(x)
 
-        srcdir = self.j(gettempdir(), 'user-manual-build', 'en', 'html') + '/'
-        check_call(
-            ' '.join(
-                ['rsync', '-zz', '-rl', '--info=progress2', srcdir, 'main:/srv/manual/']
-            ),
-            shell=True
-        )
-        check_call('ssh main chown -R http:http /srv/manual'.split())
+        srcdir = self.j(manual_build_dir(), 'en', 'html') + '/'
+        check_call(['rsync', '-zz', '-rl', '--info=progress2', srcdir, 'main:/srv/manual/'])
+        check_call(['ssh', 'main', 'chown', '-R', 'http:http', '/srv/manual'])
 
 
 # }}}
 
 
 class UploadDemo(Command):  # {{{
-
     description = 'Rebuild and upload various demos'
 
     def run(self, opts):
         check_call(
-            '''ebook-convert %s/demo.html /tmp/html2lrf.lrf '''
+            f'''ebook-convert {self.j(self.SRC, HTML2LRF)}/demo.html /tmp/html2lrf.lrf '''
             '''--title='Demonstration of html2lrf' --authors='Kovid Goyal' '''
             '''--header '''
             '''--serif-family "/usr/share/fonts/corefonts, Times New Roman" '''
-            '''--mono-family  "/usr/share/fonts/corefonts, Andale Mono" '''
-            '''''' % self.j(self.SRC, HTML2LRF),
-            shell=True
+            '''--mono-family  "/usr/share/fonts/corefonts, Andale Mono" ''',
+            shell=True,
         )
 
         lrf = self.j(self.SRC, 'calibre', 'ebooks', 'lrf', 'html', 'demo')
-        check_call(
-            'cd %s && zip -j /tmp/html-demo.zip * /tmp/html2lrf.lrf' % lrf,
-            shell=True
-        )
+        check_call(f'cd {lrf} && zip -j /tmp/html-demo.zip * /tmp/html2lrf.lrf', shell=True)
 
-        check_call('scp /tmp/html-demo.zip main:%s/' % (DOWNLOADS, ), shell=True)
+        check_call(f'scp /tmp/html-demo.zip main:{DOWNLOADS}/', shell=True)
 
 
 # }}}
 
 
 class UploadToServer(Command):  # {{{
-
     description = 'Upload miscellaneous data to calibre server'
 
     def run(self, opts):
@@ -404,19 +364,13 @@ class UploadToServer(Command):  # {{{
         src_file = glob.glob('dist/calibre-*.tar.xz')[0]
         upload_signatures()
         check_call(['git', 'push'])
-        check_call([
-            os.environ['PENV'] + '/gpg-as-kovid', '--armor', '--yes',
-            '--detach-sign', src_file
-        ])
+        check_call([os.environ['PENV'] + '/gpg-as-kovid', '--armor', '--yes', '--detach-sign', src_file])
         check_call(['scp', src_file + '.asc', 'code:/srv/code/signatures/'])
         check_call('ssh code /usr/local/bin/update-calibre-code.py'.split())
+        check_call(('ssh code /apps/update-calibre-version.py ' + __version__).split())
         check_call(
-            ('ssh code /apps/update-calibre-version.py ' + __version__).split()
+            (f'ssh main /usr/local/bin/update-calibre-version.py {__version__} && /usr/local/bin/update-calibre-code.py && /apps/static/generate.py').split()
         )
-        check_call((
-            'ssh main /usr/local/bin/update-calibre-version.py %s && /usr/local/bin/update-calibre-code.py && /apps/static/generate.py'
-            % __version__
-        ).split())
 
 
 # }}}

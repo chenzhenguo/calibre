@@ -27,10 +27,10 @@ Create a file named :file:`__init__.py` (this is a special name and must always 
 and enter the following Python code into it:
 
 .. literalinclude:: plugin_examples/helloworld/__init__.py
-    :lines: 10-
+    :lines: 9-
 
 That's all. To add this code to calibre as a plugin, simply run the following in
-the directory in which you created :file:`__init__.py`::
+the folder in which you created :file:`__init__.py`::
 
     calibre-customize -b .
 
@@ -40,10 +40,10 @@ the directory in which you created :file:`__init__.py`::
     are in :file:`/Applications/calibre.app/Contents/MacOS/`.
 
 You can download the Hello World plugin from
-`helloworld_plugin.zip  <https://calibre-ebook.com/downloads/helloworld_plugin.zip>`_.
+:download_file:`helloworld_plugin.zip`.
 
 Every time you use calibre to convert a book, the plugin's :meth:`run` method will be called and the
-converted book will have its publisher set to "Hello World". This is a trivial plugin, lets move on to
+converted book will have its publisher set to "Hello World". This is a trivial plugin, let's move on to
 a more complex example that actually adds a component to the user interface.
 
 A User Interface plugin
@@ -54,7 +54,7 @@ This plugin will be spread over a few files (to keep the code clean). It will sh
 how to create elements in the calibre user interface and how to access
 and query the books database in calibre.
 
-You can download this plugin from `interface_demo_plugin.zip <https://calibre-ebook.com/downloads/interface_demo_plugin.zip>`_
+You can download this plugin from :download_file:`interface_demo_plugin.zip`
 
 .. _import_name_txt:
 
@@ -69,9 +69,9 @@ The first thing to note is that this ZIP file has a lot more files in it, explai
             from calibre_plugins.some_name.some_module import some_object
 
         The prefix ``calibre_plugins`` must always be present. ``some_name`` comes from the filename of the empty text file.
-        ``some_module`` refers to  :file:`some_module.py` file inside the ZIP file. Note that this importing is just as
+        ``some_module`` refers to :file:`some_module.py` file inside the ZIP file. Note that this importing is just as
         powerful as regular Python imports. You can create packages and subpackages of .py modules inside the ZIP file,
-        just like you would normally (by defining __init__.py in each sub-directory), and everything should "just work".
+        just like you would normally (by defining __init__.py in each sub-folder), and everything should "just work".
 
         The name you use for ``some_name`` enters a global namespace shared by all plugins, **so make it as unique as possible**.
         But remember that it must be a valid Python identifier (only alphabets, numbers and the underscore).
@@ -104,7 +104,7 @@ __init__.py
 First, the obligatory ``__init__.py`` to define the plugin metadata:
 
 .. literalinclude:: plugin_examples/interface_demo/__init__.py
-    :lines: 10-
+    :lines: 8-
 
 The only noteworthy feature is the field :attr:`actual_plugin`. Since calibre has both command line and GUI interfaces,
 GUI plugins like this one should not load any GUI libraries in __init__.py. The actual_plugin field does this for you,
@@ -122,7 +122,7 @@ ui.py
 Now let's look at ui.py which defines the actual GUI plugin. The source code is heavily commented and should be self explanatory:
 
 .. literalinclude:: plugin_examples/interface_demo/ui.py
-    :lines: 16-
+    :lines: 15-
 
 main.py
 ^^^^^^^^^
@@ -130,7 +130,7 @@ main.py
 The actual logic to implement the Interface Plugin Demo dialog.
 
 .. literalinclude:: plugin_examples/interface_demo/main.py
-    :lines: 16-
+    :lines: 14-
 
 Getting resources from the plugin ZIP file
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -138,15 +138,23 @@ Getting resources from the plugin ZIP file
 calibre's plugin loading system defines a couple of built-in functions that allow you to conveniently get files from the plugin ZIP file.
 
     **get_resources(name_or_list_of_names)**
-        This function should be called with a list of paths to files inside the ZIP file. For example to access the file icon.png in
-        the directory images in the ZIP file, you would use: ``images/icon.png``. Always use a forward slash as the path separator,
-        even on Windows. When you pass in a single name, the function will return the raw bytes of that file or None if the name
-        was not found in the ZIP file. If you pass in more than one name then it returns a dict mapping the names to bytes.
-        If a name is not found, it will not be present in the returned dict.
+        This function should be called with a list of paths to files inside the
+        ZIP file. For example to access the file :file:`icon.png` in the folder
+        images in the ZIP file, you would use: ``images/icon.png``. Always use
+        a forward slash as the path separator, even on Windows. When you pass
+        in a single name, the function will return the raw bytes of that file
+        or None if the name was not found in the ZIP file. If you pass in more
+        than one name then it returns a dictionary mapping the names to bytes.  If a
+        name is not found, it will not be present in the returned dictionary.
 
-    **get_icons(name_or_list_of_names)**
-        A convenience wrapper for get_resources() that creates QIcon objects from the raw bytes returned by get_resources.
-        If a name is not found in the ZIP file the corresponding QIcon will be null.
+    **get_icons(name_or_list_of_names, plugin_name='')**
+        A wrapper for get_resources() that creates QIcon objects
+        from the raw bytes returned by get_resources. If a name is not found
+        in the ZIP file the corresponding QIcon will be null. In order to
+        support icon theme-ing, pass in the human friendly name of your plugin
+        as ``plugin_name``. If the user is using an icon theme with icons for
+        your plugin, they will be loaded preferentially.
+
 
 Enabling user configuration of your plugin
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -167,7 +175,7 @@ calibre has many different ways to store configuration data (a legacy of its lon
 The code to manage configuration data in the demo plugin is in config.py:
 
 .. literalinclude:: plugin_examples/interface_demo/config.py
-    :lines: 10-
+    :lines: 8-
 
 The ``prefs`` object is now available throughout the plugin code by a simple::
 
@@ -177,7 +185,7 @@ The ``prefs`` object is now available throughout the plugin code by a simple::
 You can see the ``prefs`` object being used in main.py:
 
 .. literalinclude:: plugin_examples/interface_demo/main.py
-    :lines: 151-
+    :lines: 142-
 
 
 Edit book plugins
@@ -185,7 +193,7 @@ Edit book plugins
 
 Now let's change gears for a bit and look at creating a plugin to add tools to
 the calibre book editor. The plugin is available here:
-`editor_demo_plugin.zip  <https://calibre-ebook.com/downloads/editor_demo_plugin.zip>`_.
+:download_file:`editor_demo_plugin.zip`.
 
 The first step, as for all plugins is to create the
 import name empty txt file, as described :ref:`above <import_name_txt>`.
@@ -195,7 +203,7 @@ Now we create the mandatory ``__init__.py`` file that contains metadata about
 the plugin -- its name, author, version, etc.
 
 .. literalinclude:: plugin_examples/editor_demo/__init__.py
-    :lines: 8-
+    :lines: 7-
 
 A single editor plugin can provide multiple tools each tool corresponds to a
 single button in the toolbar and entry in the :guilabel:`Plugins` menu in the
@@ -217,7 +225,7 @@ various important concepts that you will need in developing your own plugins,
 so you should read the (heavily commented) source code carefully.
 
 .. literalinclude:: plugin_examples/editor_demo/main.py
-    :lines: 8-
+    :lines: 7-
 
 Let's break down ``main.py``. We see that it defines a single tool, named
 *Magnify fonts*. This tool will ask the user for a number and multiply all font
@@ -246,34 +254,6 @@ object. This represents the book as a collection of its constituent
 HTML/CSS/image files and has convenience methods for doing many useful things.
 The container object and various useful utility functions that can be reused in
 your plugin code are documented in :ref:`polish_api`.
-
-
-Running User Interface plugins in a separate process
------------------------------------------------------------
-
-If you are writing a user interface plugin that needs to make use
-of Qt WebEngine, it cannot be run in the main calibre process as it
-is not possible to use WebEngine there. Instead you can copy the data
-your plugin needs to a temporary directory and run the plugin with that
-data in a separate process. A simple example plugin follows that shows how
-to do this.
-
-You can download the plugin from
-`webengine_demo_plugin.zip  <https://calibre-ebook.com/downloads/webengine_demo_plugin.zip>`_.
-
-The important part of the plugin is in two functions:
-
-.. literalinclude:: plugin_examples/webengine_demo/ui.py
-    :lines: 47-
-
-.. literalinclude:: plugin_examples/webengine_demo/main.py
-    :lines: 12-
-
-
-The ``show_demo()`` function asks the user for a URL and then runs
-the ``main()`` function passing it that URL. The ``main()`` function
-displays the URL in a ``QWebEngineView``.
-
 
 Adding translations to your plugin
 --------------------------------------
@@ -305,12 +285,17 @@ typical User Interface plugin you would call it at the top of ``ui.py`` but not
 ``__init__.py``.
 
 You can test the translations of your plugins by changing the user interface
-language in calibre under :guilabel:`Preferences->Interface->Look & feel` or by running calibre like
-this::
+language in calibre under :guilabel:`Preferences->Interface->Look & feel` or by running calibre
+with the ``CALIBRE_OVERRIDE_LANG`` environment variable set. For example::
 
-    CALIBRE_OVERRIDE_LANG=de calibre
+    CALIBRE_OVERRIDE_LANG=de
 
 Replace ``de`` with the language code of the language you want to test.
+
+For translations with plurals, use the ``ngettext()`` function instead of
+``_()``. For example::
+
+    ngettext('Delete a book', 'Delete {} books', num_books).format(num_books)
 
 The plugin API
 --------------------------------
@@ -338,14 +323,14 @@ You can insert print statements anywhere in your plugin code, they will be outpu
 You can quickly test changes to your plugin by using the following command
 line::
 
-    calibre-debug -s; calibre-customize -b /path/to/your/plugin/directory; calibre
+    calibre-debug -s; calibre-customize -b /path/to/your/plugin/folder; calibre
 
 This will shutdown a running calibre, wait for the shutdown to complete, then update your plugin in calibre and relaunch calibre.
 
 More plugin examples
 ----------------------
 
-You can find a list of many, sophisticated calibre plugins `here <https://www.mobileread.com/forums/showthread.php?t=118764>`_.
+You can find a list of many sophisticated calibre plugins `here <https://www.mobileread.com/forums/showthread.php?t=118764>`_.
 
 Sharing your plugins with others
 ----------------------------------

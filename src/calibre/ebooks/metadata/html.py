@@ -1,29 +1,32 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
-'''
+"""
 Try to read metadata from an HTML file.
-'''
+"""
 
 import re
 import unittest
-
 from collections import defaultdict
+from typing import IO, TYPE_CHECKING
+
 from html5_parser import parse
 from lxml.etree import Comment
 
-from calibre.ebooks.metadata import string_to_authors, authors_to_string
-from calibre.ebooks.metadata.book.base import Metadata
+from calibre import replace_entities
 from calibre.ebooks.chardet import xml_to_unicode
-from calibre import replace_entities, isbytestring
-from calibre.utils.date import parse_date, is_date_undefined
-from polyglot.builtins import iteritems
+from calibre.ebooks.metadata import authors_to_string, string_to_authors
+from calibre.ebooks.metadata.book.base import Metadata
+from calibre.utils.date import is_date_undefined, parse_date
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from io import BytesIO
+
+type TagValues = defaultdict[str, list[str]]
 
 
-def get_metadata(stream):
+def get_metadata(stream: IO[bytes]) -> Metadata:
     src = stream.read()
     return get_metadata_(src)
 
@@ -44,32 +47,41 @@ COMMENT_NAMES = {
 }
 
 META_NAMES = {
-    'title' : ('dc.title', 'dcterms.title', 'title'),
+    'title': ('dc.title', 'dcterms.title', 'title'),
     'authors': ('author', 'dc.creator.aut', 'dcterms.creator.aut', 'dc.creator'),
     'publisher': ('publisher', 'dc.publisher', 'dcterms.publisher'),
     'isbn': ('isbn',),
     'languages': ('dc.language', 'dcterms.language'),
-    'pubdate': ('pubdate', 'date of publication', 'dc.date.published', 'dc.date.publication', 'dc.date.issued', 'dcterms.issued'),
+    'pubdate': (
+        'pubdate',
+        'date of publication',
+        'dc.date.published',
+        'dc.date.publication',
+        'dc.date.issued',
+        'dcterms.issued',
+    ),
     'timestamp': ('timestamp', 'date of creation', 'dc.date.created', 'dc.date.creation', 'dcterms.created'),
     'series': ('series',),
     'series_index': ('seriesnumber', 'series_index', 'series.index'),
     'rating': ('rating',),
     'comments': ('comments', 'dc.description'),
-    'tags': ('tags',),
+    'tags': ('tags', 'subject'),
 }
-rmap_comment = {v:k for k, v in iteritems(COMMENT_NAMES)}
-rmap_meta = {v:k for k, l in iteritems(META_NAMES) for v in l}
-
+rmap_comment = {v: k for k, v in COMMENT_NAMES.items()}
+rmap_meta = {v: k for k, l in META_NAMES.items() for v in l}
 
 # Extract an HTML attribute value, supports both single and double quotes and
 # single quotes inside double quotes and vice versa.
 attr_pat = r'''(?:(?P<sq>')|(?P<dq>"))(?P<content>(?(sq)[^']+|[^"]+))(?(sq)'|")'''
 
+_handle_comment_pat: re.Pattern[str] | None = None
 
-def handle_comment(data, comment_tags):
-    if not hasattr(handle_comment, 'pat'):
-        handle_comment.pat = re.compile(r'''(?P<name>\S+)\s*=\s*%s''' % attr_pat)
-    for match in handle_comment.pat.finditer(data):
+
+def handle_comment(data: str, comment_tags: TagValues) -> None:
+    global _handle_comment_pat
+    if _handle_comment_pat is None:
+        _handle_comment_pat = re.compile(rf'''(?P<name>\S+)\s*=\s*{attr_pat}''')
+    for match in _handle_comment_pat.finditer(data):
         x = match.group('name')
         field = None
         try:
@@ -80,11 +92,11 @@ def handle_comment(data, comment_tags):
             comment_tags[field].append(replace_entities(match.group('content')))
 
 
-def parse_metadata(src):
+def parse_metadata(src: str) -> tuple[TagValues, TagValues, TagValues, str]:
     root = parse(src)
-    comment_tags = defaultdict(list)
-    meta_tags = defaultdict(list)
-    meta_tag_ids = defaultdict(list)
+    comment_tags: TagValues = defaultdict(list)
+    meta_tags: TagValues = defaultdict(list)
+    meta_tag_ids: TagValues = defaultdict(list)
     title = ''
     identifier_pat = re.compile(r'(?:dc|dcterms)[.:]identifier(?:\.|$)', flags=re.IGNORECASE)
     id_pat2 = re.compile(r'(?:dc|dcterms)[.:]identifier$', flags=re.IGNORECASE)
@@ -128,11 +140,11 @@ def parse_metadata(src):
     return comment_tags, meta_tags, meta_tag_ids, title
 
 
-def get_metadata_(src, encoding=None):
+def get_metadata_(src: str | bytes, encoding: str | None = None) -> Metadata:
     # Meta data definitions as in
     # https://www.mobileread.com/forums/showpost.php?p=712544&postcount=9
 
-    if isbytestring(src):
+    if isinstance(src, bytes):
         if not encoding:
             src = xml_to_unicode(src)[0]
         else:
@@ -140,7 +152,7 @@ def get_metadata_(src, encoding=None):
     src = src[:150000]  # Searching shouldn't take too long
     comment_tags, meta_tags, meta_tag_ids, title_tag = parse_metadata(src)
 
-    def get_all(field):
+    def get_all(field: str) -> list[str] | None:
         ans = comment_tags.get(field, meta_tags.get(field, None))
         if ans:
             ans = [x.strip() for x in ans if x.strip()]
@@ -148,11 +160,10 @@ def get_metadata_(src, encoding=None):
             ans = None
         return ans
 
-    def get(field):
+    def get(field: str) -> str | None:
         ans = get_all(field)
-        if ans:
-            ans = ans[0]
-        return ans
+        # get_all() returns either None or a non-empty list
+        return ans[0] if ans else None
 
     # Title
     title = get('title') or title_tag.strip() or _('Unknown')
@@ -179,13 +190,17 @@ def get_metadata_(src, encoding=None):
     for field in ('comments',):
         val = get(field)
         if val:
-            setattr(mi, field, val.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&apos;'))
+            setattr(
+                mi,
+                field,
+                val.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&apos;'),
+            )
 
     # Date fields
     for field in ('pubdate', 'timestamp'):
         try:
             val = parse_date(get(field))
-        except:
+        except Exception:
             pass
         else:
             if not is_date_undefined(val):
@@ -200,29 +215,29 @@ def get_metadata_(src, encoding=None):
         if match is not None:
             try:
                 series_index = float(match.group(1))
-            except:
+            except Exception:
                 pass
             series = series.replace(match.group(), '').strip()
         mi.series = series
         if series_index is None:
-            series_index = get('series_index')
-            try:
-                series_index = float(series_index)
-            except:
-                pass
+            raw_series_index = get('series_index')
+            if raw_series_index is not None:
+                try:
+                    series_index = float(raw_series_index)
+                except ValueError:
+                    pass
         if series_index is not None:
-            mi.series_index = series_index
+            mi.set('series_index', series_index)
 
     # RATING
     rating = get('rating')
     if rating:
         try:
             mi.rating = float(rating)
-            if mi.rating < 0:
-                mi.rating = 0
+            mi.rating = max(mi.rating, 0)
             if mi.rating > 10:
                 mi.rating = 0
-        except:
+        except Exception:
             pass
 
     # TAGS
@@ -233,7 +248,7 @@ def get_metadata_(src, encoding=None):
             mi.tags = tags
 
     # IDENTIFIERS
-    for (k,v) in iteritems(meta_tag_ids):
+    for k, v in meta_tag_ids.items():
         v = [x.strip() for x in v if x.strip()]
         if v:
             mi.set_identifier(k, v[0])
@@ -242,15 +257,25 @@ def get_metadata_(src, encoding=None):
 
 
 class MetadataHtmlTest(unittest.TestCase):
-
-    def compare_metadata(self, meta_a, meta_b):
+    def compare_metadata(self, meta_a: Metadata, meta_b: Metadata) -> None:
         for attr in (
-            'title', 'authors', 'publisher', 'isbn', 'languages', 'pubdate', 'timestamp', 'series',
-            'series_index', 'rating', 'comments', 'tags', 'identifiers'
+            'title',
+            'authors',
+            'publisher',
+            'isbn',
+            'languages',
+            'pubdate',
+            'timestamp',
+            'series',
+            'series_index',
+            'rating',
+            'comments',
+            'tags',
+            'identifiers',
         ):
             self.assertEqual(getattr(meta_a, attr), getattr(meta_b, attr))
 
-    def get_stream(self, test):
+    def get_stream(self, test: str) -> BytesIO:
         from io import BytesIO
 
         raw = b'''\
@@ -318,7 +343,7 @@ class MetadataHtmlTest(unittest.TestCase):
         <!-- TAGS="tag d" -->
 '''
 
-        if test in {'comment_multi'}:
+        if test == 'comment_multi':
             raw += b'''\
         <!-- TITLE="Another Comment Tag &amp;amp; Title &#9400;" -->
         <!-- AUTHOR="John Quincy Adams" -->
@@ -342,12 +367,12 @@ class MetadataHtmlTest(unittest.TestCase):
 '''
         return BytesIO(raw)
 
-    def test_input_title(self):
+    def test_input_title(self) -> None:
         stream_meta = get_metadata(self.get_stream('title'))
         canon_meta = Metadata('A Title Tag &amp; Title Ⓒ', [_('Unknown')])
         self.compare_metadata(stream_meta, canon_meta)
 
-    def test_input_meta_single(self):
+    def test_input_meta_single(self) -> None:
         stream_meta = get_metadata(self.get_stream('meta_single'))
         canon_meta = Metadata('A Meta Tag &amp; Title Ⓒ', ['George Washington'])
         canon_meta.publisher = 'Publisher A'
@@ -362,7 +387,7 @@ class MetadataHtmlTest(unittest.TestCase):
         canon_meta.set_identifiers({'isbn': '1234567890'})
         self.compare_metadata(stream_meta, canon_meta)
 
-    def test_input_meta_multi(self):
+    def test_input_meta_multi(self) -> None:
         stream_meta = get_metadata(self.get_stream('meta_multi'))
         canon_meta = Metadata('A Meta Tag &amp; Title Ⓒ', ['George Washington', 'John Adams', 'Thomas Jefferson'])
         canon_meta.publisher = 'Publisher A'
@@ -377,7 +402,7 @@ class MetadataHtmlTest(unittest.TestCase):
         canon_meta.set_identifiers({'isbn': '1234567890', 'url': 'http://google.com/search?q=calibre'})
         self.compare_metadata(stream_meta, canon_meta)
 
-    def test_input_comment_single(self):
+    def test_input_comment_single(self) -> None:
         stream_meta = get_metadata(self.get_stream('comment_single'))
         canon_meta = Metadata('A Comment Tag &amp; Title Ⓒ', ['James Madison', 'James Monroe'])
         canon_meta.publisher = 'Publisher C'
@@ -392,7 +417,7 @@ class MetadataHtmlTest(unittest.TestCase):
         canon_meta.set_identifiers({'isbn': '3456789012', 'url': 'http://google.com/search?q=calibre'})
         self.compare_metadata(stream_meta, canon_meta)
 
-    def test_input_comment_multi(self):
+    def test_input_comment_multi(self) -> None:
         stream_meta = get_metadata(self.get_stream('comment_multi'))
         canon_meta = Metadata('A Comment Tag &amp; Title Ⓒ', ['James Madison', 'James Monroe', 'John Quincy Adams'])
         canon_meta.publisher = 'Publisher C'
@@ -408,5 +433,5 @@ class MetadataHtmlTest(unittest.TestCase):
         self.compare_metadata(stream_meta, canon_meta)
 
 
-def find_tests():
+def find_tests() -> unittest.TestSuite:
     return unittest.TestLoader().loadTestsFromTestCase(MetadataHtmlTest)

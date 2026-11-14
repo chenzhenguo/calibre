@@ -1,19 +1,17 @@
-# -*- coding: utf-8 -*-
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
 
+from typing import TYPE_CHECKING
 
-__license__ = 'GPL 3'
-__copyright__ = '2011, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
-
-from PyQt5.Qt import QWidget
+from qt.core import QWidget
 
 from calibre.gui2.store.basic_config_widget_ui import Ui_Form
-from polyglot.builtins import unicode_type
+
+if TYPE_CHECKING:
+    from calibre.utils.config import JSONConfig
 
 
 class BasicStoreConfigWidget(QWidget, Ui_Form):
-
-    def __init__(self, store):
+    def __init__(self, store) -> None:
         QWidget.__init__(self)
         self.setupUi(self)
 
@@ -21,22 +19,23 @@ class BasicStoreConfigWidget(QWidget, Ui_Form):
 
         self.load_setings()
 
-    def load_setings(self):
+    def load_setings(self) -> None:
         config = self.store.config
 
         self.open_external.setChecked(config.get('open_external', False))
         self.tags.setText(config.get('tags', ''))
 
 
-class BasicStoreConfig(object):
+class BasicStoreConfig:
+    config: JSONConfig
 
-    def customization_help(self, gui=False):
+    def customization_help(self, gui=False) -> str:
         return 'Customize the behavior of this store.'
 
     def config_widget(self):
         return BasicStoreConfigWidget(self)
 
-    def save_settings(self, config_widget):
+    def save_settings(self, config_widget) -> None:
         self.config['open_external'] = config_widget.open_external.isChecked()
-        tags = unicode_type(config_widget.tags.text())
+        tags = str(config_widget.tags.text())
         self.config['tags'] = tags

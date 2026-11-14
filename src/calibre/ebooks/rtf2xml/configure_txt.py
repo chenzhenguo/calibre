@@ -1,16 +1,20 @@
+import os
+import sys
+from typing import Literal
 
-import os, sys
 from . import open_for_read
+
+type ConfigDict = dict[str, str | int | None]
 
 
 class Configure:
-
-    def __init__(self,
-                    configuration_file,
-                    bug_handler,
-                    debug_dir=None,
-                    show_config_file=None,
-                    ):
+    def __init__(
+        self,
+        configuration_file: str | None,
+        bug_handler: type[Exception],
+        debug_dir: str | None = None,
+        show_config_file: int | None = None,
+    ) -> None:
         """
         Requires:
             file --file to be read
@@ -24,14 +28,14 @@ class Configure:
         self.__bug_handler = bug_handler
         self.__show_config_file = show_config_file
 
-    def get_configuration(self, type):
+    def get_configuration(self, type: str) -> ConfigDict:
         self.__configuration_file = self.__get_file_name()
-        return_dict = {}
+        return_dict: ConfigDict = {}
         return_dict['config-location'] = self.__configuration_file
         if self.__show_config_file and self.__configuration_file:
-            sys.stderr.write('configuration file is "%s"\n' % self.__configuration_file)
+            sys.stderr.write(f'configuration file is "{self.__configuration_file}"\n')
         if self.__show_config_file and not self.__configuration_file:
-            sys.stderr.write('No configuraiton file found; using default values\n')
+            sys.stderr.write('No configuration file found; using default values\n')
         if self.__configuration_file:
             read_obj = open_for_read(self.__configuration_file)
             line_to_read = 1
@@ -47,25 +51,23 @@ class Configure:
                     continue
                 fields = line.split('=')
                 if len(fields) != 2:
-                    msg =  line
-                    msg += ('Error in configuration.txt, line %s\n' % line_num)
-                    msg += ('Options take the form of option = value.\n')
-                    msg += ('Please correct the configuration file "%s" before continuing\n'
-                        % self.__configuration_file)
+                    msg = line
+                    msg += f'Error in configuration.txt, line {line_num}\n'
+                    msg += 'Options take the form of option = value.\n'
+                    msg += f'Please correct the configuration file "{self.__configuration_file}" before continuing\n'
                     raise self.__bug_handler(msg)
                 att = fields[0]
                 value = fields[1]
                 att = att.strip()
                 value = value.strip()
                 return_dict[att] = value
-        return_dict = self.__parse_dict(return_dict)
-        if return_dict == 1:
-            msg = ('Please correct the configuration file "%s" before continuing\n'
-                    % self.__configuration_file)
+        parsed_dict = self.__parse_dict(return_dict)
+        if parsed_dict == 1:
+            msg = f'Please correct the configuration file "{self.__configuration_file}" before continuing\n'
             raise self.__bug_handler(msg)
-        return return_dict
+        return parsed_dict
 
-    def __get_file_name(self):
+    def __get_file_name(self) -> str | None:
         home_var = os.environ.get('HOME')
         if home_var:
             home_config = os.path.join(home_var, '.rtf2xml')
@@ -81,7 +83,7 @@ class Configure:
             return script_file
         return self.__configuration_file
 
-    def __parse_dict(self, return_dict):
+    def __parse_dict(self, return_dict: ConfigDict) -> ConfigDict | Literal[1]:
         allowable = [
             'configuration-directory',
             'smart-output',  # = false
@@ -103,23 +105,20 @@ class Configure:
         the_keys = return_dict.keys()
         for the_key in the_keys:
             if the_key not in allowable:
-                sys.stderr.write('options "%s" not a legal option.\n'
-                        % the_key)
+                sys.stderr.write(f'options "{the_key}" not a legal option.\n')
                 return 1
         configuration_dir = return_dict.get('configuration-directory')
         if configuration_dir is None:
             return_dict['configure-directory'] = None
+        elif not os.path.isdir(configuration_dir):
+            sys.stderr.write(f'The directory "{configuration_dir}" does not appear to be a directory.\n')
+            return 1
         else:
-            if not os.path.isdir(configuration_dir):
-                sys.stderr.write('The dirctory "%s" does not appear to be a directory.\n'
-                        % configuration_dir)
-                return 1
-            else:
-                return_dict['configure-directory'] = configuration_dir
+            return_dict['configure-directory'] = configuration_dir
         smart_output = return_dict.get('smart-output')
         if not smart_output:
             return_dict['smart-output'] = 0
-        elif smart_output != 'true' and smart_output != 'false':
+        elif smart_output not in {'true', 'false'}:
             sys.stderr.write('"smart-output" must be true or false.\n')
             return 1
         elif smart_output == 'false':
@@ -134,22 +133,19 @@ class Configure:
                     return_dict['indent'] = 0
             else:
                 try:
-                    int_num = int(return_dict[int_option])
+                    int_num = int(value)
                     return_dict[int_option] = int_num
-                except:
-                    sys.stderr.write('"%s" must be a number\n' % int_option)
-                    sys.stderr.write('You choose "%s" ' % return_dict[int_option])
+                except Exception:
+                    sys.stderr.write(f'"{int_option}" must be a number\n')
+                    sys.stderr.write(f'You choose "{return_dict[int_option]}" ')
                     return 1
-        fonts = ['convert-symbol', 'convert-wingdings', 'convert-zapf-dingbats',
-            'convert-caps'
-            ]
+        fonts = ['convert-symbol', 'convert-wingdings', 'convert-zapf-dingbats', 'convert-caps']
         for font in fonts:
             value = return_dict.get(font)
             if not value:
                 return_dict[font] = 0
-            elif value != 'true' and value != 'false':
-                sys.stderr.write(
-                    '"%s" must be true or false.\n' % font)
+            elif value not in {'true', 'false'}:
+                sys.stderr.write(f'"{font}" must be true or false.\n')
             elif value == 'false':
                 return_dict[font] = 0
         return_dict['xslt-processor'] = None

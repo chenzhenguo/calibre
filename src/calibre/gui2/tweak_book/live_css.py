@@ -1,32 +1,44 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
 import sys
-from PyQt5.Qt import (
-    QWidget, QTimer, QStackedLayout, QLabel, QScrollArea, QVBoxLayout,
-    QPainter, Qt, QPalette, QRect, QSize, QSizePolicy, pyqtSignal,
-    QColor, QMenu, QApplication, QIcon, QUrl)
+
+from css_selectors import SelectorError, parse
+from qt.core import (
+    QColor,
+    QIcon,
+    QLabel,
+    QMenu,
+    QPainter,
+    QPalette,
+    QRect,
+    QScrollArea,
+    QSize,
+    QSizePolicy,
+    QStackedLayout,
+    Qt,
+    QTimer,
+    QUrl,
+    QVBoxLayout,
+    QWidget,
+    pyqtSignal,
+)
 
 from calibre.constants import FAKE_HOST, FAKE_PROTOCOL
-from calibre.gui2.tweak_book import editors, actions, tprefs
-from calibre.gui2.tweak_book.editor.themes import get_theme, theme_color
+from calibre.gui2 import qapplication_or_fail
+from calibre.gui2.tweak_book import actions, editors, tprefs
 from calibre.gui2.tweak_book.editor.text import default_font_family
-from css_selectors import parse, SelectorError
-
+from calibre.gui2.tweak_book.editor.themes import get_theme, theme_color
+from calibre.utils.localization import _
 
 lowest_specificity = (-sys.maxsize, 0, 0, 0, 0, 0)
 
 
 class Heading(QWidget):  # {{{
-
     toggled = pyqtSignal(object)
     context_menu_requested = pyqtSignal(object, object)
 
-    def __init__(self, text, expanded=True, parent=None):
+    def __init__(self, text, expanded=True, parent=None) -> None:
         QWidget.__init__(self, parent)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -39,22 +51,24 @@ class Heading(QWidget):  # {{{
     def lines_for_copy(self):
         return [self.text]
 
-    def do_layout(self):
+    def do_layout(self) -> None:
         try:
-            f = self.parent().font()
-        except AttributeError:
+            p = self.parent()
+            assert isinstance(p, QWidget)
+            f = p.font()
+        except AttributeError, AssertionError:
             return
         f.setBold(True)
         self.setFont(f)
 
-    def mousePressEvent(self, ev):
-        if ev.button() == Qt.MouseButton.LeftButton:
-            ev.accept()
+    def mousePressEvent(self, a0):
+        if a0.button() == Qt.MouseButton.LeftButton:
+            a0.accept()
             self.expanded ^= True
             self.toggled.emit(self)
             self.update()
         else:
-            return QWidget.mousePressEvent(self, ev)
+            return QWidget.mousePressEvent(self, a0)
 
     @property
     def rendered_text(self):
@@ -65,41 +79,46 @@ class Heading(QWidget):  # {{{
         sz = fm.boundingRect(self.rendered_text).size()
         return sz
 
-    def paintEvent(self, ev):
+    def paintEvent(self, a0) -> None:
         p = QPainter(self)
-        p.setClipRect(ev.rect())
+        p.setClipRect(a0.rect())
         bg = self.palette().color(QPalette.ColorRole.AlternateBase)
         if self.hovering:
             bg = bg.lighter(115)
         p.fillRect(self.rect(), bg)
         try:
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignVCenter|Qt.TextFlag.TextSingleLine, self.rendered_text)
+            p.drawText(
+                self.rect(),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextSingleLine,
+                self.rendered_text,
+            )
         finally:
             p.end()
 
-    def enterEvent(self, ev):
+    def enterEvent(self, event):
         self.hovering = True
         self.update()
-        return QWidget.enterEvent(self, ev)
+        return QWidget.enterEvent(self, event)
 
-    def leaveEvent(self, ev):
+    def leaveEvent(self, a0):
         self.hovering = False
         self.update()
-        return QWidget.leaveEvent(self, ev)
+        return QWidget.leaveEvent(self, a0)
 
-    def contextMenuEvent(self, ev):
-        self.context_menu_requested.emit(self, ev)
+    def contextMenuEvent(self, a0) -> None:
+        self.context_menu_requested.emit(self, a0)
+
+
 # }}}
 
 
-class Cell(object):  # {{{
-
-    __slots__ = ('rect', 'text', 'right_align', 'color_role', 'override_color', 'swatch', 'is_overriden')
+class Cell:  # {{{
+    __slots__ = ('color_role', 'is_overriden', 'override_color', 'rect', 'right_align', 'swatch', 'text')
 
     SIDE_MARGIN = 5
     FLAGS = Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextSingleLine | Qt.TextFlag.TextIncludeTrailingSpaces
 
-    def __init__(self, text, rect, right_align=False, color_role=QPalette.ColorRole.WindowText, swatch=None, is_overriden=False):
+    def __init__(self, text, rect, right_align=False, color_role=QPalette.ColorRole.WindowText, swatch=None, is_overriden=False) -> None:
         self.rect, self.text = rect, text
         self.right_align = right_align
         self.is_overriden = is_overriden
@@ -109,7 +128,7 @@ class Cell(object):  # {{{
         if swatch is not None:
             self.swatch = QColor(swatch[0], swatch[1], swatch[2], int(255 * swatch[3]))
 
-    def draw(self, painter, width, palette):
+    def draw(self, painter, width, palette) -> None:
         flags = self.FLAGS | (Qt.AlignmentFlag.AlignRight if self.right_align else Qt.AlignmentFlag.AlignLeft)
         rect = QRect(self.rect)
         if self.right_align:
@@ -123,15 +142,16 @@ class Cell(object):  # {{{
         if self.is_overriden:
             painter.setPen(palette.color(QPalette.ColorRole.WindowText))
             painter.drawLine(br.left(), br.top() + br.height() // 2, br.right(), br.top() + br.height() // 2)
+
+
 # }}}
 
 
 class Declaration(QWidget):
-
     hyperlink_activated = pyqtSignal(object)
     context_menu_requested = pyqtSignal(object, object)
 
-    def __init__(self, html_name, data, is_first=False, parent=None):
+    def __init__(self, html_name, data, is_first=False, parent=None) -> None:
         QWidget.__init__(self, parent)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         self.data = data
@@ -141,9 +161,12 @@ class Declaration(QWidget):
         self.do_layout()
         self.setMouseTracking(True)
 
-    def do_layout(self):
+    def do_layout(self) -> None:
         fm = self.fontMetrics()
-        bounding_rect = lambda text: fm.boundingRect(0, 0, 10000, 10000, Cell.FLAGS, text)
+
+        def bounding_rect(text):
+            return fm.boundingRect(0, 0, 10000, 10000, Cell.FLAGS, text)
+
         line_spacing = 2
         side_margin = Cell.SIDE_MARGIN
         self.rows = []
@@ -160,7 +183,7 @@ class Declaration(QWidget):
             self.hyperlink_rect = QRect(side_margin, ypos, br1.width(), br1.height())
             self.rows.append([
                 Cell(name, self.hyperlink_rect, color_role=QPalette.ColorRole.Link),
-                Cell(sel, QRect(br1.right() + side_margin, ypos, br2.width(), br2.height()), right_align=True)
+                Cell(sel, QRect(br1.right() + side_margin, ypos, br2.width(), br2.height()), right_align=True),
             ])
             ypos += max(br1.height(), br2.height()) + 2 * line_spacing
             self.lines_for_copy.append(name + ' ' + sel)
@@ -171,12 +194,22 @@ class Declaration(QWidget):
             vtext = prop.value + '\xa0' + ('!' if prop.important else '') + prop.important
             br2 = bounding_rect(vtext)
             self.rows.append([
-                Cell(text, QRect(side_margin, ypos, br1.width(), br1.height()), color_role=QPalette.ColorRole.LinkVisited, is_overriden=prop.is_overriden),
-                Cell(vtext, QRect(br1.right() + side_margin, ypos, br2.width(), br2.height()), swatch=prop.color, is_overriden=prop.is_overriden)
+                Cell(
+                    text,
+                    QRect(side_margin, ypos, br1.width(), br1.height()),
+                    color_role=QPalette.ColorRole.LinkVisited,
+                    is_overriden=prop.is_overriden,
+                ),
+                Cell(
+                    vtext,
+                    QRect(br1.right() + side_margin, ypos, br2.width(), br2.height()),
+                    swatch=prop.color,
+                    is_overriden=prop.is_overriden,
+                ),
             ])
             self.lines_for_copy.append(text + vtext)
             if prop.is_overriden:
-                self.lines_for_copy[-1] += ' [overriden]'
+                self.lines_for_copy[-1] += ' [overridden]'
             ypos += max(br1.height(), br2.height()) + line_spacing
         self.lines_for_copy.append('--------------------------\n')
 
@@ -186,13 +219,19 @@ class Declaration(QWidget):
     def sizeHint(self):
         return QSize(self.width_hint, self.height_hint)
 
-    def paintEvent(self, ev):
+    def paintEvent(self, a0) -> None:
         p = QPainter(self)
-        p.setClipRect(ev.rect())
+        p.setClipRect(a0.rect())
         palette = self.palette()
         p.setPen(palette.color(QPalette.ColorRole.WindowText))
         if not self.is_first:
             p.drawLine(0, 0, self.width(), 0)
+        parent = self
+        while parent is not None:
+            parent = parent.parent()
+            if isinstance(parent, LiveCSS):
+                palette = parent.palette()
+                break
         try:
             for row in self.rows:
                 for cell in row:
@@ -205,9 +244,9 @@ class Declaration(QWidget):
         finally:
             p.end()
 
-    def mouseMoveEvent(self, ev):
+    def mouseMoveEvent(self, a0):
         if hasattr(self, 'hyperlink_rect'):
-            pos = ev.pos()
+            pos = a0.pos()
             hovering = self.hyperlink_rect.contains(pos)
             self.update_hover(hovering)
             cursor = Qt.CursorShape.ArrowCursor
@@ -220,18 +259,18 @@ class Declaration(QWidget):
                 if cursor != Qt.CursorShape.ArrowCursor:
                     break
             self.setCursor(cursor)
-        return QWidget.mouseMoveEvent(self, ev)
+        return QWidget.mouseMoveEvent(self, a0)
 
-    def mousePressEvent(self, ev):
-        if hasattr(self, 'hyperlink_rect') and ev.button() == Qt.MouseButton.LeftButton:
-            pos = ev.pos()
+    def mousePressEvent(self, a0):
+        if hasattr(self, 'hyperlink_rect') and a0.button() == Qt.MouseButton.LeftButton:
+            pos = a0.pos()
             if self.hyperlink_rect.contains(pos):
                 self.emit_hyperlink_activated()
-        return QWidget.mousePressEvent(self, ev)
+        return QWidget.mousePressEvent(self, a0)
 
-    def emit_hyperlink_activated(self):
+    def emit_hyperlink_activated(self) -> None:
         dt = self.data['type']
-        data = {'type':dt, 'name':self.html_name, 'syntax':'html'}
+        data = {'type': dt, 'name': self.html_name, 'syntax': 'html'}
         if dt == 'inline':  # style attribute
             data['sourceline_address'] = self.data['href']
         elif dt == 'elem':  # <style> tag
@@ -243,36 +282,36 @@ class Declaration(QWidget):
             data['syntax'] = 'css'
         self.hyperlink_activated.emit(data)
 
-    def leaveEvent(self, ev):
+    def leaveEvent(self, a0):
         self.update_hover(False)
         self.setCursor(Qt.CursorShape.ArrowCursor)
-        return QWidget.leaveEvent(self, ev)
+        return QWidget.leaveEvent(self, a0)
 
-    def update_hover(self, hovering):
+    def update_hover(self, hovering) -> None:
         cell = self.rows[0][0]
-        if (hovering and cell.override_color is None) or (
-                not hovering and cell.override_color is not None):
+        if (hovering and cell.override_color is None) or (not hovering and cell.override_color is not None):
             cell.override_color = QColor(Qt.GlobalColor.red) if hovering else None
             self.update()
 
-    def contextMenuEvent(self, ev):
-        self.context_menu_requested.emit(self, ev)
+    def contextMenuEvent(self, a0) -> None:
+        self.context_menu_requested.emit(self, a0)
 
 
 class Box(QWidget):
-
     hyperlink_activated = pyqtSignal(object)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QWidget.__init__(self, parent)
         self.l = l = QVBoxLayout(self)
         l.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.setLayout(l)
         self.widgets = []
 
-    def show_data(self, data):
+    def show_data(self, data) -> None:
+        layout = self.layout()
+        assert layout is not None
         for w in self.widgets:
-            self.layout().removeWidget(w)
+            layout.removeWidget(w)
             for x in ('toggled', 'hyperlink_activated', 'context_menu_requested'):
                 if hasattr(w, x):
                     try:
@@ -282,39 +321,39 @@ class Box(QWidget):
             w.deleteLater()
         self.widgets = []
         for node in data['nodes']:
-            node_name = node['name'] + ' @%s' % node['sourceline']
+            node_name = node['name'] + ' @{}'.format(node['sourceline'])
             if node['ancestor_specificity'] != 0:
                 title = _('Inherited from %s') % node_name
             else:
                 title = _('Matched CSS rules for %s') % node_name
             h = Heading(title, parent=self)
             h.toggled.connect(self.heading_toggled)
-            self.widgets.append(h), self.layout().addWidget(h)
+            self.widgets.append(h), layout.addWidget(h)
             for i, declaration in enumerate(node['css']):
                 d = Declaration(data['html_name'], declaration, is_first=i == 0, parent=self)
                 d.hyperlink_activated.connect(self.hyperlink_activated)
-                self.widgets.append(d), self.layout().addWidget(d)
+                self.widgets.append(d), layout.addWidget(d)
 
         h = Heading(_('Computed final style'), parent=self)
         h.toggled.connect(self.heading_toggled)
-        self.widgets.append(h), self.layout().addWidget(h)
+        self.widgets.append(h), layout.addWidget(h)
         ccss = data['computed_css']
-        declaration = {'properties':[Property([k, ccss[k][0], '', ccss[k][1]]) for k in sorted(ccss)]}
+        declaration = {'properties': [Property([k, ccss[k][0], '', ccss[k][1]]) for k in sorted(ccss)]}
         d = Declaration(None, declaration, is_first=True, parent=self)
-        self.widgets.append(d), self.layout().addWidget(d)
+        self.widgets.append(d), layout.addWidget(d)
         for w in self.widgets:
             w.context_menu_requested.connect(self.context_menu_requested)
 
-    def heading_toggled(self, heading):
+    def heading_toggled(self, heading) -> None:
         for i, w in enumerate(self.widgets):
             if w is heading:
-                for b in self.widgets[i + 1:]:
+                for b in self.widgets[i + 1 :]:
                     if isinstance(b, Heading):
                         break
                     b.setVisible(heading.expanded)
                 break
 
-    def relayout(self):
+    def relayout(self) -> None:
         for w in self.widgets:
             w.do_layout()
             w.updateGeometry()
@@ -326,7 +365,7 @@ class Box(QWidget):
             ans += w.lines_for_copy
         return ans
 
-    def context_menu_requested(self, widget, ev):
+    def context_menu_requested(self, widget, ev) -> None:
         if isinstance(widget, Heading):
             start = widget
         else:
@@ -352,35 +391,41 @@ class Box(QWidget):
             return
         block = '\n'.join(lines).replace('\xa0', ' ')
         heading = lines[0]
+
+        def _copy_to_clipboard(text) -> None:
+            cb = qapplication_or_fail().clipboard()
+            assert cb is not None
+            cb.setText(text)
+
         m = QMenu(self)
-        m.addAction(QIcon(I('edit-copy.png')), _('Copy') + ' ' + heading.replace('\xa0', ' '), lambda : QApplication.instance().clipboard().setText(block))
+        m.addAction(QIcon.ic('edit-copy.png'), _('Copy') + ' ' + heading.replace('\xa0', ' '), lambda: _copy_to_clipboard(block))
         all_lines = []
         for w in self.widgets:
             all_lines += w.lines_for_copy
         all_text = '\n'.join(all_lines).replace('\xa0', ' ')
-        m.addAction(QIcon(I('edit-copy.png')), _('Copy everything'), lambda : QApplication.instance().clipboard().setText(all_text))
-        m.exec_(ev.globalPos())
+        m.addAction(QIcon.ic('edit-copy.png'), _('Copy everything'), lambda: _copy_to_clipboard(all_text))
+        m.exec(ev.globalPos())
 
 
-class Property(object):
+class Property:
+    __slots__ = ('color', 'important', 'is_overriden', 'name', 'specificity', 'value')
 
-    __slots__ = 'name', 'value', 'important', 'color', 'specificity', 'is_overriden'
-
-    def __init__(self, prop, specificity=()):
+    def __init__(self, prop, specificity=()) -> None:
         self.name, self.value, self.important, self.color = prop
         self.specificity = tuple(specificity)
         self.is_overriden = False
 
-    def __repr__(self):
-        return '<Property name=%s value=%s important=%s color=%s specificity=%s is_overriden=%s>' % (
-            self.name, self.value, self.important, self.color, self.specificity, self.is_overriden)
+    def __repr__(self) -> str:
+        return (
+            f'<Property name={self.name} value={self.value} important={self.important} '
+            f'color={self.color} specificity={self.specificity} is_overriden={self.is_overriden}>'
+        )
 
 
 class LiveCSS(QWidget):
-
     goto_declaration = pyqtSignal(object)
 
-    def __init__(self, preview, parent=None):
+    def __init__(self, preview, parent=None) -> None:
         QWidget.__init__(self, parent)
         self.preview = preview
         preview.live_css_data.connect(self.got_live_css_data)
@@ -399,33 +444,32 @@ class LiveCSS(QWidget):
         self.stack = s = QStackedLayout(self)
         self.setLayout(s)
 
-        self.clear_label = la = QLabel('<h3>' + _(
-            'No style information found') + '</h3><p>' + _(
-                'Move the cursor inside a HTML tag to see what styles'
-                ' apply to that tag.'))
+        self.clear_label = la = QLabel(
+            '<h3>' + _('No style information found') + '</h3><p>' + _('Move the cursor inside a HTML tag to see what styles apply to that tag.')
+        )
         la.setWordWrap(True)
         la.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         s.addWidget(la)
 
         self.box = box = Box(self)
         box.hyperlink_activated.connect(self.goto_declaration, type=Qt.ConnectionType.QueuedConnection)
-        self.scroll = sc = QScrollArea(self)
+        sc = QScrollArea(self)
         sc.setWidget(box)
         sc.setWidgetResizable(True)
         s.addWidget(sc)
 
-    def preview_refresh_starting(self):
+    def preview_refresh_starting(self) -> None:
         self.preview_is_refreshing = True
 
-    def preview_refreshed(self):
+    def preview_refreshed(self) -> None:
         self.preview_is_refreshing = False
         self.refresh_needed = True
         self.start_update_timer()
 
-    def apply_theme(self):
+    def apply_theme(self) -> None:
         f = self.font()
         f.setFamily(tprefs['editor_font_family'] or default_font_family())
-        f.setPointSize(tprefs['editor_font_size'])
+        f.setPointSizeF(tprefs['editor_font_size'])
         self.setFont(f)
         theme = get_theme(tprefs['editor_theme'])
         pal = self.palette()
@@ -439,10 +483,10 @@ class LiveCSS(QWidget):
             self.box.relayout()
         self.update()
 
-    def clear(self):
+    def clear(self) -> None:
         self.stack.setCurrentIndex(0)
 
-    def show_data(self, editor_name, sourceline, tags):
+    def show_data(self, editor_name, sourceline, tags) -> None:
         if self.preview_is_refreshing:
             return
         if sourceline is None:
@@ -450,7 +494,7 @@ class LiveCSS(QWidget):
         else:
             self.preview.request_live_css_data(editor_name, sourceline, tags)
 
-    def got_live_css_data(self, result):
+    def got_live_css_data(self, result) -> None:
         maximum_specificities = {}
         for node in result['nodes']:
             for rule in node['css']:
@@ -462,7 +506,7 @@ class LiveCSS(QWidget):
                         prop.is_overriden = True
         self.display_received_live_css_data(result)
 
-    def display_received_live_css_data(self, data):
+    def display_received_live_css_data(self, data) -> None:
         editor_name = data['editor_name']
         sourceline = data['sourceline']
         tags = data['tags']
@@ -480,14 +524,15 @@ class LiveCSS(QWidget):
         self.refresh_needed = False
         self.stack.setCurrentIndex(1)
 
-    def process_rule(self, rule, ancestor_specificity, maximum_specificities):
+    def process_rule(self, rule, ancestor_specificity, maximum_specificities) -> None:
         selector = rule['selector']
         sheet_index = rule['sheet_index']
         rule_address = rule['rule_address'] or ()
+        specificity: list[object]
         if selector is not None:
             try:
                 specificity = [0] + list(parse(selector)[0].specificity())
-            except (AttributeError, TypeError, SelectorError):
+            except AttributeError, TypeError, SelectorError:
                 specificity = [0, 0, 0, 0]
         else:  # style attribute
             specificity = [1, 0, 0, 0]
@@ -502,7 +547,7 @@ class LiveCSS(QWidget):
         rule['properties'] = properties
 
         href = rule['href']
-        if hasattr(href, 'startswith') and href.startswith('%s://%s' % (FAKE_PROTOCOL, FAKE_HOST)):
+        if hasattr(href, 'startswith') and href.startswith(f'{FAKE_PROTOCOL}://{FAKE_HOST}'):
             qurl = QUrl(href)
             name = qurl.path()[1:]
             if name:
@@ -516,12 +561,12 @@ class LiveCSS(QWidget):
     def is_visible(self):
         return self.isVisible()
 
-    def showEvent(self, ev):
+    def showEvent(self, a0):
         self.update_timer.start()
         actions['auto-reload-preview'].setEnabled(True)
-        return QWidget.showEvent(self, ev)
+        return QWidget.showEvent(self, a0)
 
-    def sync_to_editor(self):
+    def sync_to_editor(self) -> None:
         self.update_data()
 
     def update_data(self):
@@ -536,14 +581,14 @@ class LiveCSS(QWidget):
             if self.refresh_needed or self.now_showing != (editor_name, sourceline, tags):
                 self.show_data(editor_name, sourceline, tags)
 
-    def start_update_timer(self):
+    def start_update_timer(self) -> None:
         if self.is_visible:
             self.update_timer.start()
 
-    def stop_update_timer(self):
+    def stop_update_timer(self) -> None:
         self.update_timer.stop()
 
-    def navigate_to_declaration(self, data, editor):
+    def navigate_to_declaration(self, data, editor) -> None:
         if data['type'] == 'inline':
             sourceline, tags = data['sourceline_address']
             editor.goto_sourceline(sourceline, tags, attribute='style')

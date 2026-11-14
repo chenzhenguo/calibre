@@ -1,11 +1,15 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
+import os
+import sys
+from typing import TYPE_CHECKING, Self, cast
 
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from contextlib import AbstractContextManager
 
-import os, sys
+    from calibre.utils.config import OptionParser
 
 # For some reason Qt 5 crashes on some linux systems if the fork() is done
 # after the Qt modules are loaded in calibre.gui2. We also cannot do a fork()
@@ -16,7 +20,7 @@ import os, sys
 is_detached = False
 
 
-def do_detach(fork=True, setsid=True, redirect=True):
+def do_detach(fork: bool = True, setsid: bool = True, redirect: bool = True) -> None:
     global is_detached
     if fork:
         # Detach from the controlling process.
@@ -26,101 +30,185 @@ def do_detach(fork=True, setsid=True, redirect=True):
         os.setsid()
     if redirect:
         from calibre_extensions.speedup import detach
+
         detach(os.devnull)
     is_detached = True
 
 
-def detach_gui():
-    from calibre.constants import islinux, isbsd, DEBUG
+def setup_qt_logging() -> None:
+    from calibre.constants import DEBUG
+
+    if not DEBUG:
+        from qt.core import QLoggingCategory
+
+        QLoggingCategory.setFilterRules('''\
+qt.webenginecontext.info=false
+''')
+
+
+def detach_gui() -> None:
+    from calibre.constants import DEBUG, isbsd, islinux
+
     if (islinux or isbsd) and not DEBUG and '--detach' in sys.argv:
         do_detach()
 
 
-def init_dbus():
-    from calibre.constants import islinux, isbsd
-    if islinux or isbsd:
-        from dbus.mainloop.glib import DBusGMainLoop, threads_init
-        threads_init()
-        DBusGMainLoop(set_as_default=True)
-
-
-def register_with_default_programs():
+def register_with_default_programs() -> AbstractContextManager[object, None]:
     from calibre.constants import iswindows
+
     if iswindows:
-        from calibre.utils.winreg.default_programs import Register
         from calibre.gui2 import gprefs
+        from calibre.utils.winreg.default_programs import Register
+
         return Register(gprefs)
     else:
-        class Dummy(object):
 
-            def __enter__(self):
+        class Dummy:
+            def __enter__(self) -> Self:
                 return self
 
-            def __exit__(self, *args):
+            def __exit__(self, *args: object) -> None:
                 pass
+
         return Dummy()
 
 
-def calibre(args=sys.argv):
+def calibre(args: list[str] = sys.argv) -> None:
     from calibre.constants import DEBUG
+
     if DEBUG:
         from calibre.debug import print_basic_debug_info
+
         print_basic_debug_info()
     detach_gui()
-    init_dbus()
+    setup_qt_logging()
     with register_with_default_programs():
         from calibre.gui2.main import main
+
         main(args)
 
 
-def ebook_viewer(args=sys.argv):
+def is_possible_media_pack_error(e: ImportError) -> bool:
+    from ctypes.util import find_library
+
+    from calibre.constants import iswindows
+
+    if iswindows and 'QtWebEngine' in str(e):
+        if not find_library('MFTranscode.dll'):
+            return True
+    return False
+
+
+def show_media_pack_error() -> None:
+    import traceback
+
+    from calibre.gui2 import Application, error_dialog
+    from calibre.utils.localization import _
+
+    app = Application([])
+    error_dialog(
+        None,
+        _('Required component missing'),
+        '<p>'
+        + _(
+            'This computer is missing the Windows MediaPack, which is needed for calibre. Instructions for installing it are <a href="{0}">available here</a>.'
+        ).format('https://support.medal.tv/support/solutions/articles/48001157311-windows-is-missing-media-pack'),
+        det_msg=traceback.format_exc(),
+    ).exec()
+    del app
+
+
+def media_pack_error_check[**P, R](func: Callable[P, R]) -> Callable[P, R | None]:
+
+    def wrapper(*a: P.args, **kw: P.kwargs) -> R | None:
+        try:
+            return func(*a, **kw)
+        except ImportError as e:
+            if is_possible_media_pack_error(e):
+                show_media_pack_error()
+            else:
+                raise
+
+    return wrapper
+
+
+@media_pack_error_check
+def ebook_viewer(args: list[str] = sys.argv) -> None:
     detach_gui()
-    init_dbus()
+    setup_qt_logging()
     with register_with_default_programs():
-        from calibre.gui2.viewer.main import main
-        main(args)
+        try:
+            from calibre.gui2.viewer.main import main
+
+            main(args)
+        except ImportError as e:
+            if is_possible_media_pack_error(e):
+                show_media_pack_error()
+            else:
+                raise
 
 
-def store_dialog(args=sys.argv):
+@media_pack_error_check
+def store_dialog(args: list[str] = sys.argv) -> None:
     detach_gui()
-    init_dbus()
+    setup_qt_logging()
     from calibre.gui2.store.web_store import main
+
     main(args)
 
 
-def webengine_dialog(**kw):
+@media_pack_error_check
+def webengine_dialog(**kw: object) -> None:
     detach_gui()
-    init_dbus()
+    setup_qt_logging()
     from calibre.debug import load_user_plugins
+
     load_user_plugins()
     import importlib
-    m = importlib.import_module(kw.pop('module'))
-    getattr(m, kw.pop('entry_func', 'main'))(**kw)
+
+    m = importlib.import_module(cast('str', kw.pop('module')))
+    getattr(m, cast('str', kw.pop('entry_func', 'main')))(**kw)
 
 
-def toc_dialog(**kw):
+@media_pack_error_check
+def toc_dialog(**kw: object) -> None:
     detach_gui()
-    init_dbus()
+    setup_qt_logging()
     from calibre.gui2.toc.main import main
+
     main(**kw)
 
 
-def gui_ebook_edit(path=None, notify=None):
-    ' For launching the editor from inside calibre '
-    init_dbus()
+@media_pack_error_check
+def cyoa(args: list[str] = sys.argv) -> None:
+    "Play the Create Your Own Adventure game, from the command line or from inside calibre"
+    detach_gui()
+    setup_qt_logging()
+    from calibre.gui2.cyoa.main import main
+
+    main(args)
+
+
+@media_pack_error_check
+def gui_ebook_edit(path: str | None = None, notify: str | None = None) -> None:
+    "For launching the editor from inside calibre"
     from calibre.gui2.tweak_book.main import gui_main
+
+    setup_qt_logging()
     gui_main(path, notify)
 
 
-def ebook_edit(args=sys.argv):
+@media_pack_error_check
+def ebook_edit(args: list[str] = sys.argv) -> None:
     detach_gui()
-    init_dbus()
+    setup_qt_logging()
     with register_with_default_programs():
         from calibre.gui2.tweak_book.main import main
+
         main(args)
 
 
-def option_parser(basename):
+def option_parser(basename: str) -> OptionParser:
     if basename == 'calibre':
         from calibre.gui2.main import option_parser
     elif basename == 'ebook-viewer':

@@ -7,10 +7,19 @@
 
 %ModuleHeaderCode
 #include <QPainter>
-int load_style(QHash<int,QString> icon_map, int transient_scroller);
 void set_no_activate_on_click(QWidget *widget);
 void draw_snake_spinner(QPainter &painter, QRect rect, int angle, const QColor & light, const QColor & dark);
 %End
+
+class CalibreStyle : QProxyStyle {
+%TypeHeaderCode
+#include <QProgressIndicator.h>
+%End
+
+public:
+    CalibreStyle(int transient_scroller);
+};
+
 
 class SpinAnimator : QObject {
 
@@ -50,7 +59,7 @@ public:
     virtual QSize sizeHint() const;
 
     int heightForWidth(int w) const;
-    
+
     QSize displaySize() const;
 
 public slots:
@@ -66,7 +75,7 @@ public slots:
     void setSizeHint(QSize size);
 
 protected:
-    
+
     virtual void paintEvent(QPaintEvent * event);
 
 signals:
@@ -74,6 +83,21 @@ signals:
 
 };
 
-int load_style(QHash<int,QString> icon_map, int transient_scroller);
 void set_no_activate_on_click(QWidget *widget);
 void draw_snake_spinner(QPainter &painter, QRect rect, int angle, const QColor & light, const QColor & dark) /ReleaseGIL/;
+void set_menu_on_action(QAction* ac, QMenu* menu);
+QMenu* menu_for_action(const QAction *ac);
+void set_image_allocation_limit(int megabytes);
+int get_image_allocation_limit();
+QImage image_from_hicon(void*);
+QImage image_from_hbitmap(void*);
+double contrast_ratio(const QColor & c1, const QColor & c2);
+QString utf16_slice(const QString &src, qsizetype pos, qsizetype n=-1);
+void set_icon_theme(bool is_dark, bool has_dark_user_theme, bool has_light_user_theme, bool has_any_user_theme);
+QIcon icon_from_name(QString name, const QByteArray fallback_data);
+QIcon icon_from_paths(QString any_path, QString light_path, QString dark_path);
+void install_qt_translator(PyObject *v);
+%MethodCode
+    if (PyLong_Check(a0)) install_translator(PyLong_AsVoidPtr(a0));
+    else install_translator(NULL);
+%End

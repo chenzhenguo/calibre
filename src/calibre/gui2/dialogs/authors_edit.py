@@ -1,41 +1,49 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
 from collections import OrderedDict
 
-from PyQt5.Qt import (
-    QDialog, QGridLayout, QDialogButtonBox, QListWidget, QApplication, Qt,
-    pyqtSignal, QSize, QPushButton, QIcon, QStyledItemDelegate, QLabel, QAbstractItemView)
+from qt.core import (
+    QAbstractItemView,
+    QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QGridLayout,
+    QIcon,
+    QLabel,
+    QListWidget,
+    QPushButton,
+    QSize,
+    QStyledItemDelegate,
+    Qt,
+    pyqtSignal,
+)
 
-from calibre.utils.config_base import tweaks
+from calibre.ebooks.metadata import string_to_authors
 from calibre.gui2 import gprefs
 from calibre.gui2.complete2 import EditWithComplete
-from calibre.ebooks.metadata import string_to_authors
-from polyglot.builtins import unicode_type, range
+from calibre.utils.config_base import tweaks
+from calibre.utils.icu import lower as icu_lower
+from calibre.utils.localization import _
 
 
 class ItemDelegate(QStyledItemDelegate):
-
     edited = pyqtSignal(object)
 
-    def __init__(self, all_authors, parent):
+    def __init__(self, all_authors, parent) -> None:
         QStyledItemDelegate.__init__(self, parent)
         self.all_authors = all_authors
 
-    def sizeHint(self, *args):
-        return QStyledItemDelegate.sizeHint(self, *args) + QSize(0, 15)
+    def sizeHint(self, option, index):
+        return QStyledItemDelegate.sizeHint(self, option, index) + QSize(0, 15)
 
-    def setEditorData(self, editor, index):
-        name = unicode_type(index.data(Qt.ItemDataRole.DisplayRole) or '')
-        editor.setText(name)
-        editor.lineEdit().selectAll()
+    def setEditorData(self, editor, index) -> None:
+        name = str(index.data(Qt.ItemDataRole.DisplayRole) or '')
+        n = editor.metaObject().userProperty().name()
+        editor.setProperty(n, name)
 
-    def setModelData(self, editor, model, index):
-        authors = string_to_authors(unicode_type(editor.text()))
+    def setModelData(self, editor, model, index) -> None:
+        authors = string_to_authors(str(editor.text()))
         model.setData(index, authors[0])
         self.edited.emit(index.row())
 
@@ -47,8 +55,7 @@ class ItemDelegate(QStyledItemDelegate):
 
 
 class List(QListWidget):
-
-    def __init__(self, all_authors, parent):
+    def __init__(self, all_authors, parent) -> None:
         QListWidget.__init__(self, parent)
         self.setDragEnabled(True)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -59,58 +66,62 @@ class List(QListWidget):
         self.d.edited.connect(self.edited, type=Qt.ConnectionType.QueuedConnection)
         self.setItemDelegate(self.d)
 
-    def delete_selected(self):
+    def delete_selected(self) -> None:
         for item in self.selectedItems():
             self.takeItem(self.row(item))
 
-    def keyPressEvent(self, ev):
-        if ev.key() == Qt.Key.Key_Delete:
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Delete:
             self.delete_selected()
-            ev.accept()
+            e.accept()
             return
-        return QListWidget.keyPressEvent(self, ev)
+        return QListWidget.keyPressEvent(self, e)
 
-    def addItem(self, *args):
+    def addItem(self, *args, **kwargs):
         try:
-            return QListWidget.addItem(self, *args)
+            return QListWidget.addItem(self, *args, **kwargs)
         finally:
             self.mark_as_editable()
 
-    def addItems(self, *args):
+    def addItems(self, labels):
         try:
-            return QListWidget.addItems(self, *args)
+            if labels is not None:
+                return QListWidget.addItems(self, labels)
         finally:
             self.mark_as_editable()
 
-    def mark_as_editable(self):
+    def mark_as_editable(self) -> None:
         for i in range(self.count()):
             item = self.item(i)
+            assert item is not None
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
 
-    def edited(self, i):
+    def edited(self, i) -> None:
         item = self.item(i)
-        q = unicode_type(item.text())
+        assert item is not None
+        q = str(item.text())
         remove = []
         for j in range(self.count()):
-            if i != j and unicode_type(self.item(j).text()) == q:
+            jitem = self.item(j)
+            assert jitem is not None
+            if i != j and str(jitem.text()) == q:
                 remove.append(j)
         for x in sorted(remove, reverse=True):
             self.takeItem(x)
 
 
 class Edit(EditWithComplete):
-
     returnPressed = pyqtSignal()
 
-    def keyPressEvent(self, ev):
-        if ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            ev.accept()
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            e.accept()
             self.returnPressed.emit()
             return
-        return EditWithComplete.keyPressEvent(self, ev)
+        return EditWithComplete.keyPressEvent(self, e)
 
 
-def init_line_edit(a, all_authors):
+def init_line_edit(a, all_authors) -> None:
     a.set_separator('&')
     a.set_space_before_sep(True)
     a.set_add_separator(tweaks['authors_completer_append_separator'])
@@ -118,15 +129,13 @@ def init_line_edit(a, all_authors):
 
 
 class AuthorsEdit(QDialog):
-
-    def __init__(self, all_authors, current_authors, parent=None):
+    def __init__(self, all_authors, current_authors, parent=None) -> None:
         QDialog.__init__(self, parent)
         self.l = l = QGridLayout()
         self.setLayout(l)
         self.setWindowTitle(_('Edit authors'))
 
-        self.la = QLabel(_(
-            'Edit the authors for this book. You can drag and drop to re-arrange authors'))
+        self.la = QLabel(_('Edit the authors for this book. You can drag and drop to re-arrange authors'))
         self.la.setWordWrap(True)
         l.addWidget(self.la, 0, 0, 1, 3)
 
@@ -136,18 +145,20 @@ class AuthorsEdit(QDialog):
 
         self.author = a = Edit(self)
         init_line_edit(a, all_authors)
-        a.lineEdit().setPlaceholderText(_('Enter an author to add'))
+        a_le = a.lineEdit()
+        assert a_le is not None
+        a_le.setPlaceholderText(_('Enter an author to add'))
         a.returnPressed.connect(self.add_author)
         l.addWidget(a, 2, 0)
 
         self.ab = b = QPushButton(_('&Add'))
-        b.setIcon(QIcon(I('plus.png')))
+        b.setIcon(QIcon.ic('plus.png'))
         l.addWidget(b, 2, 1)
         b.clicked.connect(self.add_author)
 
         self.db = b = QPushButton(_('&Remove selected'))
         l.addWidget(b, 2, 2)
-        b.setIcon(QIcon(I('minus.png')))
+        b.setIcon(QIcon.ic('minus.png'))
         b.clicked.connect(self.al.delete_selected)
 
         self.bb = bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -157,30 +168,27 @@ class AuthorsEdit(QDialog):
 
         l.setColumnStretch(0, 10)
         self.resize(self.sizeHint() + QSize(150, 100))
-        geom = gprefs.get('authors-edit-geometry', None)
-        if geom is not None:
-            QApplication.instance().safe_restore_geometry(self, geom)
+        self.restore_geometry(gprefs, 'authors-edit-geometry')
         self.author.setFocus(Qt.FocusReason.OtherFocusReason)
 
-    def save_geometry(self):
-        gprefs.set('authors-edit-geometry', bytearray(self.saveGeometry()))
-
     def accept(self):
-        self.save_geometry()
+        self.save_geometry(gprefs, 'authors-edit-geometry')
         return QDialog.accept(self)
 
     def reject(self):
-        self.save_geometry()
+        self.save_geometry(gprefs, 'authors-edit-geometry')
         return QDialog.reject(self)
 
     @property
     def authors(self):
         ans = []
         for i in range(self.al.count()):
-            ans.append(unicode_type(self.al.item(i).text()))
+            al_item = self.al.item(i)
+            assert al_item is not None
+            ans.append(str(al_item.text()))
         return ans or [_('Unknown')]
 
-    def add_author(self):
+    def add_author(self) -> None:
         text = self.author.text().strip()
         authors = OrderedDict((icu_lower(x), (i, x)) for i, x in enumerate(self.authors))
         if text:
@@ -190,15 +198,17 @@ class AuthorsEdit(QDialog):
                     # Case change
                     i = authors[la][0]
                     authors[la] = (i, author)
-                    self.al.item(i).setText(author)
+                    al_it = self.al.item(i)
+                    assert al_it is not None
+                    al_it.setText(author)
                 else:
                     self.al.addItem(author)
-                    authors[la] = author
+                    authors[la] = (self.al.count() - 1, author)
         self.author.setText('')
 
 
 if __name__ == '__main__':
     app = QApplication([])
     d = AuthorsEdit(['kovid goyal', 'divok layog', 'other author'], ['kovid goyal', 'other author'])
-    d.exec_()
+    d.exec()
     print(d.authors)

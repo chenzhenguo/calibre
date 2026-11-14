@@ -1,24 +1,21 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
 import importlib
 import sys
-from PyQt5.Qt import QToolButton
+
+from qt.core import QToolButton
 
 from calibre import prints
+from calibre.customize import PluginInstallationType
 from calibre.customize.ui import all_edit_book_tool_plugins
 from calibre.gui2.tweak_book import current_container, tprefs
 from calibre.gui2.tweak_book.boss import get_boss
-from polyglot.builtins import itervalues, unicode_type
+from calibre.utils.localization import _
 
 
-class Tool(object):
-
-    '''
+class Tool:
+    """
     The base class for individual tools in an Edit Book plugin. Useful members include:
 
         * ``self.plugin``: A reference to the :class:`calibre.customize.Plugin` object to which this tool belongs.
@@ -30,10 +27,10 @@ class Tool(object):
         * :meth:`create_action`
         * :meth:`register_shortcut`
 
-    '''
+    """
 
     #: Set this to a unique name it will be used as a key
-    name = None
+    name: str | None = None
 
     #: If True the user can choose to place this tool in the plugins toolbar
     allowed_in_toolbar = True
@@ -46,23 +43,23 @@ class Tool(object):
 
     @property
     def boss(self):
-        ' The :class:`calibre.gui2.tweak_book.boss.Boss` object. Used to control the user interface. '
+        "The :class:`calibre.gui2.tweak_book.boss.Boss` object. Used to control the user interface."
         return get_boss()
 
     @property
     def gui(self):
-        ' The main window of the user interface '
+        "The main window of the user interface"
         return self.boss.gui
 
     @property
     def current_container(self):
-        ' Return the current :class:`calibre.ebooks.oeb.polish.container.Container` object that represents the book being edited. '
+        "Return the current :class:`calibre.ebooks.oeb.polish.container.Container` object that represents the book being edited."
         return current_container()
 
-    def register_shortcut(self, qaction, unique_name, default_keys=(), short_text=None, description=None, **extra_data):
-        '''
+    def register_shortcut(self, qaction, unique_name, default_keys=(), short_text=None, description=None, **extra_data) -> None:
+        """
         Register a keyboard shortcut that will trigger the specified ``qaction``. This keyboard shortcut
-        will become automatically customizable by the user in the Keyboard section of the editor preferences.
+        will become automatically customizable by the user in the Keyboard shortcuts section of the editor preferences.
 
         :param qaction: A QAction object, it will be triggered when the
             configured key combination is pressed by the user.
@@ -79,14 +76,20 @@ class Tool(object):
             specified the text from the QAction will be used.
         :param description: An optional longer description of this action, it
             will be used in the preferences entry for this shortcut.
-        '''
-        short_text = short_text or unicode_type(qaction.text()).replace('&&', '\0').replace('&', '').replace('\0', '&')
+        """
+        short_text = short_text or str(qaction.text()).replace('&&', '\0').replace('&', '').replace('\0', '&')
+        assert self.name is not None
         self.gui.keyboard.register_shortcut(
-            self.name + '_' + unique_name, short_text, default_keys=default_keys, action=qaction,
-            description=description or '', group=_('Plugins'))
+            self.name + '_' + unique_name,
+            short_text,
+            default_keys=default_keys,
+            action=qaction,
+            description=description or '',
+            group=_('Plugins'),
+        )
 
     def create_action(self, for_toolbar=True):
-        '''
+        """
         Create a QAction that will be added to either the plugins toolbar or
         the plugins menu depending on ``for_toolbar``. For example::
 
@@ -106,18 +109,19 @@ class Tool(object):
                 return ac
 
         .. seealso:: Method :meth:`register_shortcut`.
-        '''
+        """
         raise NotImplementedError()
 
 
 def load_plugin_tools(plugin):
     try:
-        main = importlib.import_module(plugin.__class__.__module__+'.main')
+        main = importlib.import_module(plugin.__class__.__module__ + '.main')
     except ImportError:
         import traceback
+
         traceback.print_exc()
     else:
-        for x in itervalues(vars(main)):
+        for x in vars(main).values():
             if isinstance(x, type) and x is not Tool and issubclass(x, Tool):
                 ans = x()
                 ans.plugin = plugin
@@ -139,11 +143,12 @@ def create_plugin_action(plugin, tool, for_toolbar, actions=None, toolbar_action
     except Exception:
         prints('Failed to create action for tool:', tool.name)
         import traceback
+
         traceback.print_exc()
         return
     sid = plugin_action_sid(plugin, tool, for_toolbar)
     if actions is not None and sid in actions:
-        prints('The %s tool from the %s plugin has a non unique name, ignoring' % (tool.name, plugin.name))
+        prints(f'The {tool.name} tool from the {plugin.name} plugin has a non unique name, ignoring')
     else:
         if actions is not None:
             actions[sid] = ac
@@ -152,18 +157,19 @@ def create_plugin_action(plugin, tool, for_toolbar, actions=None, toolbar_action
             if toolbar_actions is not None:
                 toolbar_actions[sid] = ac
                 plugin_toolbar_actions.append(ac)
-            ac.popup_mode = {'instant':QToolButton.ToolButtonPopupMode.InstantPopup, 'button':QToolButton.ToolButtonPopupMode.MenuButtonPopup}.get(
-                tool.toolbar_button_popup_mode, QToolButton.ToolButtonPopupMode.DelayedPopup)
-        else:
-            if plugin_menu_actions is not None:
-                plugin_menu_actions.append(ac)
+            ac.popup_mode = {
+                'instant': QToolButton.ToolButtonPopupMode.InstantPopup,
+                'button': QToolButton.ToolButtonPopupMode.MenuButtonPopup,
+            }.get(tool.toolbar_button_popup_mode, QToolButton.ToolButtonPopupMode.DelayedPopup)
+        elif plugin_menu_actions is not None:
+            plugin_menu_actions.append(ac)
     return ac
 
 
 _tool_memory = []  # Needed to prevent the tool object from being garbage collected
 
 
-def create_plugin_actions(actions, toolbar_actions, plugin_menu_actions):
+def create_plugin_actions(actions, toolbar_actions, plugin_menu_actions) -> None:
     del _tool_memory[:]
     del plugin_toolbar_actions[:]
 
@@ -171,10 +177,11 @@ def create_plugin_actions(actions, toolbar_actions, plugin_menu_actions):
         try:
             tools = tuple(load_plugin_tools(plugin))
         except Exception:
-            if not plugin.plugin_path:
+            if plugin.installation_type is PluginInstallationType.BUILTIN:
                 raise
             print('Failed to load third-party plugin:', plugin.name, file=sys.stderr)
             import traceback
+
             traceback.print_exc()
             continue
         for tool in tools:
@@ -185,7 +192,7 @@ def create_plugin_actions(actions, toolbar_actions, plugin_menu_actions):
                 create_plugin_action(plugin, tool, False, actions, toolbar_actions, plugin_menu_actions)
 
 
-def install_plugin(plugin):
+def install_plugin(plugin) -> None:
     for tool in load_plugin_tools(plugin):
         if tool.allowed_in_toolbar:
             sid = plugin_action_sid(plugin, tool, True)

@@ -1,23 +1,15 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
 
-store_version = 5  # Needed for dynamic plugin loading
 
-__license__ = 'GPL 3'
-__copyright__ = '2011, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+store_version = 7  # Needed for dynamic plugin loading
 
 import random
 import re
 from contextlib import closing
-try:
-    from urllib.parse import quote
-except ImportError:
-    from urllib import quote
+from urllib.parse import quote
 
 from lxml import html
-
-from PyQt5.Qt import QUrl
+from qt.core import QUrl
 
 from calibre import browser, url_slash_cleaner
 from calibre.gui2 import open_url
@@ -26,8 +18,13 @@ from calibre.gui2.store.basic_config import BasicStoreConfig
 from calibre.gui2.store.search_result import SearchResult
 from calibre.gui2.store.web_store_dialog import WebStoreDialog
 
+try:
+    from calibre.utils.xml_parse import safe_html_fromstring
+except ImportError:
+    from lxml.html import fromstring as safe_html_fromstring
 
-def search(query, max_results=10, timeout=60):
+
+def search(query, max_results=10, timeout=60, save_raw=None):
     url = 'https://www.smashwords.com/books/search?query=' + quote(query)
 
     br = browser()
@@ -38,23 +35,24 @@ def search(query, max_results=10, timeout=60):
 
     counter = max_results
     with closing(br.open(url, timeout=timeout)) as f:
-        doc = html.fromstring(f.read())
-        for data in doc.xpath('//div[@id="pageContent"]//div[@class="library-book"]'):
+        raw = f.read()
+        if save_raw:
+            with open(save_raw, 'wb') as r:
+                r.write(raw)
+        doc = safe_html_fromstring(raw)
+        for data in doc.xpath('//div[@id="pageContent"]//div[contains(@class, "library-book")]'):
             if counter <= 0:
                 break
-            data = html.fromstring(html.tostring(data))
+            data = safe_html_fromstring(html.tostring(data))
 
-            id = None
-            id_a = ''.join(data.xpath('//a[contains(@class, "library-title")]/@href'))
-            if id_a:
-                id = id_a.split('/')[-1]
-            if not id:
+            id_a = ''.join(data.xpath('//span[contains(@class, "library-title")]/a/@href'))
+            if not id_a:
                 continue
 
             cover_url = ''.join(data.xpath('//img[contains(@class, "book-list-image")]/@src'))
 
-            title = ''.join(data.xpath('.//a[contains(@class, "library-title")]/text()'))
-            author = ''.join(data.xpath('.//a[@itemprop="author"]//text()'))
+            title = ''.join(data.xpath('.//span[contains(@class, "library-title")]//text()'))
+            author = ''.join(data.xpath('.//span[contains(@class, "library-by-line")]/a//text()'))
 
             price = ''.join(data.xpath('.//div[@class="subnote"]//text()'))
             if 'Price:' in price:
@@ -74,15 +72,14 @@ def search(query, max_results=10, timeout=60):
             s.title = title.strip()
             s.author = author.strip()
             s.price = price
-            s.detail_item = '/books/view/' + id.strip()
+            s.detail_item = id_a
             s.drm = SearchResult.DRM_UNLOCKED
 
             yield s
 
 
 class SmashwordsStore(BasicStoreConfig, StorePlugin):
-
-    def open(self, parent=None, detail_item=None, external=False):
+    def open(self, gui=None, parent=None, detail_item=None, external=False) -> None:
         url = 'https://www.smashwords.com/'
 
         aff_id = '?ref=usernone'
@@ -96,28 +93,28 @@ class SmashwordsStore(BasicStoreConfig, StorePlugin):
         url = url + aff_id
 
         if external or self.config.get('open_external', False):
-            open_url(QUrl(url_slash_cleaner(detail_url if detail_url else url)))
+            open_url(QUrl(url_slash_cleaner(detail_url or url)))
         else:
             d = WebStoreDialog(self.gui, url, parent, detail_url)
             d.setWindowTitle(self.name)
             d.set_tags(self.config.get('tags', ''))
-            d.exec_()
+            d.exec()
 
     def search(self, query, max_results=10, timeout=60):
-        for a in search(query, max_results=max_results, timeout=timeout):
-            yield a
+        yield from search(query, max_results=max_results, timeout=timeout)
 
-    def get_details(self, search_result, timeout):
+    def get_details(self, search_result, timeout=60) -> bool:
         url = 'https://www.smashwords.com/'
 
         br = browser()
         with closing(br.open(url + search_result.detail_item, timeout=timeout)) as nf:
-            idata = html.fromstring(nf.read())
+            idata = safe_html_fromstring(nf.read())
             search_result.formats = ', '.join(list(set(idata.xpath('//p//abbr//text()'))))
         return True
 
 
 if __name__ == '__main__':
     import sys
-    for r in search(' '.join(sys.argv[1:])):
+
+    for r in search(' '.join(sys.argv[1:]), save_raw='/t/raw.html'):
         print(r)

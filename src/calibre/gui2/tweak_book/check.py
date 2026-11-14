@@ -1,23 +1,30 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
 import sys
 
-from PyQt5.Qt import (
-     QIcon, Qt, QSplitter, QListWidget, QTextBrowser, QPalette, QMenu,
-     QListWidgetItem, pyqtSignal, QApplication, QStyledItemDelegate,
-     QAbstractItemView)
+from qt.core import (
+    QAbstractItemView,
+    QApplication,
+    QIcon,
+    QListWidget,
+    QListWidgetItem,
+    QMenu,
+    QPalette,
+    QSplitter,
+    QStyledItemDelegate,
+    Qt,
+    QTextBrowser,
+    pyqtSignal,
+)
 
-from calibre.ebooks.oeb.polish.check.base import WARN, INFO, DEBUG, ERROR, CRITICAL
-from calibre.ebooks.oeb.polish.check.main import run_checks, fix_errors
+from calibre import prepare_string_for_xml
+from calibre.ebooks.oeb.polish.check.base import CRITICAL, DEBUG, ERROR, INFO, WARN, BaseError
+from calibre.ebooks.oeb.polish.check.main import fix_errors, run_checks
 from calibre.gui2 import NO_URL_FORMATTING, safe_open_url
 from calibre.gui2.tweak_book import tprefs
-from calibre.gui2.tweak_book.widgets import BusyCursor
-from polyglot.builtins import unicode_type, range
+from calibre.gui2.widgets import BusyCursor
+from calibre.utils.localization import _, ngettext
 
 
 def icon_for_level(level):
@@ -29,7 +36,7 @@ def icon_for_level(level):
         icon = 'dialog_information.png'
     else:
         icon = None
-    return QIcon(I(icon)) if icon else QIcon()
+    return QIcon.ic(icon) if icon else QIcon()
 
 
 def prefix_for_level(level):
@@ -46,25 +53,63 @@ def prefix_for_level(level):
     return text
 
 
-class Delegate(QStyledItemDelegate):
+def build_error_message(error, with_level=False, with_line_numbers=False) -> str:
+    prefix = ''
+    filename = error.name
+    if with_level:
+        prefix = prefix_for_level(error.level)
+    if with_line_numbers and error.line:
+        filename = f'{filename}:{error.line}'
+    return f'{prefix}{error.msg}\xa0\xa0\xa0\xa0[{filename}]'
 
-    def initStyleOption(self, option, index):
-        super(Delegate, self).initStyleOption(option, index)
-        if index.row() == self.parent().currentRow():
+
+class SkippedRules:
+    """Marker stored in the list item that shows the skipped rules"""
+
+
+class HiddenAccessibilityProblems:
+    """Marker stored in the list item that shows the number of hidden accessibility problems"""
+
+
+def show_accessibility_problems() -> bool:
+    return bool(tprefs['check_book_accessibility'])
+
+
+def sort_key(err: BaseError) -> tuple[int, str]:
+    return 100 - err.level, err.name
+
+
+def skipped_rules() -> dict[str, str]:
+    """Map of rule_id to human readable rule name for all skipped rules"""
+    return dict(tprefs['check_book_skipped_rules'])
+
+
+def set_skipped_rules(rules: dict[str, str]) -> None:
+    tprefs['check_book_skipped_rules'] = rules
+
+
+class Delegate(QStyledItemDelegate):
+    def initStyleOption(self, option, index) -> None:
+        super().initStyleOption(option, index)
+        p = self.parent()
+        assert isinstance(p, QListWidget)
+        if index.row() == p.currentRow():
             option.font.setBold(True)
-            option.backgroundBrush = self.parent().palette().brush(QPalette.ColorRole.AlternateBase)
+            option.backgroundBrush = p.palette().brush(QPalette.ColorRole.AlternateBase)
 
 
 class Check(QSplitter):
-
     item_activated = pyqtSignal(object)
     check_requested = pyqtSignal()
     fix_requested = pyqtSignal(object)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QSplitter.__init__(self, parent)
         self.setChildrenCollapsible(False)
 
+        # Accessibility problems found by the last check that are not shown
+        # because the user has turned off showing them
+        self.hidden_accessibility_problems: list[BaseError] = []
         self.items = i = QListWidget(self)
         i.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         i.customContextMenuRequested.connect(self.context_menu)
@@ -87,81 +132,304 @@ class Check(QSplitter):
         if state is not None:
             self.restoreState(state)
 
-    def clear_at_startup(self):
+    def clear_at_startup(self) -> None:
         self.clear_help(_('Check has not been run'))
+        self.clear_items()
+
+    def clear_items(self) -> None:
         self.items.clear()
+        self.hidden_accessibility_problems = []
 
-    def context_menu(self, pos):
+    def error_for_item(self, item: QListWidgetItem | None) -> BaseError | None:
+        if item is None:
+            return None
+        ans = item.data(Qt.ItemDataRole.UserRole)
+        return ans if isinstance(ans, BaseError) else None
+
+    def errors_in_list(self) -> list[BaseError]:
+        ans = []
+        for i in range(self.items.count()):
+            err = self.error_for_item(self.items.item(i))
+            if err is not None:
+                ans.append(err)
+        return ans
+
+    @property
+    def num_errors(self) -> int:
+        return len(self.errors_in_list())
+
+    def skipped_rules_item(self) -> QListWidgetItem | None:
+        for i in range(self.items.count()):
+            item = self.items.item(i)
+            if item is not None and isinstance(item.data(Qt.ItemDataRole.UserRole), SkippedRules):
+                return item
+        return None
+
+    def hidden_accessibility_item(self) -> QListWidgetItem | None:
+        for i in range(self.items.count()):
+            item = self.items.item(i)
+            if item is not None and isinstance(item.data(Qt.ItemDataRole.UserRole), HiddenAccessibilityProblems):
+                return item
+        return None
+
+    def populate(self, errors: list[BaseError]) -> None:
+        """Fill the list with the specified errors, followed by the entries for hidden accessibility problems and skipped rules"""
+        self.items.clear()
+        if show_accessibility_problems():
+            self.hidden_accessibility_problems = []
+        else:
+            self.hidden_accessibility_problems = [e for e in errors if e.is_accessibility_problem]
+            errors = [e for e in errors if not e.is_accessibility_problem]
+        for err in sorted(errors, key=sort_key):
+            i = QListWidgetItem(build_error_message(err), self.items)
+            i.setData(Qt.ItemDataRole.UserRole, err)
+            i.setIcon(icon_for_level(err.level))
+        if num := len(self.hidden_accessibility_problems):
+            item = QListWidgetItem(self.items)
+            item.setData(Qt.ItemDataRole.UserRole, HiddenAccessibilityProblems())
+            item.setIcon(QIcon.ic('accessibility.png'))
+            f = item.font()
+            f.setItalic(True)
+            item.setFont(f)
+            item.setText(ngettext('One accessibility problem is not shown', '{} accessibility problems are not shown', num).format(num))
+            item.setToolTip(_('Click to see how to show accessibility problems'))
+        self.update_skipped_rules_item()
+
+    def show_initial_item(self) -> None:
+        if self.num_errors > 0:
+            self.items.setCurrentRow(0)
+            self.current_item_changed()
+        elif (item := self.hidden_accessibility_item()) is not None:
+            self.items.setCurrentItem(item)
+            self.current_item_changed()
+        else:
+            self.items.setCurrentRow(-1)
+            self.clear_help()
+
+    def set_show_accessibility_problems(self, show: bool) -> None:
+        """Show or hide accessibility problems, without re-running the check"""
+        tprefs['check_book_accessibility'] = show
+        if self.items.count() == 0:
+            # check has not been run or found nothing
+            return
+        current = self.error_for_item(self.items.currentItem())
+        errors = self.errors_in_list() + self.hidden_accessibility_problems
+        self.items.blockSignals(True)
+        try:
+            self.populate(errors)
+        finally:
+            self.items.blockSignals(False)
+        if show:
+            # Go to the first of the newly shown accessibility problems
+            current = next((e for e in self.errors_in_list() if e.is_accessibility_problem), current)
+        for i in range(self.items.count()):
+            if current is not None and self.error_for_item(self.items.item(i)) is current:
+                self.items.setCurrentRow(i)
+                self.current_item_changed()
+                break
+        else:
+            self.show_initial_item()
+
+    def show_hidden_accessibility_help(self) -> None:
+        num = len(self.hidden_accessibility_problems)
+        self.help.setText(
+            '<style>a {{text-decoration: none}}</style><h2>{}</h2><p>{}</p>'
+            '<div><a href="show:accessibility" title="{}">{}</a><br><br><a href="run:check" title="{}">{}</a></div>'.format(
+                ngettext('One accessibility problem is not shown', '{} accessibility problems are not shown', num).format(num),
+                _(
+                    'Accessibility problems, such as images without alternative text, HTML files that do'
+                    ' not specify their language and missing accessibility metadata, are not being shown.'
+                    ' Fixing them makes the book usable by more people, for example, people using screen readers.'
+                ),
+                _('Add accessibility problems to the list of problems'),
+                _('Show accessibility problems'),
+                _('Re-run the check'),
+                _('Re-run check'),
+            )
+        )
+
+    def update_skipped_rules_item(self) -> None:
+        """Create, update or remove the list entry that shows the skipped rules"""
+        num = len(skipped_rules())
+        item = self.skipped_rules_item()
+        if not num:
+            if item is not None:
+                self.items.takeItem(self.items.row(item))
+            return
+        if item is None:
+            item = QListWidgetItem(self.items)
+            item.setData(Qt.ItemDataRole.UserRole, SkippedRules())
+            item.setIcon(QIcon.ic('filter.png'))
+            f = item.font()
+            f.setItalic(True)
+            item.setFont(f)
+        item.setText(ngettext('One type of problem is being skipped', '{} types of problems are being skipped', num).format(num))
+        item.setToolTip(_('Click to see the list of skipped problem types'))
+
+    def context_menu(self, pos) -> None:
         m = QMenu(self)
-        if self.items.count() > 0:
-            m.addAction(QIcon(I('edit-copy.png')), _('Copy list of errors to clipboard'), self.copy_to_clipboard)
-        if list(m.actions()):
-            m.exec_(self.mapToGlobal(pos))
+        if self.num_errors > 0:
+            m.addAction(QIcon.ic('edit-copy.png'), _('Copy list of errors to clipboard'), self.copy_to_clipboard)
+        ac = m.addAction(_('Show &accessibility problems'))
+        assert ac is not None
+        ac.setCheckable(True)
+        ac.setChecked(show_accessibility_problems())
+        ac.toggled.connect(self.set_show_accessibility_problems)
+        m.exec(self.items.mapToGlobal(pos))
 
-    def copy_to_clipboard(self):
+    def copy_to_clipboard(self) -> None:
         items = []
-        for item in (self.items.item(i) for i in range(self.items.count())):
-            msg = unicode_type(item.text())
-            msg = prefix_for_level(item.data(Qt.ItemDataRole.UserRole).level) + msg
+        for err in self.errors_in_list():
+            msg = build_error_message(err, with_level=True, with_line_numbers=True)
             items.append(msg)
         if items:
-            QApplication.clipboard().setText('\n'.join(items))
+            cb = QApplication.clipboard()
+            assert cb is not None
+            cb.setText('\n'.join(items))
 
-    def save_state(self):
+    def save_state(self) -> None:
         tprefs.set('check-book-splitter-state', bytearray(self.saveState()))
 
-    def clear_help(self, msg=None):
+    def clear_help(self, msg=None) -> None:
         if msg is None:
             msg = _('No problems found')
-        self.help.setText('<h2>%s</h2><p><a style="text-decoration:none" title="%s" href="run:check">%s</a></p>' % (
-            msg, _('Click to run a check on the book'), _('Run check')))
+        self.help.setText(
+            '<h2>{}</h2><p><a style="text-decoration:none" title="{}" href="run:check">{}</a></p>'.format(
+                msg, _('Click to run a check on the book'), _('Run check')
+            )
+        )
 
-    def link_clicked(self, url):
-        url = unicode_type(url.toString(NO_URL_FORMATTING))
+    def link_clicked(self, url) -> None:
+        url = str(url.toString(NO_URL_FORMATTING))
         if url == 'activate:item':
             self.current_item_activated()
         elif url == 'run:check':
             self.check_requested.emit()
         elif url == 'fix:errors':
-            errors = [self.items.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.items.count())]
-            self.fix_requested.emit(errors)
+            self.fix_requested.emit(self.errors_in_list())
         elif url.startswith('fix:error,'):
             num = int(url.rpartition(',')[-1])
-            errors = [self.items.item(num).data(Qt.ItemDataRole.UserRole)]
-            self.fix_requested.emit(errors)
+            err = self.error_for_item(self.items.item(num))
+            assert err is not None
+            self.fix_requested.emit([err])
+        elif url.startswith('skip:rule,'):
+            self.skip_rule(int(url.rpartition(',')[-1]))
+        elif url.startswith('unskip:rule,'):
+            self.unskip_rule(int(url.rpartition(',')[-1]))
+        elif url == 'unskip:all':
+            self.unskip_all_rules()
+        elif url == 'show:accessibility':
+            self.set_show_accessibility_problems(True)
+        elif url == 'hide:accessibility':
+            self.set_show_accessibility_problems(False)
         elif url.startswith('activate:item:'):
             index = int(url.rpartition(':')[-1])
             self.location_activated(index)
         elif url.startswith('https://'):
             safe_open_url(url)
 
-    def next_error(self, delta=1):
+    def next_error(self, delta=1) -> None:
         row = self.items.currentRow()
-        num = self.items.count()
+        # errors are always before the skipped rules entry in the list
+        num = self.num_errors
         if num > 0:
             row = (row + delta) % num
             self.items.setCurrentRow(row)
             self.current_item_activated()
 
-    def current_item_activated(self, *args):
-        i = self.items.currentItem()
-        if i is not None:
-            err = i.data(Qt.ItemDataRole.UserRole)
+    def current_item_activated(self, *args) -> None:
+        err = self.error_for_item(self.items.currentItem())
+        if err is not None:
             if err.has_multiple_locations:
                 self.location_activated(0)
             else:
                 self.item_activated.emit(err)
 
-    def location_activated(self, index):
-        i = self.items.currentItem()
-        if i is not None:
-            err = i.data(Qt.ItemDataRole.UserRole)
+    def location_activated(self, index) -> None:
+        err = self.error_for_item(self.items.currentItem())
+        if err is not None:
             err.current_location_index = index
             self.item_activated.emit(err)
 
-    def current_item_changed(self, *args):
+    def skip_rule(self, row: int) -> None:
+        err = self.error_for_item(self.items.item(row))
+        if err is None or not err.can_be_skipped:
+            return
+        rules = skipped_rules()
+        rules[err.rule_id] = err.rule_name
+        set_skipped_rules(rules)
+        self.items.blockSignals(True)
+        try:
+            for i in reversed(range(self.items.count())):
+                q = self.error_for_item(self.items.item(i))
+                if q is not None and q.can_be_skipped and q.rule_id == err.rule_id:
+                    self.items.takeItem(i)
+            self.update_skipped_rules_item()
+        finally:
+            self.items.blockSignals(False)
+        num = self.num_errors
+        if num > 0:
+            self.items.setCurrentRow(min(row, num - 1))
+            self.current_item_changed()
+        else:
+            self.show_initial_item()
+
+    def unskip_rule(self, idx: int) -> None:
+        rules = skipped_rules()
+        ids = self.sorted_skipped_rule_ids(rules)
+        if 0 <= idx < len(ids):
+            del rules[ids[idx]]
+            set_skipped_rules(rules)
+        self.after_unskip()
+
+    def unskip_all_rules(self) -> None:
+        set_skipped_rules({})
+        self.after_unskip()
+
+    def after_unskip(self) -> None:
+        self.items.blockSignals(True)
+        try:
+            self.update_skipped_rules_item()
+        finally:
+            self.items.blockSignals(False)
+        if self.skipped_rules_item() is None:
+            self.items.setCurrentRow(-1)
+            self.clear_help(_('No problems are being skipped'))
+        else:
+            self.show_skipped_rules()
+
+    def sorted_skipped_rule_ids(self, rules: dict[str, str]) -> list[str]:
+        return sorted(rules, key=lambda rule_id: (rules[rule_id].lower(), rule_id))
+
+    def show_skipped_rules(self) -> None:
+        rules = skipped_rules()
+        lines = []
+        unskip_tt = _('Report problems of this type again')
+        for i, rule_id in enumerate(self.sorted_skipped_rule_ids(rules)):
+            name = prepare_string_for_xml(rules[rule_id])
+            lines.append(f'<li>{name}&nbsp;&nbsp;<a href="unskip:rule,{i}" title="{unskip_tt}">[{_("Un-skip")}]</a></li>')
+        self.help.setText(
+            '<style>a {{text-decoration: none}}</style><h2>{}</h2><p>{}</p><ul>{}</ul>'
+            '<div><a href="unskip:all" title="{}">{}</a><br><br><a href="run:check" title="{}">{}</a></div>'.format(
+                _('Skipped problems'),
+                _('Problems of the following types are not reported. Re-run the check after un-skipping to see them.'),
+                ''.join(lines),
+                _('Report all skipped problems again'),
+                _('Un-skip all'),
+                _('Re-run the check'),
+                _('Re-run check'),
+            )
+        )
+
+    def current_item_changed(self, *args) -> None:
         i = self.items.currentItem()
         self.help.setText('')
+        if i is not None and isinstance(i.data(Qt.ItemDataRole.UserRole), SkippedRules):
+            self.show_skipped_rules()
+            return
+        if i is not None and isinstance(i.data(Qt.ItemDataRole.UserRole), HiddenAccessibilityProblems):
+            self.show_hidden_accessibility_help()
+            return
 
         def loc_to_string(line, col):
             loc = ''
@@ -170,98 +438,108 @@ class Check(QSplitter):
             if col is not None:
                 loc += _(' column: %d') % col
             if loc:
-                loc = ' (%s)' % loc
+                loc = f' ({loc})'
             return loc
 
         if i is not None:
             err = i.data(Qt.ItemDataRole.UserRole)
-            header = {DEBUG:_('Debug'), INFO:_('Information'), WARN:_('Warning'), ERROR:_('Error'), CRITICAL:_('Error')}[err.level]
+            header = {
+                DEBUG: _('Debug'),
+                INFO: _('Information'),
+                WARN: _('Warning'),
+                ERROR: _('Error'),
+                CRITICAL: _('Error'),
+            }[err.level]
             ifix = ''
             loc = loc_to_string(err.line, err.col)
             if err.INDIVIDUAL_FIX:
-                ifix = '<a href="fix:error,%d" title="%s">%s</a><br><br>' % (
-                    self.items.currentRow(), _('Try to fix only this error'), err.INDIVIDUAL_FIX)
+                ifix = f"<a href=\"fix:error,{self.items.currentRow()}\" title=\"{_('Try to fix only this error')}\">{err.INDIVIDUAL_FIX}</a><br><br>"
             open_tt = _('Click to open in editor')
             fix_tt = _('Try to fix all fixable errors automatically. Only works for some types of error.')
             fix_msg = _('Try to correct all fixable errors automatically')
             run_tt, run_msg = _('Re-run the check'), _('Re-run check')
-            header = '<style>a { text-decoration: none}</style><h2>%s [%d / %d]</h2>' % (
-                        header, self.items.currentRow()+1, self.items.count())
+            skip = ''
+            if err.can_be_skipped:
+                skip_tt = prepare_string_for_xml(_('Do not report problems of the type: {}').format(err.rule_name), True)
+                skip = f'<br><br><a href="skip:rule,{self.items.currentRow()}" title="{skip_tt}">{_("Skip problems of this type")}</a>'
+                skip = skip.replace('%', '%%')
+            if err.is_accessibility_problem:
+                hide_tt = _('Do not show any accessibility problems')
+                skip += f'<br><br><a href="hide:accessibility" title="{hide_tt}">{_("Hide accessibility problems")}</a>'.replace('%', '%%')
+            header = f'<style>a {{text-decoration: none}}</style><h2>{header} [{self.items.currentRow() + 1} / {self.num_errors}]</h2>'
             msg = '<p>%s</p>'
-            footer = '<div>%s<a href="fix:errors" title="%s">%s</a><br><br> <a href="run:check" title="%s">%s</a></div>'
+            footer = '<div>%s<a href="fix:errors" title="%s">%s</a><br><br> <a href="run:check" title="%s">%s</a>' + skip + '</div>'
             if err.has_multiple_locations:
                 activate = []
                 for i, (name, lnum, col) in enumerate(err.all_locations):
-                    activate.append('<a href="activate:item:%d" title="%s">%s %s</a>' % (
-                        i, open_tt, name, loc_to_string(lnum, col)))
+                    activate.append(f'<a href="activate:item:{i}" title="{open_tt}">{name} {loc_to_string(lnum, col)}</a>')
                 many = len(activate) > 2
-                activate = '<div>%s</div>' % ('<br>'.join(activate))
+                activate = '<div>{}</div>'.format('<br>'.join(activate))
                 if many:
                     activate += '<br>'
                 activate = activate.replace('%', '%%')
                 template = header + ((msg + activate) if many else (activate + msg)) + footer
             else:
-                activate = '<div><a href="activate:item" title="%s">%s %s</a></div>' % (
-                       open_tt, err.name, loc)
+                activate = f'<div><a href="activate:item" title="{open_tt}">{err.name} {loc}</a></div>'
                 activate = activate.replace('%', '%%')
                 template = header + activate + msg + footer
-            self.help.setText(
-                template % (err.HELP, ifix, fix_tt, fix_msg, run_tt, run_msg))
+            self.help.setText(template % (err.HELP, ifix, fix_tt, fix_msg, run_tt, run_msg))
 
-    def run_checks(self, container):
+    def run_checks(self, container) -> None:
         with BusyCursor():
             self.show_busy()
             QApplication.processEvents()
-            errors = run_checks(container)
+            # The accessibility checks are always run, as they are fast, so
+            # that the number of hidden accessibility problems can be shown
+            errors = run_checks(container, frozenset(skipped_rules()), accessibility=True)
             self.hide_busy()
 
-        for err in sorted(errors, key=lambda e:(100 - e.level, e.name)):
-            i = QListWidgetItem('%s\xa0\xa0\xa0\xa0[%s]' % (err.msg, err.name), self.items)
-            i.setData(Qt.ItemDataRole.UserRole, err)
-            i.setIcon(icon_for_level(err.level))
-        if errors:
-            self.items.setCurrentRow(0)
-            self.current_item_changed()
+        self.items.blockSignals(True)
+        try:
+            self.populate(errors)
+        finally:
+            self.items.blockSignals(False)
+        self.show_initial_item()
+        if self.items.count() > 0:
             self.items.setFocus(Qt.FocusReason.OtherFocusReason)
-        else:
-            self.clear_help()
 
     def fix_errors(self, container, errors):
         with BusyCursor():
             self.show_busy(_('Running fixers, please wait...'))
             QApplication.processEvents()
-            changed = fix_errors(container, errors)
+            changed = fix_errors(container, errors, frozenset(skipped_rules()))
         self.run_checks(container)
         return changed
 
-    def show_busy(self, msg=_('Running checks, please wait...')):
+    def show_busy(self, msg=_('Running checks, please wait...')) -> None:
         self.help.setText(msg)
-        self.items.clear()
+        self.clear_items()
 
-    def hide_busy(self):
+    def hide_busy(self) -> None:
         self.help.setText('')
-        self.items.clear()
+        self.clear_items()
 
-    def keyPressEvent(self, ev):
-        if ev.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
+    def keyPressEvent(self, a0):
+        if a0.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
             self.current_item_activated()
-        return super(Check, self).keyPressEvent(ev)
+        return super().keyPressEvent(a0)
 
-    def clear(self):
-        self.items.clear()
+    def clear(self) -> None:
+        self.clear_items()
         self.clear_help()
 
 
-def main():
+def main() -> None:
     from calibre.gui2 import Application
     from calibre.gui2.tweak_book.boss import get_container
-    app = Application([])  # noqa
+
+    app = Application([])
     path = sys.argv[-1]
     container = get_container(path)
     d = Check()
     d.run_checks(container)
     d.show()
-    app.exec_()
+    app.exec()
 
 
 if __name__ == '__main__':

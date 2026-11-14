@@ -1,108 +1,165 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
 import copy
+from bisect import bisect_left
+from collections import OrderedDict
 from functools import partial
-from polyglot.builtins import iteritems, unicode_type, map, native_string_type
+from typing import TYPE_CHECKING, Self
 
+from calibre.db.locking import RWLockWrapper
 from calibre.ebooks.metadata import author_to_author_sort
-from calibre.utils.config_base import tweaks
-from calibre.utils.icu import sort_key, collation_order
+from calibre.utils.config_base import prefs, tweaks
+from calibre.utils.icu import collation_order, sort_key
+from calibre.utils.icu import lower as icu_lower
+from calibre.utils.icu import upper as icu_upper
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Collection, Container, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
+    from types import TracebackType
+
+    from _typeshed import SupportsRichComparison
+
+    from calibre.db.cache import Cache
+    from calibre.db.lazy import ProxyMetadata
+    from calibre.library.field_metadata import FieldMetadata
+
+    # Item ids, or for categories whose items have no ids, such as formats, item names
+    type ItemId = int | str
+    # (category, sort, reverse, first letter sort, hierarchical)
+    type CacheKey = tuple[str, str, bool, bool, bool]
+    # The global version followed by the versions of the fields
+    type Version = tuple[int, ...]
+    # Maps user category name to its items, which are (name, category, ignored)
+    type UserCategories = dict[str, list[tuple[str, str, int]]]
 
 CATEGORY_SORTS = ('name', 'popularity', 'rating')  # This has to be a tuple not a set
 
 
-class Tag(object):
+def slots_copier(slots: Iterable[str]) -> Callable[..., object]:
+    """
+    Return a __copy__ method that copies the given slots directly. Tags are
+    copied in bulk by CategoriesCache and copy.copy() is slow for a class with
+    __slots__, as it goes through the pickle protocol. The method is generated
+    from the slots so that it can never get out of sync with them.
+    """
+    lines = ['def __copy__(self):', '    ans = self.__class__.__new__(self.__class__)']
+    lines += [f'    ans.{k} = self.{k}' for k in slots]
+    lines.append('    return ans')
+    namespace: dict[str, Callable[..., object]] = {}
+    exec('\n'.join(lines), namespace)
+    return namespace['__copy__']
 
-    __slots__ = ('name', 'original_name', 'id', 'count', 'state', 'is_hierarchical',
-            'is_editable', 'is_searchable', 'id_set', 'avg_rating', 'sort',
-            'use_sort_as_name', 'category', 'search_expression', 'original_categories')
 
-    def __init__(self, name, id=None, count=0, state=0, avg=0, sort=None,
-                 category=None, id_set=None, search_expression=None,
-                 is_editable=True, is_searchable=True, use_sort_as_name=False,
-                 original_categories=None):
+class Tag:
+    __slots__ = (
+        'avg_rating',
+        'category',
+        'count',
+        'id',
+        'id_set',
+        'is_editable',
+        'is_hierarchical',
+        'is_searchable',
+        'name',
+        'original_categories',
+        'original_name',
+        'search_expression',
+        'sort',
+        'state',
+        'use_sort_as_name',
+    )
+    __copy__ = slots_copier(__slots__)
+
+    def __init__(
+        self,
+        name: str,
+        id: ItemId | None = None,
+        count: int = 0,
+        state: int = 0,
+        avg: float | None = 0,
+        sort: str | None = None,
+        category: str | None = None,
+        id_set: set[int] | None = None,
+        search_expression: str | None = None,
+        is_editable: bool = True,
+        is_searchable: bool = True,
+        use_sort_as_name: bool = False,
+        original_categories: set[str] | None = None,
+    ) -> None:
         self.name = self.original_name = name
         self.id = id
         self.count = count
         self.state = state
-        self.is_hierarchical = ''
+        self.is_hierarchical: str = ''
         self.is_editable = is_editable
         self.is_searchable = is_searchable
         self.id_set = id_set if id_set is not None else set()
-        self.avg_rating = avg/2.0 if avg is not None else 0
+        self.avg_rating: float | None = avg / 2.0 if avg is not None else 0
         self.sort = sort
         self.use_sort_as_name = use_sort_as_name
         self.category = category
         self.search_expression = search_expression
-        self.original_categories = None
+        self.original_categories = original_categories
 
     @property
-    def string_representation(self):
-        return u'%s:%s:%s:%s:%s'%(self.name, self.count, self.id, self.state, self.category)
+    def string_representation(self) -> str:
+        return f'{self.name}:{self.count}:{self.id}:{self.state}:{self.category}:{self.original_categories}'
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.string_representation
 
-    def __repr__(self):
-        return native_string_type(self)
+    def __repr__(self) -> str:
+        return str(self)
 
     __calibre_serializable__ = True
 
-    def as_dict(self):
+    def as_dict(self) -> dict[str, object]:
         return {k: getattr(self, k) for k in self.__slots__}
 
     @classmethod
-    def from_dict(cls, d):
+    def from_dict(cls, d: Mapping[str, object]) -> Self:
         ans = cls('')
         for k in cls.__slots__:
             setattr(ans, k, d[k])
         return ans
 
 
-def find_categories(field_metadata):
+def find_categories(field_metadata: FieldMetadata) -> Iterator[tuple[str, str | None, bool]]:
     for category, cat in field_metadata.iter_items():
-        if (cat['is_category'] and cat['kind'] not in {'user', 'search'}):
+        if cat['is_category'] and cat['kind'] not in {'user', 'search'}:
             yield (category, cat['is_multiple'].get('cache_to_list', None), False)
-        elif (cat['datatype'] == 'composite' and
-              cat['display'].get('make_category', False)):
+        elif cat['datatype'] == 'composite' and cat['display'].get('make_category', False):
             yield (category, cat['is_multiple'].get('cache_to_list', None), True)
 
 
-def create_tag_class(category, fm):
+def create_tag_class(category: str, fm: FieldMetadata) -> partial[Tag]:
     cat = fm[category]
     dt = cat['datatype']
-    is_editable = category not in {'news', 'rating', 'languages', 'formats',
-                                   'identifiers'} and dt != 'composite'
+    is_editable = category not in {'news', 'rating', 'languages', 'formats', 'identifiers'} and dt != 'composite'
 
-    if (tweaks['categories_use_field_for_author_name'] == 'author_sort' and
-            (category == 'authors' or
-                (cat['display'].get('is_names', False) and
-                cat['is_custom'] and cat['is_multiple'] and
-                dt == 'text'))):
+    if (
+        (category == 'authors' or (cat['display'].get('is_names', False) and cat['is_custom'] and cat['is_multiple'] and dt == 'text'))
+        and tweaks['categories_use_field_for_author_name'] == 'author_sort'
+    ) or (dt == 'series' and tweaks['categories_use_field_for_series_name'] == 'series_sort'):
         use_sort_as_name = True
     else:
         use_sort_as_name = False
 
-    return partial(Tag, use_sort_as_name=use_sort_as_name,
-                   is_editable=is_editable, category=category)
+    return partial(Tag, use_sort_as_name=use_sort_as_name, is_editable=is_editable, category=category)
 
 
-def clean_user_categories(dbcache):
+def clean_user_categories(dbcache: Cache) -> UserCategories:
     user_cats = dbcache.pref('user_categories', {})
-    new_cats = {}
+    new_cats: UserCategories = {}
     for k in user_cats:
         comps = [c.strip() for c in k.split('.') if c.strip()]
         if len(comps) == 0:
             i = 1
             while True:
-                if unicode_type(i) not in user_cats:
-                    new_cats[unicode_type(i)] = user_cats[k]
+                if str(i) not in user_cats:
+                    new_cats[str(i)] = user_cats[k]
                     break
                 i += 1
         else:
@@ -110,69 +167,432 @@ def clean_user_categories(dbcache):
     try:
         if new_cats != user_cats:
             dbcache.set_pref('user_categories', new_cats)
-    except:
+    except Exception:
         pass
     return new_cats
 
 
-category_sort_keys = {True:{}, False: {}}
-category_sort_keys[True]['popularity'] = category_sort_keys[False]['popularity'] = \
-    lambda x:(-getattr(x, 'count', 0), sort_key(x.sort or x.name))
-category_sort_keys[True]['rating'] = category_sort_keys[False]['rating'] = \
-    lambda x:(-getattr(x, 'avg_rating', 0.0), sort_key(x.sort or x.name))
-category_sort_keys[True]['name'] = \
-    lambda x:(collation_order(icu_upper(x.sort or x.name or ' ')), sort_key(x.sort or x.name))
-category_sort_keys[False]['name'] = \
-    lambda x:sort_key(x.sort or x.name)
+def is_standard_category(key: str) -> bool:
+    return not (key.startswith('@') or key == 'search')
 
 
-def get_categories(dbcache, sort='name', book_ids=None, first_letter_sort=False):
+def category_display_order(ordered_cats: Iterable[str], all_cats: Iterable[str]) -> list[str]:
+    # ordered_cats is the desired order. all_cats is the list of keys returned
+    # by get_categories, which is in the default order
+    cat_ord = []
+    all_cat_set = frozenset(all_cats)
+    # Do the standard categories first
+    # Verify all the columns in ordered_cats are actually in all_cats
+    for key in ordered_cats:
+        if is_standard_category(key) and key in all_cat_set:
+            cat_ord.append(key)
+    # Add any new standard cats at the end of the list
+    for key in all_cats:
+        if key not in cat_ord and is_standard_category(key):
+            cat_ord.append(key)
+    # Now add the non-standard cats (user cats and search). As these are always
+    # hierarchical, only keep the prefix.
+    user_cat_prefixes = set()
+    for key in all_cats:
+        if not is_standard_category(key):
+            prefix = key.partition('.')[0]
+            if prefix not in user_cat_prefixes:
+                cat_ord.append(prefix)
+                user_cat_prefixes.add(prefix)
+    return cat_ord
+
+
+numeric_collation = prefs['numeric_collation']
+
+
+def sort_key_for_popularity(x: Tag, hierarchical_categories: Container[str] | None = None) -> tuple[int, bytes]:
+    return (-getattr(x, 'count', 0), sort_key(x.sort or x.name))
+
+
+def sort_key_for_rating(x: Tag, hierarchical_categories: Container[str] | None = None) -> tuple[float, bytes]:
+    return (-getattr(x, 'avg_rating', 0.0), sort_key(x.sort or x.name))
+
+
+# When sorting by name, treat the period in hierarchical categories as a tab so
+# that the value sorts above similarly-named items. Example: "foo.bar" should
+# sort above "foo a.bar". Without this substitution "foo.bar" sorts below "foo
+# a.bar" because '.' sorts higher than space.
+
+
+def sort_key_for_name_and_first_letter(x: Tag, hierarchical_categories: Container[str | None] = ()) -> tuple[str, tuple[int, int], bytes]:
+    v1 = icu_upper(x.sort or x.name)
+    if x.category in hierarchical_categories:
+        v1 = v1.replace('.', '\t')
+    v2 = v1 or ' '
+    # The idea is that '9999999999' is larger than any digit so all digits
+    # will sort in front. Non-digits will sort according to their ICU first letter
+    c = v2[0]
+    return (c if numeric_collation and c.isdigit() else '9999999999', collation_order(v2), sort_key(v1))
+
+
+def sort_key_for_name(x: Tag, hierarchical_categories: Container[str | None] = ()) -> bytes:
+    v = x.sort or x.name
+    if x.category not in hierarchical_categories:
+        return sort_key(v)
+    return sort_key(v.replace('.', '\t'))
+
+
+category_sort_keys = {True: {}, False: {}}
+category_sort_keys[True]['popularity'] = category_sort_keys[False]['popularity'] = sort_key_for_popularity
+category_sort_keys[True]['rating'] = category_sort_keys[False]['rating'] = sort_key_for_rating
+category_sort_keys[True]['name'] = sort_key_for_name_and_first_letter
+category_sort_keys[False]['name'] = sort_key_for_name
+
+
+# Caching of computed categories {{{
+class CategoriesCache:
+    """
+    Caches the sorted list of Tag objects for each category when categories are
+    computed for all books. An entry is valid as long as neither the global
+    version nor the versions of the fields it depends on have changed.
+
+    Consumers of get_categories() freely modify the Tag objects they are given
+    (the Tag browser rewrites name and original_name while building the tree
+    for hierarchical categories, for example) and the same objects can be handed
+    to several threads at once, since get_categories() runs under the shared
+    lock. Cached entries are therefore kept pristine: set() stores copies, unless
+    told that the caller is handing over Tag objects nobody else can reach, and
+    get() returns copies, so the cached Tag objects are never reachable from
+    outside this class. get_stale() is the one exception, it returns the cached
+    Tag objects themselves, which must be neither modified nor handed out. The copies are shallow, which means id_set is shared,
+    so nothing may modify a Tag's id_set in place, it must be replaced instead.
+    The rating category is not cached at all as get_categories() merges the
+    id_sets of its items in place.
+
+    Entries are only discarded by invalidate_all(). The number of entries is
+    bounded by the number of categories times the number of distinct
+    (sort, first letter sort, hierarchical) combinations in use, which is small,
+    but each entry holds a full set of Tag objects, so a library with very many
+    items will retain them until the next write to the database.
+    """
+
+    # Above this many changed items a category is recomputed from scratch
+    MAX_INCREMENTAL_ITEMS = 500
+    # How many changes are remembered per field, which bounds how far out of
+    # date an entry can be and still be refreshed incrementally
+    MAX_CHANGES = 64
+
+    def __init__(self) -> None:
+        self.global_version = 0
+        self.field_versions: dict[str, int] = {}
+        self.entries: dict[CacheKey, tuple[Version, tuple[Tag, ...]]] = {}
+        # field name -> list of (version, changed item ids, changed book ids),
+        # either of which is None when the changed ids are not known
+        self.changes: dict[str, list[tuple[int, frozenset[ItemId] | None, frozenset[int] | None]]] = {}
+
+    def invalidate_all(self) -> None:
+        self.global_version += 1
+        self.entries.clear()
+        self.changes.clear()
+
+    def field_changed(self, name: str, item_ids: Collection[ItemId] | None = None, book_ids: Collection[int] | None = None) -> None:
+        """
+        Record a change to the field name. item_ids are the ids of the items of
+        the field the change affected and book_ids the books it affected, either
+        is None when not known. More ids than a category can be refreshed for
+        are not remembered, as they would only take up memory.
+        """
+
+        def remembered[T: (ItemId, int)](ids: Collection[T] | None) -> frozenset[T] | None:
+            if ids is None or len(ids) > self.MAX_INCREMENTAL_ITEMS:
+                return None
+            return frozenset(ids)
+
+        version = self.field_versions[name] = self.field_versions.get(name, 0) + 1
+        changes = self.changes.setdefault(name, [])
+        changes.append((version, remembered(item_ids), remembered(book_ids)))
+        if len(changes) > self.MAX_CHANGES:
+            del changes[: -self.MAX_CHANGES]
+
+    def changes_since(self, name: str, version: int) -> tuple[AbstractSet[ItemId] | None, AbstractSet[int] | None] | None:
+        """
+        The (item ids, book ids) changed in the field name since version, or
+        None if a change is too old to still be remembered. Either of item ids
+        and book ids is None when a change did not report them.
+        """
+        current = self.field_versions.get(name, 0)
+        if current == version:
+            return frozenset(), frozenset()
+        items: AbstractSet[ItemId] | None
+        books: AbstractSet[int] | None
+        items, books = set(), set()
+        expected = version + 1
+        for changed_version, item_ids, book_ids in self.changes.get(name, ()):
+            if changed_version < expected:
+                continue
+            if changed_version != expected:
+                return None
+            items = None if items is None or item_ids is None else items | item_ids
+            books = None if books is None or book_ids is None else books | book_ids
+            expected += 1
+        if expected != current + 1:
+            return None
+        return items, books
+
+    def fingerprint(self, field_metadata: FieldMetadata, all_fields: bool = False) -> tuple[int, tuple[tuple[str, int], ...]]:
+        """
+        Changes whenever any data the categories are computed from may have changed.
+
+        Only the fields the categories are built from are considered, unless
+        all_fields is True, which is needed when a change to any field at all
+        can change what is displayed, see has_composite_categories().
+        """
+        fv = self.field_versions
+        if all_fields or has_composite_categories(field_metadata):
+            relevant = frozenset(fv)
+        else:
+            relevant = {c for c, _, _ in find_categories(field_metadata)} | {'rating', 'languages', 'tags'}
+        return self.global_version, tuple(sorted((f, fv[f]) for f in relevant if f in fv))
+
+    def versions(self, field_metadata: FieldMetadata) -> dict[str, Version | None]:
+        """
+        The current version of every category, for callers that keep what they
+        built from one and want to know whether it is still up to date. The
+        version of a composite category is None, as its value is computed from
+        a template that can reference any field, so it cannot be tracked.
+        """
+        ans: dict[str, Version | None] = {}
+        for category, _, is_composite in find_categories(field_metadata):
+            if is_composite:
+                ans[category] = None
+            else:
+                datatype = field_metadata[category]['datatype']
+                rating_field = category if datatype == 'rating' else 'rating'
+                ans[category] = self.version_for(category, rating_field, 'languages')
+        return ans
+
+    def version_for(self, *field_names: str) -> Version:
+        fv = self.field_versions
+        return (self.global_version,) + tuple(fv.get(n, 0) for n in field_names)
+
+    def get(self, key: CacheKey, version: Version) -> list[Tag] | None:
+        entry = self.entries.get(key)
+        if entry is None or entry[0] != version:
+            return None
+        return [copy.copy(tag) for tag in entry[1]]
+
+    def get_stale(self, key: CacheKey, field_names: Sequence[str], book_col_map: Mapping[int, object]) -> tuple[tuple[Tag, ...], AbstractSet[ItemId]] | None:
+        """
+        For an entry that is out of date, return (tags, item ids), where the
+        item ids are those that must be recomputed to bring the tags up to
+        date, or None when the category must be recomputed from scratch. The
+        tags are the cached Tag objects themselves, not copies, see the class
+        documentation.
+
+        field_names is the category followed by the other fields its items
+        depend on, and book_col_map maps a book id to the ids of its items in
+        the category, so that a change to a book can be turned into the items
+        it affects.
+        """
+        entry = self.entries.get(key)
+        if entry is None or entry[0][0] != self.global_version:
+            return None
+        item_ids: set[ItemId] = set()
+        for i, name in enumerate(field_names):
+            changed = self.changes_since(name, entry[0][i + 1])
+            if changed is None:
+                return None
+            changed_items, changed_books = changed
+            if i == 0:
+                # A change to the category itself reports the items its books
+                # had both before and after it, which include all the items its
+                # books have now, so its books need not be looked at
+                if changed_items is None:
+                    return None
+                item_ids |= changed_items
+            else:
+                if changed_books is None:
+                    return None
+                items_of_books(book_col_map, changed_books, item_ids)
+            if len(item_ids) > self.MAX_INCREMENTAL_ITEMS:
+                return None
+        return entry[1], item_ids
+
+    def set(self, key: CacheKey, version: Version, tags: Iterable[Tag], copy_tags: bool = True) -> None:
+        """
+        Store tags for key. Pass copy_tags=False only when no Tag object in tags
+        can be reached by anything outside this class.
+        """
+        self.entries[key] = version, tuple(copy.copy(tag) for tag in tags) if copy_tags else tuple(tags)
+
+
+def insert_changed_items[T](cats: list[T], changed: Sequence[T], key: Callable[[T], SupportsRichComparison]) -> bool:
+    """
+    Insert the recomputed items of a category into the list, sorted in
+    ascending order, of the items that did not change. Returns False, having
+    left cats unusable, if any of the items being inserted has the same sort
+    key as another item, because the order of equal items would then depend on
+    the order in which they happen to be inserted, while it must match the
+    order a full recompute produces.
+    """
+    keys = [key(item) for item in changed]
+    if len(set(keys)) != len(keys):
+        return False
+    for item, item_key in zip(changed, keys):
+        # Everything before pos sorts strictly before item_key, so only the
+        # item at pos can be equal to it
+        pos = bisect_left(cats, item_key, key=key)
+        if pos < len(cats) and key(cats[pos]) == item_key:
+            return False
+        cats.insert(pos, item)
+    return True
+
+
+def items_of_books(book_col_map: Mapping[int, object], book_ids: Iterable[int], ans: set[ItemId] | None = None) -> set[ItemId]:
+    """
+    The ids of the items the specified books have in the field whose map of
+    book ids to items is book_col_map, added to ans when it is specified.
+    Formats and identifiers have no item ids, their names identify them.
+    """
+    ans = set() if ans is None else ans
+    for book_id in book_ids:
+        items = book_col_map.get(book_id)
+        if items is None:
+            continue
+        if isinstance(items, (tuple, list, set, frozenset, dict)):
+            ans.update(items)
+        else:
+            ans.add(items)  # ty: ignore[invalid-argument-type]
+    return ans
+
+
+def has_composite_categories(field_metadata: FieldMetadata) -> bool:
+    """
+    True if any category is a composite column. The value of a composite column
+    is computed from a template that can reference any field, so a change to any
+    field at all can change such a category.
+    """
+    return any(is_composite for _, _, is_composite in find_categories(field_metadata))
+
+
+class CategoriesInvalidatingLock(RWLockWrapper):
+    """Wrapper for the exclusive lock that invalidates all cached categories when the lock is acquired"""
+
+    def __init__(self, lock: RWLockWrapper, categories_cache: CategoriesCache) -> None:
+        # Subclass RWLockWrapper so that this is a drop-in replacement for the
+        # lock it wraps, but delegate to the wrapped lock rather than to
+        # RWLockWrapper, so that DebugRWLockWrapper keeps working
+        super().__init__(lock._shlock, lock._is_shared)
+        self._lock, self._categories_cache = lock, categories_cache
+
+    def acquire(self) -> None:
+        self._lock.acquire()
+        self._categories_cache.invalidate_all()
+
+    def release(self, *args: type[BaseException] | BaseException | TracebackType | None) -> None:
+        self._lock.release()
+
+    __enter__ = acquire
+    __exit__ = release
+
+
+# }}}
+
+
+# Various parts of calibre depend on the order of fields in the returned
+# dict being in the default display order: standard fields, custom in alpha order,
+# user categories, then saved searches. This works because the backend adds
+# custom columns to field metadata in the right order.
+def get_categories(
+    dbcache: Cache,
+    sort: str = 'name',
+    book_ids: Iterable[int] | None = None,
+    first_letter_sort: bool = False,
+    uncollapsed_categories: Container[str] | None = None,
+) -> OrderedDict[str, list[Tag]]:
     if sort not in CATEGORY_SORTS:
         raise ValueError('sort ' + sort + ' not a valid value')
 
+    hierarchical_categories = frozenset(dbcache.pref('categories_using_hierarchy', ()))
     fm = dbcache.field_metadata
     book_rating_map = dbcache.fields['rating'].book_value_map
     lang_map = dbcache.fields['languages'].book_value_map
 
-    categories = {}
+    categories = OrderedDict()
     book_ids = frozenset(book_ids) if book_ids else book_ids
     pm_cache = {}
 
-    def get_metadata(book_id):
+    def get_metadata(book_id: int) -> ProxyMetadata:
+
         ans = pm_cache.get(book_id)
         if ans is None:
             ans = pm_cache[book_id] = dbcache._get_proxy_metadata(book_id)
         return ans
 
     bids = None
-    first_letter_sort = bool(first_letter_sort)
+    uncollapsed_categories = () if uncollapsed_categories is None else uncollapsed_categories
+    cache = dbcache.categories_cache
 
     for category, is_multiple, is_composite in find_categories(fm):
+        fl_sort = False if category in uncollapsed_categories else bool(first_letter_sort)
         tag_class = create_tag_class(category, fm)
         sort_on, reverse = sort, False
+        if not is_composite and fm[category]['datatype'] == 'rating' and sort_on == 'name':
+            sort_on, reverse = 'rating', True
+        sort_key_func = partial(category_sort_keys[fl_sort][sort_on], hierarchical_categories=hierarchical_categories)
+        use_cache = False
         if is_composite:
             if bids is None:
                 bids = dbcache._all_book_ids() if book_ids is None else book_ids
-            cats = dbcache.fields[category].get_composite_categories(
-                tag_class, book_rating_map, bids, is_multiple, get_metadata)
+            cats = dbcache.fields[category].get_composite_categories(tag_class, book_rating_map, bids, is_multiple, get_metadata)
         elif category == 'news':
             cats = dbcache.fields['tags'].get_news_category(tag_class, book_ids)
         else:
             cat = fm[category]
             brm = book_rating_map
             dt = cat['datatype']
-            if dt == 'rating':
-                if category != 'rating':
-                    brm = dbcache.fields[category].book_value_map
-                if sort_on == 'name':
-                    sort_on, reverse = 'rating', True
-            cats = dbcache.fields[category].get_categories(
-                tag_class, brm, lang_map, book_ids)
-            if (category != 'authors' and dt == 'text' and
-                cat['is_multiple'] and cat['display'].get('is_names', False)):
+            if dt == 'rating' and category != 'rating':
+                brm = dbcache.fields[category].book_value_map
+            # The rating category is tiny and is modified below, so is not cached
+            use_cache = book_ids is None and category != 'rating'
+            if use_cache:
+                rating_field = category if dt == 'rating' else 'rating'
+                cache_key = category, sort_on, reverse, fl_sort, category in hierarchical_categories
+                cache_version = cache.version_for(category, rating_field, 'languages')
+                cats = cache.get(cache_key, cache_version)
+                if cats is not None:
+                    categories[category] = cats
+                    continue
+            field = dbcache.fields[category]
+            is_names = category != 'authors' and dt == 'text' and cat['is_multiple'] and cat['display'].get('is_names', False)
+            # When only a few items of the category have changed, recompute
+            # just those and put them back into the sorted list of the entry
+            # that is now out of date, instead of recomputing every item.
+            # insert_changed_items() needs the list to be in ascending order,
+            # so a reversed category, which is a custom ratings column sorted
+            # by name, is always recomputed.
+            stale = None
+            if use_cache and not reverse:
+                stale = cache.get_stale(cache_key, (category, rating_field, 'languages'), field.table.book_col_map)
+            if stale is not None:
+                stale_tags, changed_item_ids = stale
+                # The items of categories such as formats have no id, their name identifies them
+                cats = [t for t in stale_tags if (t.name if t.id is None else t.id) not in changed_item_ids]
+                changed = field.get_categories(tag_class, brm, lang_map, book_ids, item_ids=changed_item_ids)
+                if is_names:
+                    for item in changed:
+                        item.sort = author_to_author_sort(item.sort)
+                if insert_changed_items(cats, changed, sort_key_func):
+                    # cats holds the Tag objects of the entry being replaced,
+                    # which cannot be reached from outside the cache, and the
+                    # newly computed ones, so it can be stored as is and only
+                    # copies of it handed out
+                    cache.set(cache_key, cache_version, cats, copy_tags=False)
+                    categories[category] = [copy.copy(tag) for tag in cats]
+                    continue
+                # Items with equal sort keys, recompute the whole category
+            cats = field.get_categories(tag_class, brm, lang_map, book_ids)
+            if is_names:
                 for item in cats:
                     item.sort = author_to_author_sort(item.sort)
-        cats.sort(key=category_sort_keys[first_letter_sort][sort_on], reverse=reverse)
+        cats.sort(key=sort_key_func, reverse=reverse)
+        if use_cache:
+            cache.set(cache_key, cache_version, cats)
         categories[category] = cats
 
     # Needed for legacy databases that have multiple ratings that
@@ -194,10 +614,11 @@ def get_categories(dbcache, sort='name', book_ids=None, first_letter_sort=False)
     for c in gst:
         if c not in muc:
             continue
-        user_categories[c] = []
+        uc = []
         for sc in gst[c]:
             for t in categories.get(sc, ()):
-                user_categories[c].append([t.name, sc, 0])
+                uc.append([t.name, sc, 0])
+        user_categories[c] = uc  # ty: ignore[invalid-assignment]
 
     if user_categories:
         # We want to use same node in the user category as in the source
@@ -206,8 +627,8 @@ def get_categories(dbcache, sort='name', book_ids=None, first_letter_sort=False)
         # do the verification in the category loop much faster, at the cost of
         # temporarily duplicating the categories lists.
         taglist = {}
-        for c, items in iteritems(categories):
-            taglist[c] = dict(map(lambda t:(icu_lower(t.name), t), items))
+        for c, items in categories.items():
+            taglist[c] = {icu_lower(t.name): t for t in items}
 
         # Add the category values to the user categories
         for user_cat in sorted(user_categories, key=sort_key):
@@ -235,10 +656,10 @@ def get_categories(dbcache, sort='name', book_ids=None, first_letter_sort=False)
                             for id_ in t.id_set:
                                 rating = book_rating_map.get(id_, 0)
                                 if rating:
-                                    total_rating += rating/2
+                                    total_rating += rating / 2
                                     count += 1
                             if total_rating and count:
-                                t.avg_rating = total_rating/count
+                                t.avg_rating = total_rating / count
                         else:
                             # Must deepcopy so we don't share the id_set between nodes
                             t = copy.deepcopy(taglist[label][n])
@@ -249,16 +670,15 @@ def get_categories(dbcache, sort='name', book_ids=None, first_letter_sort=False)
                         items.append(taglist[label][n])
                 # else: do nothing, to not include nodes w zero counts
             cat_name = '@' + user_cat  # add the '@' to avoid name collision
-            items.sort(key=category_sort_keys[False][sort])
+            items.sort(key=partial(category_sort_keys[False][sort], hierarchical_categories=hierarchical_categories))
             categories[cat_name] = items
 
     # ### Finally, the saved searches category ####
     items = []
     queries = dbcache._search_api.saved_searches.queries
     for srch in sorted(queries, key=sort_key):
-        items.append(Tag(srch, sort=srch, search_expression=queries[srch],
-                         category='search', is_editable=False))
-    if len(items):
+        items.append(Tag(srch, sort=srch, search_expression=queries[srch], category='search', is_editable=False))
+    if items:
         categories['search'] = items
 
     return categories

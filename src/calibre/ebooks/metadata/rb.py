@@ -1,30 +1,33 @@
+# License: GPLv3 Copyright: 2008, Ashish Kulkarni <kulkarni.ashish@gmail.com>
 
+"""Read meta information from RB files"""
 
-__license__   = 'GPL v3'
-__copyright__ = '2008, Ashish Kulkarni <kulkarni.ashish@gmail.com>'
-'''Read meta information from RB files'''
-
-import sys, struct
+import struct
+import sys
+from typing import IO, TYPE_CHECKING
 
 from calibre import prints
 from calibre.ebooks.metadata import MetaInformation, string_to_authors
-from polyglot.builtins import unicode_type
+
+if TYPE_CHECKING:
+    from calibre.ebooks.metadata.book.base import Metadata
 
 MAGIC = b'\xb0\x0c\xb0\x0c\x02\x00NUVO\x00\x00\x00\x00'
 
 
-def get_metadata(stream):
-    """ Return metadata as a L{MetaInfo} object """
+def get_metadata(stream: IO[bytes]) -> Metadata:
+    """Return metadata as a L{MetaInfo} object"""
     title = 'Unknown'
     mi = MetaInformation(title, ['Unknown'])
     stream.seek(0)
     try:
-        if not stream.read(14) == MAGIC:
-            print('Couldn\'t read RB header from file', file=sys.stderr)
+        if stream.read(14) != MAGIC:
+            print("Couldn't read RB header from file", file=sys.stderr)
             return mi
         stream.read(10)
 
-        read_i32 = lambda: struct.unpack('<I', stream.read(4))[0]
+        def read_i32() -> int:
+            return struct.unpack('<I', stream.read(4))[0]
 
         stream.seek(read_i32())
         toc_count = read_i32()
@@ -35,7 +38,7 @@ def get_metadata(stream):
             if flag == 2:
                 break
         else:
-            print('Couldn\'t find INFO from RB file', file=sys.stderr)
+            print("Couldn't find INFO from RB file", file=sys.stderr)
             return mi
 
         stream.seek(offset)
@@ -49,7 +52,7 @@ def get_metadata(stream):
             elif key.strip() == 'AUTHOR':
                 mi.authors = string_to_authors(value)
     except Exception as err:
-        msg = 'Couldn\'t read metadata from rb: %s with error %s'%(mi.title, unicode_type(err))
+        msg = f"Couldn't read metadata from rb: {mi.title} with error {err!s}"
         prints(msg, file=sys.stderr)
         raise
     return mi

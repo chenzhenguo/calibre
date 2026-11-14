@@ -1,33 +1,33 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPL v3 Copyright: 2019, Kovid Goyal <kovid at kovidgoyal.net>
 
-
 import os
+from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import regex
 
-from calibre.utils.hyphenation.dictionaries import (
-    dictionary_name_for_locale, path_to_dictionary
-)
-from polyglot.builtins import unicode_type
-from polyglot.functools import lru_cache
+from calibre.utils.hyphenation.dictionaries import dictionary_name_for_locale, path_to_dictionary
+
+if TYPE_CHECKING:
+    from lxml import etree
 
 REGEX_FLAGS = regex.VERSION1 | regex.WORD | regex.FULLCASE | regex.UNICODE
 
 
-@lru_cache()
-def dictionary_for_locale(locale):
+@lru_cache
+def dictionary_for_locale(locale: str) -> object | None:
     name = dictionary_name_for_locale(locale)
     if name is not None:
         from calibre_extensions import hyphen
+
         path = path_to_dictionary(name)
         fd = os.open(path, getattr(os, 'O_BINARY', 0) | os.O_RDONLY)
         return hyphen.load_dictionary(fd)
 
 
-def add_soft_hyphens(word, dictionary, hyphen_char='\u00ad'):
-    word = unicode_type(word)
+def add_soft_hyphens(word: str, dictionary: object, hyphen_char: str = '\u00ad') -> str:
+    word = str(word)
     if len(word) > 99 or '=' in word:
         return word
     q = word
@@ -36,6 +36,7 @@ def add_soft_hyphens(word, dictionary, hyphen_char='\u00ad'):
         return word
     lq = q.lower()  # the hyphen library needs lowercase words to work
     from calibre_extensions import hyphen
+
     try:
         ans = hyphen.simple_hyphenate(dictionary, lq)
     except ValueError:
@@ -50,37 +51,61 @@ def add_soft_hyphens(word, dictionary, hyphen_char='\u00ad'):
         pos = 0
         for p in parts:
             lp = len(p)
-            aparts.append(q[pos:pos+lp])
+            aparts.append(q[pos : pos + lp])
             pos += lp
         parts = aparts
     return hyphen_char.join(parts)
 
 
 tags_not_to_hyphenate = frozenset((
-    'video', 'audio', 'script', 'code', 'pre', 'img', 'br', 'samp', 'kbd',
-    'var', 'abbr', 'acronym', 'sub', 'sup', 'button', 'option', 'label',
-    'textarea', 'input', 'math', 'svg', 'style', 'title', 'head'
+    'video',
+    'audio',
+    'script',
+    'code',
+    'pre',
+    'img',
+    'br',
+    'samp',
+    'kbd',
+    'var',
+    'abbr',
+    'acronym',
+    'sub',
+    'sup',
+    'button',
+    'option',
+    'label',
+    'textarea',
+    'input',
+    'math',
+    'svg',
+    'style',
+    'title',
+    'head',
 ))
 
 
-def barename(x):
+def barename(x: str) -> str:
     return x.split('}', 1)[-1]
 
 
-def words_pat():
-    ans = getattr(words_pat, 'ans', None)
-    if ans is None:
-        ans = words_pat.ans = regex.compile(r'\w+', REGEX_FLAGS)
-    return ans
+_words_pat_cache = None
 
 
-def add_soft_hyphens_to_words(words, dictionary, hyphen_char='\u00ad'):
+def words_pat() -> regex.Pattern:  # ty: ignore[invalid-type-form]
+    global _words_pat_cache
+    if _words_pat_cache is None:
+        _words_pat_cache = regex.compile(r'\w+', REGEX_FLAGS)
+    return _words_pat_cache
+
+
+def add_soft_hyphens_to_words(words: str, dictionary: object, hyphen_char: str = '\u00ad') -> str:
     pos = 0
     parts = []
     for m in words_pat().finditer(words):
         word = m.group()
         if m.start() > pos:
-            parts.append(words[pos:m.start()])
+            parts.append(words[pos : m.start()])
         parts.append(add_soft_hyphens(word, dictionary, hyphen_char))
         pos = m.end()
     if pos < len(words):
@@ -88,8 +113,10 @@ def add_soft_hyphens_to_words(words, dictionary, hyphen_char='\u00ad'):
     return ''.join(parts)
 
 
-def add_to_tag(stack, elem, locale, hyphen_char):
-    name = barename(elem.tag)
+def add_to_tag(stack: list[tuple[etree._Element, str]], elem: etree._Element, locale: str, hyphen_char: str) -> None:
+    tag = elem.tag
+    assert isinstance(tag, str)  # the root and children with non-callable tags, i.e. elements, are the only things pushed onto the stack
+    name = barename(tag)
     if name in tags_not_to_hyphenate:
         return
     tl = elem.get('lang') or elem.get('{http://www.w3.org/XML/1998/namespace}lang') or locale
@@ -103,17 +130,17 @@ def add_to_tag(stack, elem, locale, hyphen_char):
             stack.append((child, tl))
 
 
-def add_soft_hyphens_to_html(root, locale='en', hyphen_char='\u00ad'):
+def add_soft_hyphens_to_html(root: etree._Element, locale: str = 'en', hyphen_char: str = '\u00ad') -> None:
     stack = [(root, locale)]
     while stack:
         elem, locale = stack.pop()
         add_to_tag(stack, elem, locale, hyphen_char)
 
 
-def remove_soft_hyphens_from_html(root, hyphen_char='\u00ad'):
+def remove_soft_hyphens_from_html(root: etree._Element, hyphen_char: str = '\u00ad') -> None:
     for elem in root.iterdescendants():
         if elem.tail:
             elem.tail = elem.tail.replace(hyphen_char, '')
         text = getattr(elem, 'text', None)
         if text:
-            elem.text = elem.text.replace(hyphen_char, '')
+            elem.text = text.replace(hyphen_char, '')

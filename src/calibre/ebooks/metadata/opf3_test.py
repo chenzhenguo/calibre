@@ -1,77 +1,122 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2016, Kovid Goyal <kovid at kovidgoyal.net>
 
-
+import unittest
 from collections import defaultdict
 from io import BytesIO
-import unittest
+from typing import TYPE_CHECKING
 
 from calibre.ebooks.metadata.book import ALL_METADATA_FIELDS
-from calibre.utils.xml_parse import safe_xml_fromstring
 from calibre.ebooks.metadata.opf2 import OPF
-from calibre.ebooks.metadata.opf3 import (
-    parse_prefixes, reserved_prefixes, expand_prefix, read_identifiers,
-    read_metadata, set_identifiers, XPath, set_application_id, read_title,
-    read_refines, set_title, read_title_sort, read_languages, set_languages,
-    read_authors, Author, set_authors, ensure_prefix, read_prefixes,
-    read_book_producers, set_book_producers, read_timestamp, set_timestamp,
-    read_pubdate, set_pubdate, CALIBRE_PREFIX, read_last_modified, read_comments,
-    set_comments, read_publisher, set_publisher, read_tags, set_tags, read_rating,
-    set_rating, read_series, set_series, read_user_metadata, set_user_metadata,
-    read_author_link_map, read_user_categories, set_author_link_map, set_user_categories,
-    apply_metadata, read_raster_cover, ensure_is_only_raster_cover
+from calibre.ebooks.metadata.opf3 import (  # ruff: ignore[unused-import]
+    CALIBRE_PREFIX,
+    Author,
+    XPath,
+    apply_metadata,
+    ensure_is_only_raster_cover,
+    ensure_prefix,
+    expand_prefix,
+    parse_prefixes,
+    properties_for_id,
+    read_authors,
+    read_book_producers,
+    read_comments,
+    read_identifiers,
+    read_languages,
+    read_last_modified,
+    read_link_maps,
+    read_metadata,
+    read_prefixes,
+    read_pubdate,
+    read_publisher,
+    read_raster_cover,
+    read_rating,
+    read_refines,
+    read_series,
+    read_tags,
+    read_timestamp,
+    read_title,
+    read_title_sort,
+    read_user_categories,
+    read_user_metadata,
+    reserved_prefixes,
+    set_application_id,
+    set_authors,
+    set_book_producers,
+    set_comments,
+    set_identifiers,
+    set_languages,
+    set_link_maps,
+    set_pubdate,
+    set_publisher,
+    set_rating,
+    set_series,
+    set_tags,
+    set_timestamp,
+    set_title,
+    set_user_categories,
+    set_user_metadata,
 )
+
 # This import is needed to prevent a test from running slowly
-from calibre.ebooks.oeb.polish.pretty import pretty_opf, pretty_xml_tree  # noqa
+from calibre.ebooks.oeb.polish.pretty import pretty_opf, pretty_xml_tree  # ruff: ignore[unused-import]
+from calibre.utils.xml_parse import safe_xml_fromstring
 
-read_author_link_map, read_user_categories, set_author_link_map, set_user_categories
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from datetime import datetime
 
-TEMPLATE = '''<package xmlns="http://www.idpf.org/2007/opf" version="3.0" prefix="calibre: %s" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">{metadata}</metadata><manifest>{manifest}</manifest></package>''' % CALIBRE_PREFIX  # noqa
+    from lxml.etree import _Element
+
+    from calibre.ebooks.metadata.book.base import Metadata
+
+TEMPLATE = f'''<package xmlns="http://www.idpf.org/2007/opf" version="3.0" prefix="calibre: {CALIBRE_PREFIX}" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">{{metadata}}</metadata><manifest>{{manifest}}</manifest></package>'''  # ruff: ignore[line-too-long]
 default_refines = defaultdict(list)
 
 
 class TestOPF3(unittest.TestCase):
-
     ae = unittest.TestCase.assertEqual
 
-    def get_opf(self, metadata='', manifest=''):
+    def get_opf(self, metadata: str = '', manifest: str = '') -> _Element:
         return safe_xml_fromstring(TEMPLATE.format(metadata=metadata, manifest=manifest))
 
-    def test_prefix_parsing(self):  # {{{
-        self.ae(parse_prefixes('foaf: http://xmlns.com/foaf/spec/\n dbp: http://dbpedia.org/ontology/'),
-                {'foaf':'http://xmlns.com/foaf/spec/', 'dbp': 'http://dbpedia.org/ontology/'})
+    def test_prefix_parsing(self) -> None:  # {{{
+        self.ae(
+            parse_prefixes('foaf: http://xmlns.com/foaf/spec/\n dbp: http://dbpedia.org/ontology/'),
+            {'foaf': 'http://xmlns.com/foaf/spec/', 'dbp': 'http://dbpedia.org/ontology/'},
+        )
         for raw, expanded in (
-                ('onix:xxx', reserved_prefixes['onix'] + ':xxx'),
-                ('xxx:onix', 'xxx:onix'),
-                ('xxx', 'xxx'),
+            ('onix:xxx', reserved_prefixes['onix'] + ':xxx'),
+            ('xxx:onix', 'xxx:onix'),
+            ('xxx', 'xxx'),
         ):
             self.ae(expand_prefix(raw, reserved_prefixes.copy()), expanded)
         root = self.get_opf()
         ensure_prefix(root, read_prefixes(root), 'calibre', 'https://calibre-ebook.com')
         ensure_prefix(root, read_prefixes(root), 'marc', reserved_prefixes['marc'])
         self.ae(parse_prefixes(root.get('prefix')), {'calibre': 'https://calibre-ebook.com'})
+
     # }}}
 
-    def test_identifiers(self):  # {{{
-        def idt(val, scheme=None, iid=''):
-            return '<dc:identifier id="{id}" {scheme}>{val}</dc:identifier>'.format(scheme=('opf:scheme="%s"'%scheme if scheme else ''), val=val, id=iid)
+    def test_identifiers(self) -> None:  # {{{
+        def idt(val: str, scheme: str | None = None, iid: str = '') -> str:
+            return '<dc:identifier id="{id}" {scheme}>{val}</dc:identifier>'.format(scheme=(f'opf:scheme="{scheme}"' if scheme else ''), val=val, id=iid)
 
-        def ri(root):
+        def ri(root: _Element) -> dict[str, list[str]]:
             return dict(read_identifiers(root, read_prefixes(root), default_refines))
 
         for m, result in (
-                (idt('abc', 'ISBN'), {}),
-                (idt('isbn:9780230739581'), {'isbn':['9780230739581']}),
-                (idt('urn:isbn:9780230739581'), {'isbn':['9780230739581']}),
-                (idt('9780230739581', 'ISBN'), {'isbn':['9780230739581']}),
-                (idt('isbn:9780230739581', 'ISBN'), {'isbn':['9780230739581']}),
-                (idt('key:val'), {'key':['val']}),
-                (idt('url:http://x'), {'url':['http://x']}),
-                (idt('a:1')+idt('a:2'), {'a':['1', '2']}),
+            (idt('abc', 'ISBN'), {}),
+            (idt('isbn:9780230739581'), {'isbn': ['9780230739581']}),
+            (idt('urn:isbn:9780230739581'), {'isbn': ['9780230739581']}),
+            (idt('9780230739581', 'ISBN'), {'isbn': ['9780230739581']}),
+            (idt('isbn:9780230739581', 'ISBN'), {'isbn': ['9780230739581']}),
+            (idt('key:val'), {'key': ['val']}),
+            (idt('url:http://x'), {'url': ['http://x']}),
+            (idt('a:1') + idt('a:2'), {'a': ['1', '2']}),
         ):
             self.ae(result, ri(self.get_opf(m)))
-        root = self.get_opf(metadata=idt('a:1')+idt('a:2')+idt('calibre:x')+idt('uuid:y'))
+        root = self.get_opf(metadata=idt('a:1') + idt('a:2') + idt('calibre:x') + idt('uuid:y'))
         mi = read_metadata(root)
         self.ae(mi.application_id, 'x')
         set_application_id(root, {}, default_refines, 'y')
@@ -79,25 +124,27 @@ class TestOPF3(unittest.TestCase):
         self.ae(mi.application_id, 'y')
 
         root = self.get_opf(metadata=idt('i:1', iid='uid') + idt('r:1') + idt('o:1'))
-        set_identifiers(root, read_prefixes(root), default_refines, {'i':'2', 'o':'2'})
-        self.ae({'i':['2', '1'], 'r':['1'], 'o':['2']}, ri(root))
+        set_identifiers(root, read_prefixes(root), default_refines, {'i': '2', 'o': '2'})
+        self.ae({'i': ['2', '1'], 'r': ['1'], 'o': ['2']}, ri(root))
         self.ae(1, len(XPath('//dc:identifier[@id="uid"]')(root)))
         root = self.get_opf(metadata=idt('i:1', iid='uid') + idt('r:1') + idt('o:1'))
-        set_identifiers(root, read_prefixes(root), default_refines, {'i':'2', 'o':'2'}, force_identifiers=True)
-        self.ae({'i':['2', '1'], 'o':['2']}, ri(root))
+        set_identifiers(root, read_prefixes(root), default_refines, {'i': '2', 'o': '2'}, force_identifiers=True)
+        self.ae({'i': ['2', '1'], 'o': ['2']}, ri(root))
         root = self.get_opf(metadata=idt('i:1', iid='uid') + idt('r:1') + idt('o:1'))
         set_application_id(root, {}, default_refines, 'y')
         mi = read_metadata(root)
         self.ae(mi.application_id, 'y')
+
     # }}}
 
-    def test_title(self):  # {{{
-        def rt(root):
+    def test_title(self) -> None:  # {{{
+        def rt(root: _Element) -> str | None:
             return read_title(root, read_prefixes(root), read_refines(root))
 
-        def st(root, title, title_sort=None):
+        def st(root: _Element, title: str, title_sort: str | None = None) -> str | None:
             set_title(root, read_prefixes(root), read_refines(root), title, title_sort)
             return rt(root)
+
         root = self.get_opf('''<dc:title/><dc:title id='t'>xxx</dc:title>''')
         self.ae(rt(root), 'xxx')
         self.ae(st(root, 'abc', 'cba'), 'abc')
@@ -107,15 +154,62 @@ class TestOPF3(unittest.TestCase):
         self.ae(rt(root), 'x xx')
         self.ae(read_title_sort(root, read_prefixes(root), read_refines(root)), 'sorted')
         self.ae(st(root, 'abc'), 'abc')
+
+        def titles(root: _Element) -> list[tuple[str | None, str | None]]:
+            refines = read_refines(root)
+            return [(t.text, properties_for_id(t.get('id'), refines).get('title-type')) for t in XPath('//dc:title')(root)]
+
+        # Without a title marked as main, titles marked as subtitles are not used as the main title
+        sub = "<dc:title id='{0}'>{1}</dc:title><meta refines='#{0}' property='title-type'>subtitle</meta>"
+        root = self.get_opf(sub.format('t', 'xxx') + "<dc:title id='u'>yyy</dc:title>")
+        self.ae(rt(root), 'yyy: xxx')
+        self.ae(st(root, 'abc'), 'abc')
+        self.ae(titles(root), [('abc', 'main')])
+        # All subtitles are removed when setting the title
+        root = self.get_opf(sub.format('t', 'xxx') + "<dc:title id='u'>yyy</dc:title>" + sub.format('v', 'zzz'))
+        self.ae(rt(root), 'yyy: xxx')
+        self.ae(st(root, 'abc'), 'abc')
+        self.ae(titles(root), [('abc', 'main')])
+        root = self.get_opf(
+            "<dc:title id='u'>yyy</dc:title><meta refines='#u' property='title-type'>main</meta>" + sub.format('t', 'xxx') + sub.format('v', 'zzz')
+        )
+        self.ae(rt(root), 'yyy: xxx')
+        self.ae(st(root, 'abc'), 'abc')
+        self.ae(titles(root), [('abc', 'main')])
+        # When all titles are subtitles the first is used as the main title
+        root = self.get_opf(sub.format('t', 'xxx') + sub.format('v', 'zzz'))
+        self.ae(rt(root), 'xxx: zzz')
+        self.ae(st(root, 'abc'), 'abc')
+        self.ae(titles(root), [('abc', 'main')])
+        # Without a title marked as main, untyped titles are preferred, then expanded, then other types
+        typed = "<dc:title id='{0}'>{1}</dc:title><meta refines='#{0}' property='title-type'>{2}</meta>"
+        root = self.get_opf(sub.format('t', 'xxx') + typed.format('c', 'Series', 'collection'))
+        self.ae(rt(root), 'Series: xxx')
+        root = self.get_opf(sub.format('t', 'xxx') + typed.format('s', 'Short', 'short') + typed.format('e', 'Full', 'expanded'))
+        self.ae(rt(root), 'Full: xxx')
+        self.ae(st(root, 'abc'), 'abc')
+        self.ae(titles(root), [('Short', 'short'), ('abc', 'main')])
+        root = self.get_opf(typed.format('c', 'Series', 'collection') + typed.format('e', 'Full', 'expanded') + "<dc:title id='u'>yyy</dc:title>")
+        self.ae(rt(root), 'yyy')
+        # An explicit main title always wins
+        root = self.get_opf(typed.format('c', 'Series', 'collection') + typed.format('m', 'Main', 'main'))
+        self.ae(rt(root), 'Main')
+        # Untyped titles other than the main title are kept
+        root = self.get_opf("<dc:title id='u'>yyy</dc:title><dc:title id='w'>www</dc:title>" + sub.format('t', 'xxx'))
+        self.ae(rt(root), 'yyy: xxx')
+        self.ae(st(root, 'abc'), 'abc')
+        self.ae(titles(root), [('abc', 'main'), ('www', None)])
+
     # }}}
 
-    def test_languages(self):  # {{{
-        def rl(root):
+    def test_languages(self) -> None:  # {{{
+        def rl(root: _Element) -> list[str]:
             return read_languages(root, read_prefixes(root), read_refines(root))
 
-        def st(root, languages):
+        def st(root: _Element, languages: list[str]) -> list[str]:
             set_languages(root, read_prefixes(root), read_refines(root), languages)
             return rl(root)
+
         root = self.get_opf('''<dc:language>en-US</dc:language><dc:language>fr</dc:language>''')
         self.ae(['eng', 'fra'], rl(root))
         self.ae(st(root, ['de', 'de', 'es']), ['deu', 'spa'])
@@ -123,18 +217,21 @@ class TestOPF3(unittest.TestCase):
 
     # }}}
 
-    def test_authors(self):  # {{{
-        def rl(root):
+    def test_authors(self) -> None:  # {{{
+        def rl(root: _Element) -> list[Author]:
             return read_authors(root, read_prefixes(root), read_refines(root))
 
-        def st(root, authors):
+        def st(root: _Element, authors: list[Author]) -> list[Author]:
             set_authors(root, read_prefixes(root), read_refines(root), authors)
             return rl(root)
+
         root = self.get_opf('''<dc:creator>a  b</dc:creator>''')
         self.ae([Author('a b', None)], rl(root))
         for scheme in ('scheme="marc:relators"', ''):
-            root = self.get_opf('''<dc:creator>a  b</dc:creator><dc:creator id="1">c d</dc:creator>'''
-                                '''<meta refines="#1" property="role" %s>aut</meta>''' % scheme)
+            root = self.get_opf(
+                '''<dc:creator>a  b</dc:creator><dc:creator id="1">c d</dc:creator>'''
+                f'''<meta refines="#1" property="role" {scheme}>aut</meta>'''
+            )
             self.ae([Author('c d', None)], rl(root))
         root = self.get_opf('''<dc:creator>a  b</dc:creator><dc:creator opf:role="aut">c d</dc:creator>''')
         self.ae([Author('c d', None)], rl(root))
@@ -143,52 +240,60 @@ class TestOPF3(unittest.TestCase):
         self.ae([Author('a b', 'b, a'), Author('c d', 'd, c')], rl(root))
         authors = [Author('x y', 'y, x'), Author('u i', None)]
         self.ae(authors, st(root, authors))
-        self.ae(root.get('prefix'), 'calibre: %s' % CALIBRE_PREFIX)
+        self.ae(root.get('prefix'), f'calibre: {CALIBRE_PREFIX}')
         root = self.get_opf('''<dc:creator>a  b</dc:creator><dc:creator opf:role="aut">c d</dc:creator>''')
         self.ae([Author('c d', None)], rl(root))
         self.ae(authors, st(root, authors))
-        root = self.get_opf('''<dc:creator id="1">a  b</dc:creator>'''
-                            '''<meta refines="#1" property="role">aut</meta>'''
-                            '''<meta refines="#1" property="role">cow</meta>''')
+        root = self.get_opf(
+            '''<dc:creator id="1">a  b</dc:creator>'''
+            '''<meta refines="#1" property="role">aut</meta>'''
+            '''<meta refines="#1" property="role">cow</meta>'''
+        )
         self.ae([Author('a b', None)], rl(root))
+
     # }}}
 
-    def test_book_producer(self):  # {{{
-        def rl(root):
+    def test_book_producer(self) -> None:  # {{{
+        def rl(root: _Element) -> list[str]:
             return read_book_producers(root, read_prefixes(root), read_refines(root))
 
-        def st(root, producers):
+        def st(root: _Element, producers: list[str]) -> list[str]:
             set_book_producers(root, read_prefixes(root), read_refines(root), producers)
             return rl(root)
+
         for scheme in ('scheme="marc:relators"', ''):
-            root = self.get_opf('''<dc:contributor>a  b</dc:contributor><dc:contributor id="1">c d</dc:contributor>'''
-                                '''<meta refines="#1" property="role" %s>bkp</meta>''' % scheme)
+            root = self.get_opf(
+                '''<dc:contributor>a  b</dc:contributor><dc:contributor id="1">c d</dc:contributor>'''
+                f'''<meta refines="#1" property="role" {scheme}>bkp</meta>'''
+            )
             self.ae(['c d'], rl(root))
         root = self.get_opf('''<dc:contributor>a  b</dc:contributor><dc:contributor opf:role="bkp">c d</dc:contributor>''')
         self.ae(['c d'], rl(root))
         self.ae(['12'], st(root, ['12']))
+
     # }}}
 
-    def test_dates(self):  # {{{
+    def test_dates(self) -> None:  # {{{
         from calibre.utils.date import utcnow
 
-        def rl(root):
+        def rl(root: _Element) -> tuple[datetime | None, datetime | None]:
             p, r = read_prefixes(root), read_refines(root)
             return read_pubdate(root, p, r), read_timestamp(root, p, r)
 
-        def st(root, pd, ts):
+        def st(root: _Element, pd: datetime, ts: datetime) -> tuple[datetime | None, datetime | None]:
             p, r = read_prefixes(root), read_refines(root)
             set_pubdate(root, p, r, pd)
             set_timestamp(root, p, r, ts)
             return rl(root)
 
-        def ae(root, y1=None, y2=None):
+        def ae(root: _Element, y1: int | None = None, y2: int | None = None) -> None:
             x1, x2 = rl(root)
             for x, y in ((x1, y1), (x2, y2)):
                 if y is None:
                     self.assertIsNone(x)
                 else:
                     self.ae(y, getattr(x, 'year', None))
+
         root = self.get_opf('''<dc:date>1999-3-2</dc:date><meta property="calibre:timestamp" scheme="dcterms:W3CDTF">2001</meta>''')
         ae(root, 1999, 2001)
         n = utcnow()
@@ -198,120 +303,141 @@ class TestOPF3(unittest.TestCase):
         ae(root, 1999, 2001)
         root = self.get_opf('''<meta property="dcterms:modified">2003</meta>''')
         self.ae(read_last_modified(root, read_prefixes(root), read_refines(root)).year, 2003)
+
     # }}}
 
-    def test_comments(self):  # {{{
-        def rt(root):
+    def test_comments(self) -> None:  # {{{
+        def rt(root: _Element) -> str:
             return read_comments(root, read_prefixes(root), read_refines(root))
 
-        def st(root, val):
+        def st(root: _Element, val: str) -> str:
             set_comments(root, read_prefixes(root), read_refines(root), val)
             return rt(root)
+
         root = self.get_opf('''<dc:description>&lt;span&gt;one&lt;/span&gt;</dc:description><dc:description> xxx</dc:description>''')
         self.ae('<span>one</span>\nxxx', rt(root))
         self.ae('<a>p</a>', st(root, '<a>p</a> '))
+
     # }}}
 
-    def test_publisher(self):  # {{{
-        def rt(root):
+    def test_publisher(self) -> None:  # {{{
+        def rt(root: _Element) -> str | None:
             return read_publisher(root, read_prefixes(root), read_refines(root))
 
-        def st(root, val):
+        def st(root: _Element, val: str) -> str | None:
             set_publisher(root, read_prefixes(root), read_refines(root), val)
             return rt(root)
+
         root = self.get_opf('''<dc:publisher> one </dc:publisher><dc:publisher> xxx</dc:publisher>''')
         self.ae('one', rt(root))
         self.ae('<a>p</a>', st(root, '<a>p</a> '))
+
     # }}}
 
-    def test_raster_cover(self):  # {{{
-        def rt(root):
+    def test_raster_cover(self) -> None:  # {{{
+        def rt(root: _Element) -> str | None:
             return read_raster_cover(root, read_prefixes(root), read_refines(root))
+
         root = self.get_opf('<meta name="cover" content="cover"/>', '<item id="cover" media-type="image/jpeg" href="x.jpg"/>')
         self.ae('x.jpg', rt(root))
-        root = self.get_opf('<meta name="cover" content="cover"/>',
-                            '<item id="cover" media-type="image/jpeg" href="x.jpg"/><item media-type="image/jpeg" href="y.jpg" properties="cover-image"/>')
+        root = self.get_opf(
+            '<meta name="cover" content="cover"/>',
+            '<item id="cover" media-type="image/jpeg" href="x.jpg"/><item media-type="image/jpeg" href="y.jpg" properties="cover-image"/>',
+        )
         self.ae('y.jpg', rt(root))
         ensure_is_only_raster_cover(root, read_prefixes(root), read_refines(root), 'x.jpg')
         self.ae('x.jpg', rt(root))
         self.ae(['x.jpg'], root.xpath('//*[@properties="cover-image"]/@href'))
         self.assertFalse(root.xpath('//*[@name]'))
+
     # }}}
 
-    def test_tags(self):  # {{{
-        def rt(root):
+    def test_tags(self) -> None:  # {{{
+        def rt(root: _Element) -> list[str]:
             return read_tags(root, read_prefixes(root), read_refines(root))
 
-        def st(root, val):
+        def st(root: _Element, val: Sequence[str]) -> list[str]:
             set_tags(root, read_prefixes(root), read_refines(root), val)
             return rt(root)
+
         root = self.get_opf('''<dc:subject> one, two </dc:subject><dc:subject> xxx</dc:subject>''')
         self.ae('one,two,xxx'.split(','), rt(root))
         self.ae('1,2,3'.split(','), st(root, '1,2,3'.split(',')))
+
     # }}}
 
-    def test_rating(self):  # {{{
-        def rt(root):
+    def test_rating(self) -> None:  # {{{
+        def rt(root: _Element) -> float | None:
             return read_rating(root, read_prefixes(root), read_refines(root))
 
-        def st(root, val):
+        def st(root: _Element, val: float) -> float | None:
             set_rating(root, read_prefixes(root), read_refines(root), val)
             return rt(root)
+
         root = self.get_opf('''<meta name="calibre:rating" content="3"/>''')
         self.ae(3, rt(root))
         root = self.get_opf('''<meta name="calibre:rating" content="3"/><meta property="calibre:rating">5</meta>''')
         self.ae(5, rt(root))
-        self.ae(1, st(root,1))
+        self.ae(1, st(root, 1))
+
     # }}}
 
-    def test_series(self):  # {{{
-        def rt(root):
+    def test_series(self) -> None:  # {{{
+        def rt(root: _Element) -> tuple[str | None, float]:
             return read_series(root, read_prefixes(root), read_refines(root))
 
-        def st(root, val, i):
+        def st(root: _Element, val: str, i: float) -> tuple[str | None, float]:
             set_series(root, read_prefixes(root), read_refines(root), val, i)
             return rt(root)
+
         root = self.get_opf('''<meta name="calibre:series" content="xxx"/><meta name="calibre:series_index" content="5"/>''')
         self.ae(('xxx', 5), rt(root))
-        root = self.get_opf('''<meta name="calibre:series" content="xxx"/><meta name="calibre:series_index" content="5"/>'''
-                            '<meta property="belongs-to-collection" id="c02">yyy</meta><meta refines="#c02" property="collection-type">series</meta>'
-                            '<meta refines="#c02" property="group-position">2.1</meta>')
+        root = self.get_opf(
+            '''<meta name="calibre:series" content="xxx"/><meta name="calibre:series_index" content="5"/>'''
+            '<meta property="belongs-to-collection" id="c02">yyy</meta><meta refines="#c02" property="collection-type">series</meta>'
+            '<meta refines="#c02" property="group-position">2.1</meta>'
+        )
         self.ae(('yyy', 2.1), rt(root))
         self.ae(('zzz', 3.3), st(root, 'zzz', 3.3))
+
     # }}}
 
-    def test_user_metadata(self):  # {{{
-        def rt(root, name):
+    def test_user_metadata(self) -> None:  # {{{
+        def rt(root: _Element, name: str) -> object:
             f = globals()['read_' + name]
             return f(root, read_prefixes(root), read_refines(root))
 
-        def st(root, name, val):
+        def st(root: _Element, name: str, val: object) -> object:
             f = globals()['set_' + name]
             f(root, read_prefixes(root), read_refines(root), val)
             return rt(root, name)
-        for name in 'author_link_map user_categories'.split():
-            root = self.get_opf('''<meta name="calibre:%s" content='{"1":1}'/>''' % name)
-            self.ae({'1':1}, rt(root, name))
-            root = self.get_opf('''<meta name="calibre:%s" content='{"1":1}'/><meta property="calibre:%s">{"2":2}</meta>''' % (name, name))
-            self.ae({'2':2}, rt(root, name))
-            self.ae({'3':3}, st(root, name, {3:3}))
 
-        def ru(root):
+        for name in 'link_maps user_categories'.split():
+            root = self.get_opf(f'''<meta name="calibre:{name}" content='{{"1":1}}'/>''')
+            self.ae({'1': 1}, rt(root, name))
+            root = self.get_opf(f'''<meta name="calibre:{name}" content='{{"1":1}}'/><meta property="calibre:{name}">{{"2":2}}</meta>''')
+            self.ae({'2': 2}, rt(root, name))
+            self.ae({'3': 3}, st(root, name, {3: 3}))
+
+        def ru(root: _Element) -> dict[str, dict[str, object]]:
             return read_user_metadata(root, read_prefixes(root), read_refines(root))
 
-        def su(root, val):
+        def su(root: _Element, val: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
             set_user_metadata(root, read_prefixes(root), read_refines(root), val)
             return ru(root)
+
         root = self.get_opf('''<meta name="calibre:user_metadata:#a" content='{"1":1}'/>''')
-        self.ae({'#a': {'1': 1, 'is_multiple': dict()}}, ru(root))
-        root = self.get_opf('''<meta name="calibre:user_metadata:#a" content='{"1":1}'/>'''
-                            '''<meta property="calibre:user_metadata">{"#b":{"2":2}}</meta>''')
-        self.ae({'#b': {'2': 2, 'is_multiple': dict()}}, ru(root))
-        self.ae({'#c': {'3': 3, 'is_multiple': {}, 'is_multiple2': dict()}}, su(root, {'#c':{'3':3}}))
+        self.ae({'#a': {'1': 1, 'is_multiple': {}}}, ru(root))
+        root = self.get_opf(
+            '''<meta name="calibre:user_metadata:#a" content='{"1":1}'/>'''
+            '''<meta property="calibre:user_metadata">{"#b":{"2":2}}</meta>'''
+        )
+        self.ae({'#b': {'2': 2, 'is_multiple': {}}}, ru(root))
+        self.ae({'#c': {'3': 3, 'is_multiple': {}, 'is_multiple2': {}}}, su(root, {'#c': {'3': 3}}))
 
     # }}}
 
-    def test_against_opf2(self):  # {{{
+    def test_against_opf2(self) -> None:  # {{{
         # opf2 {{{
         raw = '''<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uuid_id" version="2.0">
     <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
@@ -329,7 +455,7 @@ class TestOPF3(unittest.TestCase):
         <dc:subject>conversion</dc:subject>
         <dc:subject>docs</dc:subject>
         <dc:subject>ebook</dc:subject>
-        <meta content="{&quot;Kovid Goyal&quot;: &quot;&quot;}" name="calibre:author_link_map"/>
+        <meta content="{&quot;Kovid Goyal&quot;: &quot;https://kovidgoyal.net&quot;}" name="calibre:author_link_map"/>
         <meta content="Demos" name="calibre:series"/>
         <meta content="1" name="calibre:series_index"/>
         <meta content="10" name="calibre:rating"/>
@@ -514,17 +640,17 @@ class TestOPF3(unittest.TestCase):
     </metadata><manifest><item href="start.html" media-type="text/html" id="m1"/></manifest><spine><itemref idref="m1"/></spine>
 </package>'''  # }}}
 
-        def compare_metadata(mi2, mi3):
+        def compare_metadata(mi2: Metadata, mi3: Metadata) -> None:
             self.ae(mi2.get_all_user_metadata(False), mi3.get_all_user_metadata(False))
             for field in ALL_METADATA_FIELDS:
                 if field not in 'manifest spine':
                     v2, v3 = getattr(mi2, field, None), getattr(mi3, field, None)
-                    self.ae(v2, v3, '%s: %r != %r' % (field, v2, v3))
+                    self.ae(v2, v3, f'{field}: {v2!r} != {v3!r}')
 
         mi2 = OPF(BytesIO(raw.encode('utf-8'))).to_book_metadata()
         root = safe_xml_fromstring(raw)
         root.set('version', '3.0')
-        mi3, _, raster_cover, first_spine_item  = read_metadata(root, return_extra_data=True)
+        mi3, _, raster_cover, first_spine_item = read_metadata(root, return_extra_data=True)
         self.assertIsNone(raster_cover)
         self.ae('start.html', first_spine_item)
         compare_metadata(mi2, mi3)
@@ -549,22 +675,23 @@ class TestOPF3(unittest.TestCase):
         self.assertFalse(nmi.get('#commetns'))
         self.assertIsNone(apply_metadata(root, mi3, cover_data=b'x', cover_prefix='xxx', add_missing_cover=False))
         self.ae('xxx/cover.jpg', apply_metadata(root, mi3, cover_data=b'x', cover_prefix='xxx'))
+
     # }}}
+
 
 # Run tests {{{
 
 
-def suite():
+def suite() -> unittest.TestSuite:
     return unittest.TestLoader().loadTestsFromTestCase(TestOPF3)
 
 
 class TestRunner(unittest.main):
-
-    def createTests(self):
+    def createTests(self) -> None:
         self.test = suite()
 
 
-def run(verbosity=4):
+def run(verbosity: int = 4) -> None:
     TestRunner(verbosity=verbosity, exit=False)
 
 

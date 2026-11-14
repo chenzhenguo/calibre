@@ -1,24 +1,23 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 
 
 __license__ = 'GPL v3'
 __copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
 
 import re
-from PyQt5.Qt import QAction, QInputDialog
+
 from css_parser.css import CSSRule
+from qt.core import QAction, QInputDialog
+
+from calibre import force_unicode
+from calibre.ebooks.oeb.polish.container import OEB_DOCS, OEB_STYLES, serialize
+from calibre.gui2 import error_dialog
 
 # The base class that all tools must inherit from
 from calibre.gui2.tweak_book.plugin import Tool
 
-from calibre import force_unicode
-from calibre.gui2 import error_dialog
-from calibre.ebooks.oeb.polish.container import OEB_DOCS, OEB_STYLES, serialize
-
 
 class DemoTool(Tool):
-
     #: Set this to a unique name it will be used as a key
     name = 'demo-tool'
 
@@ -31,7 +30,7 @@ class DemoTool(Tool):
     def create_action(self, for_toolbar=True):
         # Create an action, this will be added to the plugins toolbar and
         # the plugins menu
-        ac = QAction(get_icons('images/icon.png'), 'Magnify fonts', self.gui)  # noqa
+        ac = QAction(get_icons('images/icon.png'), 'Magnify fonts', self.gui)  # ruff: ignore[undefined-name]
         if not for_toolbar:
             # Register a keyboard shortcut for this toolbar action. We only
             # register it for the action created for the menu, not the toolbar,
@@ -43,8 +42,7 @@ class DemoTool(Tool):
     def ask_user(self):
         # Ask the user for a factor by which to multiply all font sizes
         factor, ok = QInputDialog.getDouble(
-            self.gui, 'Enter a magnification factor', 'Allow font sizes in the book will be multiplied by the specified factor',
-            value=2, min=0.1, max=4
+            self.gui, 'Enter a magnification factor', 'Allow font sizes in the book will be multiplied by the specified factor', value=2, min=0.1, max=4
         )
         if ok:
             # Ensure any in progress editing the user is doing is present in the container
@@ -54,9 +52,14 @@ class DemoTool(Tool):
             except Exception:
                 # Something bad happened report the error to the user
                 import traceback
-                error_dialog(self.gui, _('Failed to magnify fonts'), _(
-                    'Failed to magnify fonts, click "Show details" for more info'),
-                    det_msg=traceback.format_exc(), show=True)
+
+                error_dialog(
+                    self.gui,
+                    _('Failed to magnify fonts'),
+                    _('Failed to magnify fonts, click "Show details" for more info'),
+                    det_msg=traceback.format_exc(),
+                    show=True,
+                )
                 # Revert to the saved restore point
                 self.boss.revert_requested(self.boss.global_undo.previous_container)
             else:
@@ -116,7 +119,7 @@ class DemoTool(Tool):
         num = re.search(r'[0-9.]+', val)
         if num is not None:
             num = num.group()
-            val = val.replace(num, '%f' % (float(num) * factor))
+            val = val.replace(num, f'{float(num) * factor:f}')
             style.setProperty('font-size', val)
         # We should also be dealing with the font shorthand property and
         # font sizes specified as non numbers, but those are left as exercises

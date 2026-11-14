@@ -1,24 +1,53 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
-
-import os, errno, sys, re
+import errno
+import os
+import re
+import shutil
+import sys
+import tempfile
+from collections import OrderedDict
+from contextlib import suppress
 from locale import localeconv
-from collections import OrderedDict, namedtuple
-from polyglot.builtins import iteritems, itervalues, map, unicode_type, string_or_bytes, filter
-from threading import Lock
+from threading import RLock
+from typing import TYPE_CHECKING, NamedTuple, Unpack, overload
 
 from calibre import as_unicode, prints
 from calibre.constants import cache_dir, get_windows_number_formats, iswindows, preferred_encoding
+from calibre.utils.filenames import make_long_path_useable
+from calibre.utils.icu import lower as icu_lower
+from calibre.utils.localization import _, canonicalize_lang, ngettext
 
-from calibre.utils.localization import canonicalize_lang
+if TYPE_CHECKING:
+    from collections.abc import Callable, Collection, Sequence
+
+    from _typeshed import SupportsAllComparisons
+
+    from calibre.ebooks.metadata.book.base import Metadata
+    from calibre.prints import PrintKwargs
+
+#: Data used by :func:`find_identical_books`: (map of lowercased author name to
+#: author ids, map of author id to book ids, map of book id to title, map of
+#: book id to languages)
+type IdenticalBooksData = tuple[dict[str, set[int]], dict[int, set[int]], dict[int, str], dict[int, tuple[str, ...]]]
 
 
-def force_to_bool(val):
-    if isinstance(val, (bytes, unicode_type)):
+def atomic_write(path: str, data: str | bytes) -> None:
+    mode = 'w' if isinstance(data, str) else 'wb'
+    dpath = make_long_path_useable(os.path.dirname(path))
+    os.makedirs(dpath, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode, delete=False, dir=dpath) as f:
+        f.write(data)
+    os.replace(make_long_path_useable(f.name), make_long_path_useable(path))
+
+
+@overload
+def force_to_bool(val: str | bytes) -> bool | None: ...
+@overload
+def force_to_bool[T](val: T) -> T: ...
+def force_to_bool(val: object) -> object:
+    if isinstance(val, (bytes, str)):
         if isinstance(val, bytes):
             val = val.decode(preferred_encoding, 'replace')
         try:
@@ -31,42 +60,38 @@ def force_to_bool(val):
                 val = False
             else:
                 val = bool(int(val))
-        except:
+        except Exception:
             val = None
     return val
 
 
-_fuzzy_title_patterns = None
+_fuzzy_title_patterns: tuple[tuple[re.Pattern[str], str], ...] | None = None
 
 
-def fuzzy_title_patterns():
+def fuzzy_title_patterns() -> tuple[tuple[re.Pattern[str], str], ...]:
     global _fuzzy_title_patterns
     if _fuzzy_title_patterns is None:
         from calibre.ebooks.metadata import get_title_sort_pat
-        _fuzzy_title_patterns = tuple((re.compile(pat, re.IGNORECASE) if
-            isinstance(pat, string_or_bytes) else pat, repl) for pat, repl in
-                [
-                    (r'[\[\](){}<>\'";,:#]', ''),
-                    (get_title_sort_pat(), ''),
-                    (r'[-._]', ' '),
-                    (r'\s+', ' ')
-                ]
+
+        _fuzzy_title_patterns = tuple(
+            (re.compile(pat, re.IGNORECASE) if isinstance(pat, (str, bytes)) else pat, repl)
+            for pat, repl in [(r'[\[\](){}<>\'";,:#]', ''), (get_title_sort_pat(), ''), (r'[-._]', ' '), (r'\s+', ' ')]
         )
     return _fuzzy_title_patterns
 
 
-def fuzzy_title(title):
+def fuzzy_title(title: str) -> str:
     title = icu_lower(title.strip())
     for pat, repl in fuzzy_title_patterns():
         title = pat.sub(repl, title)
     return title
 
 
-def find_identical_books(mi, data):
+def find_identical_books(mi: Metadata, data: IdenticalBooksData) -> set[int]:
     author_map, aid_map, title_map, lang_map = data
     found_books = None
     for a in mi.authors:
-        author_ids = author_map.get(icu_lower(a))
+        author_ids = author_map.get(icu_lower(str(a)))
         if author_ids is None:
             return set()
         books_by_author = {book_id for aid in author_ids for book_id in aid_map.get(aid, ())}
@@ -78,6 +103,8 @@ def find_identical_books(mi, data):
             return set()
 
     ans = set()
+    if found_books is None:
+        return ans
     titleq = fuzzy_title(mi.title)
     for book_id in found_books:
         title = title_map.get(book_id, '')
@@ -88,31 +115,38 @@ def find_identical_books(mi, data):
     if not langq:
         return ans
 
-    def lang_matches(book_id):
+    def lang_matches(book_id: int) -> bool:
         book_langq = lang_map.get(book_id)
         return not book_langq or langq == book_langq
 
     return {book_id for book_id in ans if lang_matches(book_id)}
 
 
-Entry = namedtuple('Entry', 'path size timestamp thumbnail_size')
+class Entry(NamedTuple):
+    path: str
+    size: int
+    timestamp: float
+    thumbnail_size: tuple[int, int]
 
 
 class CacheError(Exception):
     pass
 
 
-class ThumbnailCache(object):
+class ThumbnailCache:
+    "This is a persistent disk cache to speed up loading and resizing of covers"
 
-    ' This is a persistent disk cache to speed up loading and resizing of covers '
-
-    def __init__(self,
-                 max_size=1024,  # The maximum disk space in MB
-                 name='thumbnail-cache',  # The name of this cache (should be unique in location)
-                 thumbnail_size=(100, 100),   # The size of the thumbnails, can be changed
-                 location=None,   # The location for this cache, if None cache_dir() is used
-                 test_mode=False,  # Used for testing
-                 min_disk_cache=0):  # If the size is set less than or equal to this value, the cache is disabled.
+    def __init__(
+        self,
+        max_size: float = 1024,  # The maximum disk space in MB
+        name: str = 'thumbnail-cache',  # The name of this cache (should be unique in location)
+        thumbnail_size: tuple[int, int] = (100, 100),  # The size of the thumbnails, can be changed
+        location: str | None = None,  # The location for this cache, if None cache_dir() is used
+        test_mode: bool = False,  # Used for testing
+        min_disk_cache: int = 0,  # If the size is set less than or equal to this value, the cache is disabled.
+        version: int = 0,  # Increase this if the cache content format might have changed.
+    ) -> None:
+        self.version = version
         self.location = os.path.join(location or cache_dir(), name)
         if max_size <= min_disk_cache:
             max_size = 0
@@ -120,68 +154,90 @@ class ThumbnailCache(object):
         self.group_id = 'group'
         self.thumbnail_size = thumbnail_size
         self.size_changed = False
-        self.lock = Lock()
+        self.closed = False
+        self.lock = RLock()
         self.min_disk_cache = min_disk_cache
-        if test_mode:
-            self.log = self.fail_on_error
+        self.log = self.fail_on_error if test_mode else self._log
 
-    def log(self, *args, **kwargs):
+    def _log(self, *args: str, **kwargs: Unpack[PrintKwargs]) -> None:
         kwargs['file'] = sys.stderr
         prints(*args, **kwargs)
 
-    def fail_on_error(self, *args, **kwargs):
+    def fail_on_error(self, *args: str, **kwargs: object) -> None:
         msg = ' '.join(args)
         raise CacheError(msg)
 
-    def _do_delete(self, path):
+    def _do_delete(self, path: str) -> None:
         try:
             os.remove(path)
-        except EnvironmentError as err:
+        except OSError as err:
             self.log('Failed to delete cached thumbnail file:', as_unicode(err))
 
-    def _load_index(self):
-        'Load the index, automatically removing incorrectly sized thumbnails and pruning to fit max_size'
+    def _load_index(self) -> None:
+        """
+        Load the index, automatically removing incorrectly sized thumbnails and
+        pruning to fit max_size
+        """
+
+        # Remove the cache if it isn't the current version
+        version_path = os.path.join(self.location, 'version')
+        current_version = 0
+        with suppress(Exception), open(version_path) as f:
+            current_version = int(f.read())
+        if current_version != self.version:
+            # The version number changed. Delete the cover cache. Can't delete
+            # it if it isn't there (first time). Note that this will not work
+            # well if the same cover cache name is used with different versions.
+            if os.path.exists(self.location):
+                shutil.rmtree(self.location)
+
         try:
             os.makedirs(self.location)
+            with open(version_path, 'w') as f:
+                f.write(str(self.version))
         except OSError as err:
             if err.errno != errno.EEXIST:
                 self.log('Failed to make thumbnail cache dir:', as_unicode(err))
         self.total_size = 0
-        self.items = OrderedDict()
+        self.items: OrderedDict[tuple[str, int], Entry] = OrderedDict()
         order = self._read_order()
 
-        def listdir(*args):
+        def listdir(*args: str) -> list[str] | tuple[()]:
             try:
                 return os.listdir(os.path.join(*args))
-            except EnvironmentError:
+            except OSError:
                 return ()  # not a directory or no permission or whatever
-        entries = ('/'.join((parent, subdir, entry))
-                   for parent in listdir(self.location)
-                   for subdir in listdir(self.location, parent)
-                   for entry in listdir(self.location, parent, subdir))
 
-        invalidate = set()
+        entries = (
+            '/'.join((parent, subdir, entry))  # ruff: ignore[static-join-to-f-string]
+            for parent in listdir(self.location)
+            for subdir in listdir(self.location, parent)
+            for entry in listdir(self.location, parent, subdir)
+        )
+
+        invalidate: set[tuple[str, int]] = set()
         try:
             with open(os.path.join(self.location, 'invalidate'), 'rb') as f:
                 raw = f.read().decode('utf-8')
-        except EnvironmentError as err:
+        except OSError as err:
             if getattr(err, 'errno', None) != errno.ENOENT:
                 self.log('Failed to read thumbnail invalidate data:', as_unicode(err))
         else:
             try:
                 os.remove(os.path.join(self.location, 'invalidate'))
-            except EnvironmentError as err:
+            except OSError as err:
+                # Still apply the invalidations, it is better to regenerate a
+                # few thumbnails than to show stale ones
                 self.log('Failed to remove thumbnail invalidate data:', as_unicode(err))
-            else:
-                def record(line):
-                    try:
-                        uuid, book_id = line.partition(' ')[0::2]
-                        book_id = int(book_id)
-                        return (uuid, book_id)
-                    except Exception:
-                        return None
-                invalidate = {record(x) for x in raw.splitlines()}
-        items = []
+            for line in raw.splitlines():
+                if not line:
+                    continue
+                uuid, book_id = line.partition(' ')[0::2]
+                try:
+                    invalidate.add((uuid, int(book_id)))
+                except ValueError:
+                    self.log('Ignoring invalid thumbnail invalidate record:', repr(line))
+        items = {}
         try:
             for entry in entries:
                 try:
@@ -189,54 +245,69 @@ class ThumbnailCache(object):
                     book_id, timestamp, size, thumbnail_size = name.split('-')
                     book_id, timestamp, size = int(book_id), float(timestamp), int(size)
                     thumbnail_size = tuple(map(int, thumbnail_size.partition('x')[0::2]))
-                except (ValueError, TypeError, IndexError, KeyError, AttributeError):
+                except ValueError, TypeError, IndexError, KeyError, AttributeError:
                     continue
                 key = (uuid, book_id)
                 path = os.path.join(self.location, entry)
-                if self.thumbnail_size == thumbnail_size and key not in invalidate:
-                    items.append((key, Entry(path, size, timestamp, thumbnail_size)))
-                    self.total_size += size
-                else:
+                if self.thumbnail_size != thumbnail_size or key in invalidate:
                     self._do_delete(path)
-        except EnvironmentError as err:
+                    continue
+                e = Entry(path, size, timestamp, thumbnail_size)  # ty: ignore[invalid-argument-type]
+                # Caches written by older versions of calibre can contain more
+                # than one file for a book. Keep only the most recent one,
+                # otherwise which of them is used is decided by the order in
+                # which the filesystem happens to list them.
+                if (prev := items.get(key)) is not None:
+                    if prev.timestamp >= e.timestamp:
+                        self._do_delete(path)
+                        continue
+                    self._do_delete(prev.path)
+                    self.total_size -= prev.size
+                items[key] = e
+                self.total_size += size
+        except OSError as err:
             self.log('Failed to read thumbnail cache dir:', as_unicode(err))
+        items = tuple(items.items())
 
-        self.items = OrderedDict(sorted(items, key=lambda x:order.get(x[0], 0)))
+        self.items = OrderedDict(sorted(items, key=lambda x: order.get(x[0], 0)))
         self._apply_size()
 
-    def _invalidate_sizes(self):
+    def _ensure_loaded(self) -> bool:
+        """
+        Load the index if it is not already loaded. Returns False if the cache
+        has been shutdown, in which case the index must not be used. Must be
+        called with the lock held.
+        """
+        if self.closed:
+            return False
+        if not hasattr(self, 'total_size'):
+            self._load_index()
+        return True
+
+    def _invalidate_sizes(self) -> None:
         if self.size_changed:
             size = self.thumbnail_size
-            remove = tuple(key for key, entry in iteritems(self.items) if size != entry.thumbnail_size)
+            remove = tuple(key for key, entry in self.items.items() if size != entry.thumbnail_size)
             for key in remove:
                 self._remove(key)
             self.size_changed = False
 
-    def _remove(self, key):
+    def _remove(self, key: tuple[str, int]) -> None:
         entry = self.items.pop(key, None)
         if entry is not None:
             self._do_delete(entry.path)
             self.total_size -= entry.size
 
-    def _apply_size(self):
+    def _apply_size(self) -> None:
         while self.total_size > self.max_size and self.items:
             entry = self.items.popitem(last=False)[1]
             self._do_delete(entry.path)
             self.total_size -= entry.size
 
-    def _write_order(self):
-        if hasattr(self, 'items'):
-            try:
-                data = '\n'.join(group_id + ' ' + unicode_type(book_id) for (group_id, book_id) in self.items)
-                with lopen(os.path.join(self.location, 'order'), 'wb') as f:
-                    f.write(data.encode('utf-8'))
-            except EnvironmentError as err:
-                self.log('Failed to save thumbnail cache order:', as_unicode(err))
-
-    def _read_order(self):
-        order = {}
+    def _read_order(self) -> dict[tuple[str, int], int]:
+        order: dict[tuple[str, int], int] = {}
         try:
-            with lopen(os.path.join(self.location, 'order'), 'rb') as f:
+            with open(os.path.join(self.location, 'order'), 'rb') as f:
                 for line in f.read().decode('utf-8').splitlines():
                     parts = line.split(' ', 1)
                     if len(parts) == 2:
@@ -246,15 +317,30 @@ class ThumbnailCache(object):
                 self.log('Failed to load thumbnail cache order:', as_unicode(err))
         return order
 
-    def shutdown(self):
+    def shutdown(self) -> None:
+        """
+        Save the cache order to disk and unload the index. After this, lookups
+        and inserts are no-ops, invalidations are recorded on disk to be
+        applied the next time the cache is loaded. This is needed as other
+        threads, such as cover renderers, can still be using the cache.
+        """
         with self.lock:
-            self._write_order()
+            self.closed = True
+            if (items := getattr(self, 'items', None)) is not None:
+                del self.items
+                del self.total_size
+                try:
+                    data = '\n'.join(group_id + ' ' + str(book_id) for (group_id, book_id) in items)
+                    with open(os.path.join(self.location, 'order'), 'wb') as f:
+                        f.write(data.encode('utf-8'))
+                except OSError as err:
+                    self.log('Failed to save thumbnail cache order:', as_unicode(err))
 
-    def set_group_id(self, group_id):
+    def set_group_id(self, group_id: str) -> None:
         with self.lock:
             self.group_id = group_id
 
-    def set_thumbnail_size(self, width, height):
+    def set_thumbnail_size(self, width: int, height: int) -> bool:
         new_size = (width, height)
         with self.lock:
             if new_size != self.thumbnail_size:
@@ -263,32 +349,47 @@ class ThumbnailCache(object):
                 return True
         return False
 
-    def insert(self, book_id, timestamp, data):
+    def insert(self, book_id: int, timestamp: float, data: bytes, thumbnail_size: Sequence[int] | None = None) -> None:
+        """
+        Add data to the cache. thumbnail_size is the size the data was actually
+        rendered for, it must be specified by callers that render thumbnails
+        asynchronously, since the size of this cache can change while a render
+        is in flight. Data rendered for some other size is discarded, rather
+        than being stored under the current size, where nothing would ever
+        invalidate it.
+        """
         if self.max_size < len(data):
             return
         with self.lock:
-            if not hasattr(self, 'total_size'):
-                self._load_index()
+            if not self._ensure_loaded():
+                return
             self._invalidate_sizes()
-            ts = ('%.2f' % timestamp).replace('.00', '')
-            path = '%s%s%s%s%d-%s-%d-%dx%d' % (
-                self.group_id, os.sep, book_id % 100, os.sep,
-                book_id, ts, len(data), self.thumbnail_size[0], self.thumbnail_size[1])
+            if thumbnail_size is not None and tuple(thumbnail_size) != self.thumbnail_size:
+                return
+            ts = (f'{timestamp:.2f}').replace('.00', '')
+            path = f'{self.group_id}{os.sep}{book_id % 100}{os.sep}{book_id}-{ts}-{len(data)}-{self.thumbnail_size[0]}x{self.thumbnail_size[1]}'
             path = os.path.join(self.location, path)
             key = (self.group_id, book_id)
             e = self.items.pop(key, None)
             self.total_size -= getattr(e, 'size', 0)
+            if e is not None and e.path != path:
+                # The file name encodes the timestamp and size of the data, so
+                # replacing an entry does not necessarily overwrite its file.
+                # Delete it, otherwise it is leaked and, worse, re-appears as a
+                # duplicate entry for this book the next time the index is
+                # loaded from disk.
+                self._do_delete(e.path)
             try:
                 with open(path, 'wb') as f:
                     f.write(data)
-            except EnvironmentError as err:
+            except OSError as err:
                 d = os.path.dirname(path)
                 if not os.path.exists(d):
                     try:
                         os.makedirs(d)
                         with open(path, 'wb') as f:
                             f.write(data)
-                    except EnvironmentError as err:
+                    except OSError as err:
                         self.log('Failed to write cached thumbnail:', path, as_unicode(err))
                         return self._apply_size()
                 else:
@@ -298,26 +399,18 @@ class ThumbnailCache(object):
             self.total_size += len(data)
             self._apply_size()
 
-    def __len__(self):
+    def __len__(self) -> int:
         with self.lock:
-            try:
-                return len(self.items)
-            except AttributeError:
-                self._load_index()
-                return len(self.items)
+            return len(self.items) if self._ensure_loaded() else 0
 
-    def __contains__(self, book_id):
+    def __contains__(self, book_id: int) -> bool:
         with self.lock:
-            try:
-                return (self.group_id, book_id) in self.items
-            except AttributeError:
-                self._load_index()
-                return (self.group_id, book_id) in self.items
+            return self._ensure_loaded() and (self.group_id, book_id) in self.items
 
-    def __getitem__(self, book_id):
+    def __getitem__(self, book_id: int) -> tuple[bytes, float] | tuple[None, None]:
         with self.lock:
-            if not hasattr(self, 'total_size'):
-                self._load_index()
+            if not self._ensure_loaded():
+                return None, None
             self._invalidate_sizes()
             key = (self.group_id, book_id)
             entry = self.items.pop(key, None)
@@ -326,7 +419,7 @@ class ThumbnailCache(object):
             if entry.thumbnail_size != self.thumbnail_size:
                 try:
                     os.remove(entry.path)
-                except EnvironmentError as err:
+                except OSError as err:
                     if getattr(err, 'errno', None) != errno.ENOENT:
                         self.log('Failed to remove cached thumbnail:', entry.path, as_unicode(err))
                 self.total_size -= entry.size
@@ -335,61 +428,65 @@ class ThumbnailCache(object):
             try:
                 with open(entry.path, 'rb') as f:
                     data = f.read()
-            except EnvironmentError as err:
+            except OSError as err:
                 self.log('Failed to read cached thumbnail:', entry.path, as_unicode(err))
                 return None, None
             return data, entry.timestamp
 
-    def invalidate(self, book_ids):
+    def invalidate(self, book_ids: Collection[int]) -> None:
         with self.lock:
             if hasattr(self, 'total_size'):
                 for book_id in book_ids:
                     self._remove((self.group_id, book_id))
-            elif os.path.exists(self.location):
+            elif book_ids and os.path.exists(self.location):
                 try:
-                    raw = '\n'.join('%s %d' % (self.group_id, book_id) for book_id in book_ids)
+                    # The leading newline ensures records are separated even
+                    # if the file was written by an older version of calibre
+                    # that did not terminate the last record with a newline
+                    raw = ''.join(f'\n{self.group_id} {book_id}' for book_id in book_ids) + '\n'
                     with open(os.path.join(self.location, 'invalidate'), 'ab') as f:
                         f.write(raw.encode('ascii'))
-                except EnvironmentError as err:
+                except OSError as err:
                     self.log('Failed to write invalidate thumbnail record:', as_unicode(err))
 
     @property
-    def current_size(self):
+    def current_size(self) -> int:
         with self.lock:
-            if not hasattr(self, 'total_size'):
-                self._load_index()
-            return self.total_size
+            return self.total_size if self._ensure_loaded() else 0
 
-    def empty(self):
+    def empty(self) -> None:
         with self.lock:
+            if self.closed:
+                return
             try:
                 os.remove(os.path.join(self.location, 'order'))
-            except EnvironmentError:
+            except OSError:
                 pass
-            if not hasattr(self, 'total_size'):
-                self._load_index()
-            for entry in itervalues(self.items):
+            self._ensure_loaded()
+            for entry in self.items.values():
                 self._do_delete(entry.path)
             self.total_size = 0
             self.items = OrderedDict()
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return id(self)
 
-    def set_size(self, size_in_mb):
+    def set_size(self, size_in_mb: float) -> None:
         if size_in_mb <= self.min_disk_cache:
             size_in_mb = 0
         size_in_mb = max(0, size_in_mb)
+        new_size = int(size_in_mb * (1024**2))
         with self.lock:
-            self.max_size = int(size_in_mb * (1024**2))
-            if hasattr(self, 'total_size'):
-                self._apply_size()
+            if new_size != self.max_size:
+                self.max_size = new_size
+                if hasattr(self, 'total_size'):
+                    self._apply_size()
 
 
-number_separators = None
+number_separators: tuple[str, str] | None = None
 
 
-def atof(string):
+def atof(string: str) -> float:
     # Python 2.x does not handle unicode number separators correctly, so we
     # have to implement our own
     global number_separators
@@ -407,23 +504,94 @@ def atof(string):
     return float(string.replace(number_separators[1], '.').replace(number_separators[0], ''))
 
 
-def type_safe_sort_key_function(keyfunc=None):
+def type_safe_sort_key_function[T](
+    keyfunc: Callable[[T], SupportsAllComparisons] | None = None,
+) -> Callable[[T], SupportsAllComparisons]:
     if keyfunc is None:
-        keyfunc = lambda x: x
-    sentinel = object()
-    first_value = sentinel
 
-    def key(x):
+        def keyfunc(x: T) -> SupportsAllComparisons:
+            return x  # ty: ignore[invalid-explicit-return]
+
+    sentinel = object()
+    first_value: SupportsAllComparisons = sentinel  # ty: ignore[invalid-assignment]
+
+    def key(x: T) -> SupportsAllComparisons:
         nonlocal first_value
         ans = keyfunc(x)
         if first_value is sentinel:
             first_value = ans
         else:
             try:
-                ans < first_value
-                first_value < ans
+                ans < first_value  # ruff: ignore[useless-comparison]
+                first_value < ans  # ruff: ignore[useless-comparison]
             except TypeError:
                 ans = first_value
         return ans
 
     return key
+
+
+def human_readable_interval(secs: float) -> str:
+    secs = int(secs)
+    days = secs // 86400
+    hours = secs // 3600 % 24
+    minutes = secs // 60 % 60
+    seconds = secs % 60
+    parts = []
+    if days > 0:
+        parts.append(ngettext('1 day', '{} days', days).format(days))
+        if hours > 0:
+            parts.append(ngettext('1 hour', '{} hours', hours).format(hours))
+    elif hours > 0:
+        parts.append(ngettext('1 hour', '{} hours', hours).format(hours))
+        if minutes > 0:
+            parts.append(ngettext('1 minute', '{} minutes', minutes).format(minutes))
+    elif minutes > 0:
+        parts.append(ngettext('1 minute', '{} minutes', minutes).format(minutes))
+        if secs > 0:
+            parts.append(ngettext('1 second', '{} seconds', seconds).format(seconds))
+    elif secs > 0:
+        parts.append(ngettext('1 second', '{} seconds', seconds).format(seconds))
+    return ' '.join(parts)
+
+
+class IndexingProgress:
+    def __init__(self) -> None:
+        self.reset()
+
+    def __repr__(self) -> str:
+        return f'IndexingProgress(left={self.left}, total={self.total}, rate={self.indexing_rate})'
+
+    def reset(self) -> None:
+        self.left = self.total = -1
+        self.indexing_rate: float | None = None
+
+    def update(self, left: int, total: int, indexing_rate: float | None) -> bool:
+        changed = (left, total, indexing_rate) != (self.left, self.total, self.indexing_rate)
+        self.indexing_rate = indexing_rate
+        self.left, self.total = left, total
+        return changed
+
+    @property
+    def complete(self) -> bool:
+        return not self.left or not self.total
+
+    @property
+    def almost_complete(self) -> bool:
+        return self.complete or (self.left / self.total) < 0.1
+
+    @property
+    def time_left(self) -> str:
+        if self.left < 0:
+            return _('calculating time left')
+        if self.left < 2:
+            return _('almost done')
+        if self.indexing_rate is None:
+            return _('calculating time left')
+        try:
+            seconds_left = self.left / self.indexing_rate
+            if seconds_left < 2:
+                return _('almost done')
+            return _('~{} left').format(human_readable_interval(seconds_left))
+        except Exception:
+            return _('calculating time left')

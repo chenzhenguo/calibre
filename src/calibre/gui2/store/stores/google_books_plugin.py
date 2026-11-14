@@ -1,20 +1,15 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
+
+
+from calibre.utils.localization import _
 
 store_version = 7  # Needed for dynamic plugin loading
 
-__license__ = 'GPL 3'
-__copyright__ = '2011, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
-
 from contextlib import closing
-try:
-    from urllib.parse import quote_plus
-except ImportError:
-    from urllib import quote_plus
+from urllib.parse import quote_plus
 
 from lxml import html
-from PyQt5.Qt import QUrl
+from qt.core import QUrl
 
 from calibre import browser, url_slash_cleaner
 from calibre.gui2 import open_url
@@ -30,6 +25,7 @@ def parse_html(raw):
     except ImportError:
         # Old versions of calibre
         import html5lib
+
         return html5lib.parse(raw, treebuilder='lxml', namespaceHTMLElements=False)
     else:
         return parse(raw)
@@ -46,7 +42,8 @@ def search_google(query, max_results=10, timeout=60, write_html_to=None):
         doc = parse_html(raw)
         if write_html_to is not None:
             praw = html.tostring(doc, encoding='utf-8')
-            open(write_html_to, 'wb').write(praw)
+            with open(write_html_to, 'wb') as f:
+                f.write(praw)
         for data in doc.xpath('//div[@id="rso"]/div'):
             if counter <= 0:
                 break
@@ -79,22 +76,20 @@ def search_google(query, max_results=10, timeout=60, write_html_to=None):
 
 
 class GoogleBooksStore(BasicStoreConfig, StorePlugin):
-
-    def open(self, parent=None, detail_item=None, external=False):
+    def open(self, gui=None, parent=None, detail_item=None, external=False) -> None:
         url = 'https://books.google.com/books'
-        if True or external or self.config.get('open_external', False):
-            open_url(QUrl(url_slash_cleaner(detail_item if detail_item else url)))
+        if True or external or self.config.get('open_external', False):  # ruff: ignore[expr-or-true]
+            open_url(QUrl(url_slash_cleaner(detail_item or url)))
         else:
             d = WebStoreDialog(self.gui, url, parent, detail_item)
             d.setWindowTitle(self.name)
             d.set_tags(self.config.get('tags', ''))
-            d.exec_()
+            d.exec()
 
     def search(self, query, max_results=10, timeout=60):
-        for result in search_google(query, max_results=max_results, timeout=timeout):
-            yield result
+        yield from search_google(query, max_results=max_results, timeout=timeout)
 
-    def get_details(self, search_result, timeout):
+    def get_details(self, search_result, timeout=60) -> bool:
         br = browser()
         with closing(br.open(search_result.detail_item, timeout=timeout)) as nf:
             doc = parse_html(nf.read())
@@ -120,5 +115,6 @@ class GoogleBooksStore(BasicStoreConfig, StorePlugin):
 
 if __name__ == '__main__':
     import sys
+
     for result in search_google(' '.join(sys.argv[1:]), write_html_to='/t/google.html'):
         print(result)

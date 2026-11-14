@@ -1,25 +1,20 @@
-# -*- coding: utf-8 -*-
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
 
-
-__license__ = 'GPL 3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
-
-from calibre.gui2.convert.htmlz_output_ui import Ui_Form
-from calibre.gui2.convert import Widget
 from calibre.ebooks.conversion.config import OPTIONS
+from calibre.gui2.convert import Widget
+from calibre.gui2.convert.htmlz_output_ui import Ui_Form
+from calibre.utils.localization import _
 
 format_model = None
 
 
 class PluginWidget(Widget, Ui_Form):
-
     TITLE = _('HTMLZ output')
-    HELP = _('Options specific to')+' HTMLZ '+_('output')
+    HELP = _('Options specific to') + ' HTMLZ ' + _('output')
     COMMIT_NAME = 'htmlz_output'
-    ICON = I('mimetypes/html.png')
+    ICON = 'mimetypes/html.png'
 
-    def __init__(self, parent, get_option, get_help, db=None, book_id=None):
+    def __init__(self, parent, get_option, get_help, db=None, book_id=None) -> None:
         Widget.__init__(self, parent, OPTIONS['output']['htmlz'])
         self.db, self.book_id = db, book_id
         for x in get_option('htmlz_css_type').option.choices:

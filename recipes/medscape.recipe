@@ -11,7 +11,6 @@ from calibre.web.feeds.recipes import BasicNewsRecipe
 
 
 class MedScrape(BasicNewsRecipe):
-
     title = 'MedScape'
     __author__ = 'Tony Stegall'
     description = 'Nursing News'
@@ -34,9 +33,7 @@ class MedScrape(BasicNewsRecipe):
                     p{font-family:Helvetica,Arial,sans-serif;font-size:small;}
     '''
 
-    remove_tags = [dict(name='div', attrs={'class': ['closewindow2']}),
-                   dict(name='div', attrs={'id': ['basicheaderlinks']})
-                   ]
+    remove_tags = [dict(name='div', attrs={'class': ['closewindow2']}), dict(name='div', attrs={'id': ['basicheaderlinks']})]
 
     def get_browser(self):
         br = BasicNewsRecipe.get_browser(self)
@@ -56,7 +53,7 @@ class MedScrape(BasicNewsRecipe):
         # the original url is: http://www.medscape.com/viewarticle/728955?src=rss
         # the print    url is: http://www.medscape.com/viewarticle/728955_print
         print_url = url.partition('?')[0] + '_print'
-        # print 'the printable version is: ',print_url
+        # print('the printable version is: ',print_url)
         return print_url
 
     def preprocess_html(self, soup):

@@ -1,40 +1,95 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
 import re
+import unicodedata
+from typing import TYPE_CHECKING
 
-from lxml.etree import Element as LxmlElement
 import html5_parser
+from lxml.etree import Element as LxmlElement
 
-from calibre import xml_replace_entities
-from calibre.utils.xml_parse import safe_xml_fromstring
-from calibre.ebooks.chardet import xml_to_unicode, strip_encoding_declarations
+from calibre.ebooks.chardet import strip_encoding_declarations, xml_to_unicode
 from calibre.utils.cleantext import clean_xml_chars
-from polyglot.builtins import unicode_type
+from calibre.utils.xml_parse import safe_xml_fromstring
+from calibre_extensions.fast_html_entities import replace_all_entities
 
-XHTML_NS     = 'http://www.w3.org/1999/xhtml'
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from lxml.etree import _Element
+
+    from calibre.utils.logging import Log
+
+XHTML_NS = 'http://www.w3.org/1999/xhtml'
 
 
-def parse_html5(raw, decoder=None, log=None, discard_namespaces=False, line_numbers=True, linenumber_attribute=None, replace_entities=True, fix_newlines=True):
+def decode_xml(data: bytes, normalize_to_nfc: bool = True) -> tuple[str, str | None]:
+    used_encoding: str | None = ''
+
+    def fix_data(d: str) -> tuple[str, str | None]:
+        return d.replace('\r\n', '\n').replace('\r', '\n'), used_encoding
+
+    if isinstance(data, str):
+        return fix_data(data)
+    bom_enc = None
+    if data[:4] in {b'\0\0\xfe\xff', b'\xff\xfe\0\0'}:
+        bom_enc = {b'\0\0\xfe\xff': 'utf-32-be', b'\xff\xfe\0\0': 'utf-32-le'}[data[:4]]
+        data = data[4:]
+    elif data[:2] in {b'\xff\xfe', b'\xfe\xff'}:
+        bom_enc = {b'\xff\xfe': 'utf-16-le', b'\xfe\xff': 'utf-16-be'}[data[:2]]
+        data = data[2:]
+    elif data[:3] == b'\xef\xbb\xbf':
+        bom_enc = 'utf-8'
+        data = data[3:]
+    if bom_enc is not None:
+        try:
+            used_encoding = bom_enc
+            return fix_data(data.decode(bom_enc))
+        except UnicodeDecodeError:
+            pass
+    try:
+        used_encoding = 'utf-8'
+        return fix_data(data.decode('utf-8'))
+    except UnicodeDecodeError:
+        pass
+    str_data, used_encoding = xml_to_unicode(data)
+    if normalize_to_nfc:
+        str_data = unicodedata.normalize('NFC', str_data)
+    return fix_data(str_data)
+
+
+def parse_html5(
+    raw: str | bytes,
+    decoder: Callable[[bytes], str] | None = None,
+    log: Log | None = None,
+    discard_namespaces: bool = False,
+    line_numbers: bool = True,
+    linenumber_attribute: str | None = None,
+    replace_entities: bool = True,
+    fix_newlines: bool = True,
+) -> _Element:
     if isinstance(raw, bytes):
         raw = xml_to_unicode(raw)[0] if decoder is None else decoder(raw)
+    assert isinstance(raw, str)
     if replace_entities:
-        raw = xml_replace_entities(raw)
+        raw = replace_all_entities(raw, True)
+        assert isinstance(raw, str)
     if fix_newlines:
         raw = raw.replace('\r\n', '\n').replace('\r', '\n')
     raw = clean_xml_chars(raw)
-    root = html5_parser.parse(raw, maybe_xhtml=not discard_namespaces, line_number_attr=linenumber_attribute, keep_doctype=False, sanitize_names=True)
-    if (discard_namespaces and root.tag != 'html') or (
-        not discard_namespaces and (root.tag != '{%s}%s' % (XHTML_NS, 'html') or root.prefix)):
-        raise ValueError('Failed to parse correctly, root has tag: %s and prefix: %s' % (root.tag, root.prefix))
+    root = html5_parser.parse(
+        raw,
+        maybe_xhtml=not discard_namespaces,
+        line_number_attr=linenumber_attribute,
+        keep_doctype=False,
+        sanitize_names=True,
+    )
+    if (discard_namespaces and root.tag != 'html') or (not discard_namespaces and (root.tag != '{{{}}}{}'.format(XHTML_NS, 'html') or root.prefix)):
+        raise ValueError(f'Failed to parse correctly, root has tag: {root.tag} and prefix: {root.prefix}')
     return root
 
 
-def handle_private_entities(data):
+def handle_private_entities(data: str) -> str:
     # Process private entities
     pre = ''
     idx = data.find('<html')
@@ -52,17 +107,28 @@ def handle_private_entities(data):
                 user_entities[match.group(1)] = val
             if user_entities:
                 data = ('\n' * num_of_nl_in_pre) + data[idx:]
-                pat = re.compile(r'&(%s);'%('|'.join(user_entities.keys())))
-                data = pat.sub(lambda m:user_entities[m.group(1)], data)
+                pat = re.compile(r'&({});'.format('|'.join(user_entities.keys())))
+                data = pat.sub(lambda m: user_entities[m.group(1)], data)
     return data
 
 
-def parse(raw, decoder=None, log=None, line_numbers=True, linenumber_attribute=None, replace_entities=True, force_html5_parse=False):
+def parse(
+    raw: str | bytes,
+    decoder: Callable[[bytes], str] | None = None,
+    log: Log | None = None,
+    line_numbers: bool = True,
+    linenumber_attribute: str | None = None,
+    replace_entities: bool = True,
+    force_html5_parse: bool = False,
+) -> _Element:
     if isinstance(raw, bytes):
         raw = xml_to_unicode(raw)[0] if decoder is None else decoder(raw)
+    assert isinstance(raw, str)
     raw = handle_private_entities(raw)
+    assert isinstance(raw, str)
     if replace_entities:
-        raw = xml_replace_entities(raw).replace('\0', '')  # Handle &#0;
+        raw = replace_all_entities(raw, True)
+        assert isinstance(raw, str)
     raw = raw.replace('\r\n', '\n').replace('\r', '\n')
 
     # Remove any preamble before the opening html tag as it can cause problems,
@@ -71,29 +137,47 @@ def parse(raw, decoder=None, log=None, line_numbers=True, linenumber_attribute=N
     pre = raw[:2048]
     for match in re.finditer(r'<\s*html', pre, flags=re.I):
         newlines = raw.count('\n', 0, match.start())
-        raw = ('\n' * newlines) + raw[match.start():]
+        raw = ('\n' * newlines) + raw[match.start() :]
         break
 
-    raw = strip_encoding_declarations(raw, limit=10*1024, preserve_newlines=True)
+    raw = strip_encoding_declarations(raw, limit=10 * 1024, preserve_newlines=True)
     if force_html5_parse:
-        return parse_html5(raw, log=log, line_numbers=line_numbers, linenumber_attribute=linenumber_attribute, replace_entities=False, fix_newlines=False)
+        return parse_html5(
+            raw,
+            log=log,
+            line_numbers=line_numbers,
+            linenumber_attribute=linenumber_attribute,
+            replace_entities=False,
+            fix_newlines=False,
+        )
     try:
         ans = safe_xml_fromstring(raw, recover=False)
-        if ans.tag != '{%s}html' % XHTML_NS:
+        if ans.tag != f'{{{XHTML_NS}}}html':
             raise ValueError('Root tag is not <html> in the XHTML namespace')
         if linenumber_attribute:
             for elem in ans.iter(LxmlElement):
                 if elem.sourceline is not None:
-                    elem.set(linenumber_attribute, unicode_type(elem.sourceline))
+                    elem.set(linenumber_attribute, str(elem.sourceline))
         return ans
     except Exception:
         if log is not None:
             log.exception('Failed to parse as XML, parsing as tag soup')
-        return parse_html5(raw, log=log, line_numbers=line_numbers, linenumber_attribute=linenumber_attribute, replace_entities=False, fix_newlines=False)
+        return parse_html5(
+            raw,
+            log=log,
+            line_numbers=line_numbers,
+            linenumber_attribute=linenumber_attribute,
+            replace_entities=False,
+            fix_newlines=False,
+        )
 
 
 if __name__ == '__main__':
     from lxml import etree
-    root = parse_html5('\n<html><head><title>a\n</title><p b=1 c=2 a=0>&nbsp;\n<b>b<svg ass="wipe" viewbox="0">', discard_namespaces=False)
+
+    root = parse_html5(
+        '\n<html><head><title>a\n</title><p b=1 c=2 a=0>&nbsp;\n<b>b<svg ass="wipe" viewbox="0">',
+        discard_namespaces=False,
+    )
     print(etree.tostring(root, encoding='utf-8'))
     print()

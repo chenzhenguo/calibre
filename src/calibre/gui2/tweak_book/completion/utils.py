@@ -1,11 +1,7 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-from polyglot.builtins import unicode_type
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+from calibre.utils.localization import _
 
 
 def control(func):
@@ -19,10 +15,9 @@ def data(func):
 
 
 class DataError(Exception):
-
-    def __init__(self, tb, msg=None):
+    def __init__(self, tb, msg=None) -> None:
         Exception.__init__(self, msg or _('Failed to get completion data'))
         self.tb = tb
 
     def traceback(self):
-        return unicode_type(self) + '\n' + self.tb
+        return str(self) + '\n' + self.tb

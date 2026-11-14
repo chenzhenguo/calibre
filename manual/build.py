@@ -1,11 +1,13 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 
 
 __license__ = 'GPL v3'
 __copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
 
-import sys, os, subprocess, shutil
+import os
+import shutil
+import subprocess
+import sys
 import tempfile
 from functools import partial
 
@@ -15,8 +17,9 @@ SPHINX_BUILD = ['sphinx-build']
 
 sys.path.insert(0, d(BASE))
 from setup import __appname__, __version__
-from calibre.ebooks.oeb.polish.container import epub_to_azw3
+
 sys.path.remove(d(BASE))
+from calibre.ebooks.oeb.polish.container import epub_to_azw3
 
 
 def sphinx_build(language, base, builder='html', bdir='html', t=None, quiet=True, very_quiet=False):
@@ -42,29 +45,33 @@ def build_manual(language, base):
     sb = partial(sphinx_build, language, base)
     onlinedir = sb(t='online')
     epubdir = sb('myepub', 'epub')
-    latexdir = sb('mylatex', 'latex')
-    pwd = os.getcwd()
-    os.chdir(latexdir)
+    pdf_ok = language not in ('ja', 'ar')
+    if pdf_ok:
+        latexdir = sb('latex', 'latex')
+        pwd = os.getcwd()
+        os.chdir(latexdir)
 
-    def run_cmd(cmd):
-        p = subprocess.Popen(cmd, stdout=open(os.devnull, 'wb'), stdin=subprocess.PIPE)
-        p.stdin.close()
-        return p.wait()
-    try:
-        for i in range(3):
-            run_cmd(['xelatex', '-interaction=nonstopmode', 'calibre.tex'])
-        run_cmd(['makeindex', '-s', 'python.ist', 'calibre.idx'])
-        for i in range(2):
-            run_cmd(['xelatex', '-interaction=nonstopmode', 'calibre.tex'])
-        if not os.path.exists('calibre.pdf'):
-            print('Failed to build pdf file, see calibre.log in the latex directory', file=sys.stderr)
-            raise SystemExit(1)
-    finally:
-        os.chdir(pwd)
+        def run_cmd(cmd):
+            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stdin=subprocess.PIPE)
+            assert p.stdin is not None
+            p.stdin.close()
+            return p.wait()
+
+        try:
+            for i in range(3):
+                run_cmd(['xelatex', '-interaction=nonstopmode', 'calibre.tex'])
+            run_cmd(['makeindex', '-s', 'python.ist', 'calibre.idx'])
+            for i in range(2):
+                run_cmd(['xelatex', '-interaction=nonstopmode', 'calibre.tex'])
+            if not os.path.exists('calibre.pdf'):
+                print('Failed to build pdf file, see calibre.log in the latex directory', file=sys.stderr)
+                raise SystemExit(1)
+        finally:
+            os.chdir(pwd)
+        pdf_dest = j(onlinedir, 'calibre.pdf')
+        shutil.copyfile(j(latexdir, 'calibre.pdf'), pdf_dest)
     epub_dest = j(onlinedir, 'calibre.epub')
-    pdf_dest = j(onlinedir, 'calibre.pdf')
     shutil.copyfile(j(epubdir, 'calibre.epub'), epub_dest)
-    shutil.copyfile(j(latexdir, 'calibre.pdf'), pdf_dest)
     epub_to_azw3(epub_dest)
 
 
@@ -90,6 +97,7 @@ def build_man_pages(language, base):
 
 if __name__ == '__main__':
     import argparse
+
     os.chdir(d(a(__file__)))
     os.environ['__appname__'] = __appname__
     os.environ['__version__'] = __version__
@@ -98,7 +106,9 @@ if __name__ == '__main__':
         os.environ['CALIBRE_OVERRIDE_LANG'] = language = 'en'
         if 'ALL_USER_MANUAL_LANGUAGES' not in os.environ:
             import json
-            os.environ['ALL_USER_MANUAL_LANGUAGES'] = ' '.join(json.load(open('locale/completed.json', 'rb')))
+
+            with open('locale/completed.json', 'rb') as f:
+                os.environ['ALL_USER_MANUAL_LANGUAGES'] = ' '.join(json.load(f))
         sphinx_build(language, base, t='online', quiet=False)
         print('Manual built in', j(base, 'html'))
     else:

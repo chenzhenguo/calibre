@@ -1,4 +1,1 @@
-# vim:fileencoding=utf-8
-
-from time import monotonic
-monotonic
+from time import monotonic  # ruff: ignore[unused-import]

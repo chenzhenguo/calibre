@@ -1,30 +1,24 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
 
-
-__license__ = 'GPL 3'
-__copyright__ = '2011, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
 
 import time
 from contextlib import closing
 from threading import Thread
 
-from lxml import html
-
-from PyQt5.Qt import (pyqtSignal, QObject)
+from qt.core import QObject, pyqtSignal
 
 from calibre import browser
 from calibre.gui2.store.search_result import SearchResult
+from calibre.utils.localization import _
+from calibre.utils.xml_parse import safe_html_fromstring
 
 
 class CacheUpdateThread(Thread, QObject):
-
     total_changed = pyqtSignal(int)
     update_progress = pyqtSignal(int)
-    update_details = pyqtSignal(type(u''))
+    update_details = pyqtSignal(str)
 
-    def __init__(self, config, seralize_books_function, timeout):
+    def __init__(self, config, seralize_books_function, timeout) -> None:
         Thread.__init__(self)
         QObject.__init__(self)
 
@@ -34,10 +28,10 @@ class CacheUpdateThread(Thread, QObject):
         self.timeout = timeout
         self._run = True
 
-    def abort(self):
+    def abort(self) -> None:
         self._run = False
 
-    def run(self):
+    def run(self) -> None:
         url = 'https://www.mobileread.com/forums/ebooks.php?do=getlist&type=html'
 
         self.update_details.emit(_('Checking last download date.'))
@@ -53,7 +47,7 @@ class CacheUpdateThread(Thread, QObject):
         try:
             with closing(br.open(url, timeout=self.timeout)) as f:
                 raw_data = f.read()
-        except:
+        except Exception:
             return
 
         if not raw_data or not self._run:
@@ -63,14 +57,12 @@ class CacheUpdateThread(Thread, QObject):
         # Turn books listed in the HTML file into SearchResults's.
         books = []
         try:
-            data = html.fromstring(raw_data)
+            data = safe_html_fromstring(raw_data)
             raw_books = data.xpath('//ul/li')
             self.total_changed.emit(len(raw_books))
 
             for i, book_data in enumerate(raw_books):
-                self.update_details.emit(
-                        _('%(num)s of %(tot)s books processed.') % dict(
-                            num=i, tot=len(raw_books)))
+                self.update_details.emit(_('%(num)s of %(tot)s books processed.') % dict(num=i, tot=len(raw_books)))
                 book = SearchResult()
                 book.detail_item = ''.join(book_data.xpath('.//a/@href'))
                 book.formats = ''.join(book_data.xpath('.//i/text()'))
@@ -88,7 +80,7 @@ class CacheUpdateThread(Thread, QObject):
                     break
                 else:
                     self.update_progress.emit(i)
-        except:
+        except Exception:
             pass
 
         # Save the book list and it's create time.

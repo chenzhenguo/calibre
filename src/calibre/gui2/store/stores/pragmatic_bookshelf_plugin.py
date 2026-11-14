@@ -1,11 +1,7 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
+
 
 store_version = 1  # Needed for dynamic plugin loading
-
-__license__ = 'GPL 3'
-__copyright__ = '2011, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
 
 from calibre.gui2.store.basic_config import BasicStoreConfig
 from calibre.gui2.store.opensearch_store import OpenSearchOPDSStore
@@ -13,7 +9,6 @@ from calibre.gui2.store.search_result import SearchResult
 
 
 class PragmaticBookshelfStore(BasicStoreConfig, OpenSearchOPDSStore):
-
     open_search_url = 'http://pragprog.com/catalog/search-description'
     web_url = 'http://pragprog.com/'
 

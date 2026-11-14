@@ -1,60 +1,54 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
 
 import gc
 from functools import partial
 
-from PyQt5.Qt import Qt
+from qt.core import Qt
 
 from calibre.gui2 import Dispatcher
-from calibre.gui2.tools import fetch_scheduled_recipe
 from calibre.gui2.actions import InterfaceAction
+from calibre.gui2.tools import fetch_scheduled_recipe
+from calibre.utils.localization import _
 
 
 class FetchNewsAction(InterfaceAction):
-
     name = 'Fetch News'
-    action_spec = (_('Fetch news'), 'news.png', _('Download news in e-book form from various websites all over the world'), _('F'))
+    action_spec = (
+        _('Fetch news'),
+        'news.png',
+        _('Download news in e-book form from various websites all over the world'),
+        _('F'),
+    )
 
-    def location_selected(self, loc):
+    def location_selected(self, loc) -> None:
         enabled = loc == 'library'
         self.qaction.setEnabled(enabled)
         self.menuless_qaction.setEnabled(enabled)
 
-    def genesis(self):
+    def genesis(self) -> None:
         self.conversion_jobs = {}
 
-    def init_scheduler(self, db):
+    def init_scheduler(self) -> None:
         from calibre.gui2.dialogs.scheduler import Scheduler
-        self.scheduler = Scheduler(self.gui, db)
+
+        self.scheduler = Scheduler(self.gui)
         self.scheduler.start_recipe_fetch.connect(self.download_scheduled_recipe, type=Qt.ConnectionType.QueuedConnection)
         self.qaction.setMenu(self.scheduler.news_menu)
-        self.qaction.triggered.connect(
-                self.scheduler.show_dialog)
+        self.qaction.triggered.connect(self.scheduler.show_dialog)
 
-    def library_changed(self, db):
-        self.scheduler.database_changed(db)
-
-    def initialization_complete(self):
+    def initialization_complete(self) -> None:
         self.connect_scheduler()
 
-    def connect_scheduler(self):
-        self.scheduler.delete_old_news.connect(
-                self.gui.library_view.model().delete_books_by_id,
-                type=Qt.ConnectionType.QueuedConnection)
+    def connect_scheduler(self) -> None:
+        self.scheduler.delete_old_news.connect(self.gui.library_view.model().delete_books_by_id, type=Qt.ConnectionType.QueuedConnection)
 
-    def download_custom_recipe(self, title, urn):
+    def download_custom_recipe(self, title, urn) -> None:
         arg = {'title': title, 'urn': urn, 'username': None, 'password': None}
         func, args, desc, fmt, temp_files = fetch_scheduled_recipe(arg)
-        job = self.gui.job_manager.run_job(
-                Dispatcher(self.custom_recipe_fetched), func, args=args, description=desc)
+        job = self.gui.job_manager.run_job(Dispatcher(self.custom_recipe_fetched), func, args=args, description=desc)
         self.conversion_jobs[job] = (temp_files, fmt, arg)
-        self.gui.status_bar.show_message(_('Fetching news from ')+arg['title'], 2000)
+        self.gui.status_bar.show_message(_('Fetching news from ') + arg['title'], 2000)
 
     def custom_recipe_fetched(self, job):
         temp_files, fmt, arg = self.conversion_jobs.pop(job)
@@ -63,13 +57,11 @@ class FetchNewsAction(InterfaceAction):
             return self.gui.job_exception(job)
         self.gui.library_view.model().add_news(fname, arg)
 
-    def download_scheduled_recipe(self, arg):
-        func, args, desc, fmt, temp_files = \
-                fetch_scheduled_recipe(arg)
-        job = self.gui.job_manager.run_job(
-                Dispatcher(self.scheduled_recipe_fetched), func, args=args, description=desc)
+    def download_scheduled_recipe(self, arg) -> None:
+        func, args, desc, fmt, temp_files = fetch_scheduled_recipe(arg)
+        job = self.gui.job_manager.run_job(Dispatcher(self.scheduled_recipe_fetched), func, args=args, description=desc)
         self.conversion_jobs[job] = (temp_files, fmt, arg)
-        self.gui.status_bar.show_message(_('Fetching news from ')+arg['title'], 2000)
+        self.gui.status_bar.show_message(_('Fetching news from ') + arg['title'], 2000)
 
     def scheduled_recipe_fetched(self, job):
         temp_files, fmt, arg = self.conversion_jobs.pop(job)
@@ -83,12 +75,15 @@ class FetchNewsAction(InterfaceAction):
         # delete all but newest x issues.
         try:
             keep_issues = int(arg['keep_issues'])
-        except:
+        except Exception:
             keep_issues = 0
         if keep_issues > 0:
-            ids_with_tag = list(sorted(self.gui.library_view.model().
-                db.tags_older_than(arg['title'],
-                    None, must_have_tag=_('News')), reverse=True))
+            ids_with_tag = list(
+                sorted(
+                    self.gui.library_view.model().db.tags_older_than(arg['title'], None, must_have_tag=_('News')),
+                    reverse=True,
+                )
+            )
             ids_to_delete = ids_with_tag[keep_issues:]
             if ids_to_delete:
                 self.gui.library_view.model().delete_books_by_id(ids_to_delete)

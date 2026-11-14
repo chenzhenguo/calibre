@@ -1,43 +1,43 @@
+'''Hyphenation, using Frank Liang's algorithm.
 
+This module provides a single function to hyphenate words.  hyphenate_word takes
+a string (the word), and returns a list of parts that can be separated by hyphens.
 
-""" Hyphenation, using Frank Liang's algorithm.
+>>> hyphenate_word("hyphenation")
+['hy', 'phen', 'ation']
+>>> hyphenate_word("supercalifragilisticexpialidocious")
+['su', 'per', 'cal', 'ifrag', 'ilis', 'tic', 'ex', 'pi', 'ali', 'do', 'cious']
+>>> hyphenate_word("project")
+['project']
 
-    This module provides a single function to hyphenate words.  hyphenate_word takes
-    a string (the word), and returns a list of parts that can be separated by hyphens.
-
-    >>> hyphenate_word("hyphenation")
-    ['hy', 'phen', 'ation']
-    >>> hyphenate_word("supercalifragilisticexpialidocious")
-    ['su', 'per', 'cal', 'ifrag', 'ilis', 'tic', 'ex', 'pi', 'ali', 'do', 'cious']
-    >>> hyphenate_word("project")
-    ['project']
-
-    Ned Batchelder, July 2007.
-    This Python code is in the public domain.
-"""
+Ned Batchelder, July 2007.
+This Python code is in the public domain.
+'''
 
 import re
+from typing import cast
+
+type PatternTree = dict[str | None, PatternTree | list[int]]
 
 __version__ = '1.0.20070709'
 
 
 class Hyphenator:
-
-    def __init__(self, patterns, exceptions=''):
-        self.tree = {}
+    def __init__(self, patterns: str, exceptions: str = '') -> None:
+        self.tree: PatternTree = {}
         for pattern in patterns.split():
             self._insert_pattern(pattern)
 
-        self.exceptions = {}
+        self.exceptions: dict[str, list[int]] = {}
         for ex in exceptions.split():
             # Convert the hyphenated pattern into a point array for use later.
-            self.exceptions[ex.replace('-', '')] = [0] + [int(h == '-') for h in re.split(r"[a-z]", ex)]
+            self.exceptions[ex.replace('-', '')] = [0] + [int(h == '-') for h in re.split(r'[a-z]', ex)]
 
-    def _insert_pattern(self, pattern):
+    def _insert_pattern(self, pattern: str) -> None:
         # Convert a pattern like 'a1bc3d4' into a string of chars 'abcd'
         # and a list of points [ 1, 0, 3, 4 ].
-        chars = re.sub('[0-9]', '', pattern)
-        points = [int(d or 0) for d in re.split("[.a-z]", pattern)]
+        chars = re.sub(r'[0-9]', '', pattern)
+        points = [int(d or 0) for d in re.split(r'[.a-z]', pattern)]
 
         # Insert the pattern into the tree.  Each character finds a dict
         # another level down in the tree, and leaf nodes have the list of
@@ -46,12 +46,12 @@ class Hyphenator:
         for c in chars:
             if c not in t:
                 t[c] = {}
-            t = t[c]
+            t = cast('PatternTree', t[c])  # only the None key maps to a list
         t[None] = points
 
-    def hyphenate_word(self, word):
-        """ Given a word, returns a list of pieces, broken at the possible
-            hyphenation points.
+    def hyphenate_word(self, word: str) -> list[str]:
+        """Given a word, returns a list of pieces, broken at the possible
+        hyphenation points.
         """
         # Short words aren't hyphenated.
         if len(word) <= 4:
@@ -61,16 +61,16 @@ class Hyphenator:
             points = self.exceptions[word.lower()]
         else:
             work = '.' + word.lower() + '.'
-            points = [0] * (len(work)+1)
+            points = [0] * (len(work) + 1)
             for i in range(len(work)):
                 t = self.tree
                 for c in work[i:]:
                     if c in t:
-                        t = t[c]
+                        t = cast('PatternTree', t[c])  # only the None key maps to a list
                         if None in t:
-                            p = t[None]
+                            p = cast('list[int]', t[None])
                             for j in range(len(p)):
-                                points[i+j] = max(points[i+j], p[j])
+                                points[i + j] = max(points[i + j], p[j])
                     else:
                         break
             # No hyphens in the first two chars or the last two.
@@ -86,9 +86,9 @@ class Hyphenator:
 
 
 patterns = (
-# Knuth and Liang's original hyphenation patterns from classic TeX.
-# In the public domain.
-"""
+    # Knuth and Liang's original hyphenation patterns from classic TeX.
+    # In the public domain.
+    '''
 .ach4 .ad4der .af1t .al3t .am5at .an5c .ang4 .ani5m .ant4 .an3te .anti5s .ar5s
 .ar4tie .ar4ty .as3c .as1p .as1s .aster5 .atom5 .au1d .av4i .awn4 .ba4g .ba5na
 .bas4e .ber4 .be5ra .be3sm .be5sto .bri2 .but4ti .cam4pe .can5c .capa5b .car5ol
@@ -383,7 +383,7 @@ sol3d2 so3lic 5solv 3som 3s4on. sona4 son4g s4op 5sophic s5ophiz s5ophy sor5c
 sor5d 4sov so5vi 2spa 5spai spa4n spen4d 2s5peo 2sper s2phe 3spher spho5 spil4
 sp5ing 4spio s4ply s4pon spor4 4spot squal4l s1r 2ss s1sa ssas3 s2s5c s3sel
 s5seng s4ses. s5set s1si s4sie ssi4er ss5ily s4sl ss4li s4sn sspend4 ss2t ssur5a
-ss5w 2st. s2tag s2tal stam4i 5stand s4ta4p 5stat. s4ted stern5i s5tero ste2w
+ss5w 2nd. s2tag s2tal stam4i 5stand s4ta4p 5stat. s4ted stern5i s5tero ste2w
 stew5a s3the st2i s4ti. s5tia s1tic 5stick s4tie s3tif st3ing 5stir s1tle 5stock
 stom3a 5stone s4top 3store st4r s4trad 5stratu s4tray s4trid 4stry 4st3w s2ty
 1su su1al su4b3 su2g3 su5is suit3 s4ul su2m sum3i su2n su2r 4sv sw2 4swo s4y
@@ -438,17 +438,17 @@ ympa3 yn3chr yn5d yn5g yn5ic 5ynx y1o4 yo5d y4o5g yom4 yo5net y4ons y4os y4ped
 yper5 yp3i y3po y4poc yp2ta y5pu yra5m yr5ia y3ro yr4r ys4c y3s2e ys3ica ys3io
 3ysis y4so yss4 ys1t ys3ta ysur4 y3thin yt3ic y1w za1 z5a2b zar2 4zb 2ze ze4n
 ze4p z1er ze3ro zet4 2z1i z4il z4is 5zl 4zm 1zo zo4m zo5ol zte4 4z1z2 z4zy
-"""
-# Extra patterns, from ushyphmax.tex, dated 2005-05-30.
-# Copyright (C) 1990, 2004, 2005 Gerard D.C. Kuiken.
-# Copying and distribution of this file, with or without modification,
-# are permitted in any medium without royalty provided the copyright
-# notice and this notice are preserved.
-#
-# These patterns are based on the Hyphenation Exception Log
-# published in TUGboat, Volume 10 (1989), No. 3, pp. 337-341,
-# and a large number of incorrectly hyphenated words not yet published.
-"""
+'''
+    # Extra patterns, from ushyphmax.tex, dated 2005-05-30.
+    # Copyright (C) 1990, 2004, 2005 Gerard D.C. Kuiken.
+    # Copying and distribution of this file, with or without modification,
+    # are permitted in any medium without royalty provided the copyright
+    # notice and this notice are preserved.
+    #
+    # These patterns are based on the Hyphenation Exception Log
+    # published in TUGboat, Volume 10 (1989), No. 3, pp. 337-341,
+    # and a large number of incorrectly hyphenated words not yet published.
+    '''
 .con5gr .de5riva .dri5v4 .eth1y6l1 .eu4ler .ev2 .ever5si5b .ga4s1om1 .ge4ome
 .ge5ot1 .he3mo1 .he3p6a .he3roe .in5u2t .kil2n3i .ko6r1te1 .le6ices .me4ga1l
 .met4ala .mim5i2c1 .mi1s4ers .ne6o3f .noe1th .non1e2m .poly1s .post1am .pre1am
@@ -504,13 +504,14 @@ uea1m u2r1al. uri4al. us2er. v1ativ v1oir5du1 va6guer vaude3v 1verely. v1er1eig
 ves1tite vi1vip3a3r voice1p waste3w6a2 wave1g4 w3c week1n wide5sp wo4k1en
 wrap3aro writ6er. x1q xquis3 y5che3d ym5e5try y1stro yes5ter1y z3ian. z3o1phr
 z2z3w
-""")
+'''
+)
 
-exceptions = """
+exceptions = '''
 as-so-ciate as-so-ciates dec-li-na-tion oblig-a-tory phil-an-thropic present
 presents project projects reci-procity re-cog-ni-zance ref-or-ma-tion
 ret-ri-bu-tion ta-ble
-"""
+'''
 
 hyphenator = Hyphenator(patterns, exceptions)
 hyphenate_word = hyphenator.hyphenate_word
@@ -520,9 +521,11 @@ del exceptions
 
 if __name__ == '__main__':
     import sys
+
     if len(sys.argv) > 1:
         for word in sys.argv[1:]:
             print('-'.join(hyphenate_word(word)))
     else:
         import doctest
+
         doctest.testmod(verbose=True)

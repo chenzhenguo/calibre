@@ -1,64 +1,77 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+from typing import TYPE_CHECKING, cast
 
 from lxml import etree
 
 from calibre import prepare_string_for_xml as xml
-from calibre.ebooks.oeb.polish.check.base import BaseError, WARN
+from calibre.ebooks.oeb.base import DC, DC11_NS, OPF, OPF2_NS, XHTML_MIME
+from calibre.ebooks.oeb.polish.check.base import WARN, BaseError
 from calibre.ebooks.oeb.polish.toc import find_existing_nav_toc, parse_nav
-from calibre.ebooks.oeb.polish.utils import guess_type
-from calibre.ebooks.oeb.base import OPF, OPF2_NS, DC, DC11_NS, XHTML_MIME
-from polyglot.builtins import iteritems
+from calibre.ebooks.oeb.polish.utils import case_mismatched_name, guess_type
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from calibre.ebooks.oeb.polish.container import Container
+
+
+class BadOPFRoot(BaseError):
+    def __init__(self, name: str, lnum: int | None) -> None:
+        BaseError.__init__(self, _('The OPF does not have the correct root element'), name, lnum)
+        self.HELP = xml(_('The OPF must have the root element <package> in namespace {0}, like this: <package xmlns="{0}">')).format(OPF2_NS)
+
+
+class MissingOPFVersion(BaseError):
+    def __init__(self, name: str, lnum: int | None) -> None:
+        BaseError.__init__(self, _('The OPF does not have a version'), name, lnum)
+        self.HELP = xml(
+            _('The <package> tag in the OPF must have a version attribute. This is usually version="2.0" for EPUB2 and AZW3 and version="3.0" for EPUB3')
+        )
 
 
 class MissingSection(BaseError):
+    RULE_NAME = _('Missing section in the OPF')
 
-    def __init__(self, name, section_name):
+    def __init__(self, name: str, section_name: str) -> None:
         BaseError.__init__(self, _('The <%s> section is missing from the OPF') % section_name, name)
-        self.HELP = xml(_(
-            'The <%s> section is required in the OPF file. You have to create one.') % section_name)
+        self.HELP = xml(_('The <%s> section is required in the OPF file. You have to create one.') % section_name)
 
 
 class EmptyID(BaseError):
-
-    def __init__(self, name, lnum):
+    def __init__(self, name: str, lnum: int | None) -> None:
         BaseError.__init__(self, _('Empty id attributes are invalid'), name, lnum)
-        self.HELP = xml(_(
-            'Empty ID attributes are invalid in OPF files.'))
+        self.HELP = xml(_('Empty ID attributes are invalid in OPF files.'))
 
 
 class IncorrectIdref(BaseError):
+    RULE_NAME = _('idref points to unknown id')
 
-    def __init__(self, name, idref, lnum):
+    def __init__(self, name: str, idref: str | None, lnum: int | None) -> None:
         BaseError.__init__(self, _('idref="%s" points to unknown id') % idref, name, lnum)
-        self.HELP = xml(_(
-            'The idref="%s" points to an id that does not exist in the OPF') % idref)
+        self.HELP = xml(_('The idref="%s" points to an id that does not exist in the OPF') % idref)
 
 
 class IncorrectCover(BaseError):
-
-    def __init__(self, name, lnum, cover):
+    def __init__(self, name: str, lnum: int | None, cover: str) -> None:
         BaseError.__init__(self, _('The meta cover tag points to an non-existent item'), name, lnum)
-        self.HELP = xml(_(
-            'The meta cover tag points to an item with id="%s" which does not exist in the manifest') % cover)
+        self.HELP = xml(_('The meta cover tag points to an item with id="%s" which does not exist in the manifest') % cover)
 
 
 class NookCover(BaseError):
-
     HELP = _(
-            'Some e-book readers such as the Nook fail to recognize covers if'
-            ' the content attribute comes before the name attribute.'
-            ' For maximum compatibility move the name attribute before the content attribute.')
+        'Some e-book readers such as the Nook fail to recognize covers if'
+        ' the content attribute comes before the name attribute.'
+        ' For maximum compatibility move the name attribute before the content attribute.'
+    )
     INDIVIDUAL_FIX = _('Move the name attribute before the content attribute')
 
-    def __init__(self, name, lnum):
+    def __init__(self, name: str, lnum: int | None) -> None:
         BaseError.__init__(self, _('The meta cover tag has content before name'), name, lnum)
 
-    def __call__(self, container):
+    def __call__(self, container: Container) -> bool:
         for cover in container.opf_xpath('//opf:meta[@name="cover" and @content]'):
             cover.set('content', cover.attrib.pop('content'))
         container.dirty(container.opf_name)
@@ -66,8 +79,9 @@ class NookCover(BaseError):
 
 
 class IncorrectToc(BaseError):
+    RULE_NAME = _('Incorrect Table of Contents item')
 
-    def __init__(self, name, lnum, bad_idref=None, bad_mimetype=None):
+    def __init__(self, name: str, lnum: int | None, bad_idref: str | None = None, bad_mimetype: str | None = None) -> None:
         if bad_idref is not None:
             msg = _('The item identified as the Table of Contents (%s) does not exist') % bad_idref
             self.HELP = _('There is no item with id="%s" in the manifest.') % bad_idref
@@ -78,15 +92,14 @@ class IncorrectToc(BaseError):
 
 
 class NoHref(BaseError):
-
     HELP = _('This manifest entry has no href attribute. Either add the href attribute or remove the entry.')
     INDIVIDUAL_FIX = _('Remove this manifest entry')
 
-    def __init__(self, name, item_id, lnum):
+    def __init__(self, name: str, item_id: str | None, lnum: int | None) -> None:
         BaseError.__init__(self, _('Item in manifest has no href attribute'), name, lnum)
         self.item_id = item_id
 
-    def __call__(self, container):
+    def __call__(self, container: Container) -> bool:
         changed = False
         for item in container.opf_xpath('/opf:package/opf:manifest/opf:item'):
             if item.get('id', None) == self.item_id:
@@ -97,17 +110,18 @@ class NoHref(BaseError):
 
 
 class MissingNCXRef(BaseError):
-
-    HELP = _('The <spine> tag has no reference to the NCX table of contents file.'
-             ' Without this reference, the table of contents will not work in most'
-             ' readers. The reference should look like <spine toc="id of manifest item for the ncx file">.')
+    HELP = _(
+        'The <spine> tag has no reference to the NCX table of contents file.'
+        ' Without this reference, the table of contents will not work in most'
+        ' readers. The reference should look like <spine toc="id of manifest item for the ncx file">.'
+    )
     INDIVIDUAL_FIX = _('Add the reference to the NCX file')
 
-    def __init__(self, name, lnum, ncx_id):
+    def __init__(self, name: str, lnum: int | None, ncx_id: str) -> None:
         BaseError.__init__(self, _('Missing reference to the NCX Table of Contents'), name, lnum)
         self.ncx_id = ncx_id
 
-    def __call__(self, container):
+    def __call__(self, container: Container) -> bool:
         changed = False
         for item in container.opf_xpath('/opf:package/opf:spine'):
             if item.get('toc') is None:
@@ -118,85 +132,85 @@ class MissingNCXRef(BaseError):
 
 
 class MissingNav(BaseError):
+    HELP = _(
+        'This book has no Navigation document. According to the EPUB 3 specification, a navigation document'
+        ' is required. The Navigation document contains the Table of Contents. Use the Table of Contents'
+        ' tool to add a Table of Contents to this book.'
+    )
 
-    HELP = _('This book has no Navigation document. According to the EPUB 3 specification, a navigation document'
-             ' is required. The Navigation document contains the Table of Contents. Use the Table of Contents'
-             ' tool to add a Table of Contents to this book.')
-
-    def __init__(self, name, lnum):
+    def __init__(self, name: str, lnum: int | None) -> None:
         BaseError.__init__(self, _('Missing navigation document'), name, lnum)
 
 
 class EmptyNav(BaseError):
+    HELP = _(
+        'The nav document for this book contains no table of contents, or an empty table of contents.'
+        ' Use the Table of Contents tool to add a Table of Contents to this book.'
+    )
+    level = WARN
 
-    HELP = _('The nav document for this book contains no table of contents, or an empty table of contents.'
-             ' Use the Table of Contents tool to add a Table of Contents to this book.')
-    LEVEL = WARN
-
-    def __init__(self, name, lnum):
+    def __init__(self, name: str, lnum: int | None) -> None:
         BaseError.__init__(self, _('Missing ToC in navigation document'), name, lnum)
 
 
 class MissingHref(BaseError):
+    RULE_NAME = _('Item in manifest is missing')
+    HELP = _('A file listed in the manifest is missing, you should either remove it from the manifest or add the missing file to the book.')
 
-    HELP = _('A file listed in the manifest is missing, you should either remove'
-             ' it from the manifest or add the missing file to the book.')
-
-    def __init__(self, name, href, lnum):
+    def __init__(self, name: str, href: str, lnum: int | None) -> None:
         BaseError.__init__(self, _('Item (%s) in manifest is missing') % href, name, lnum)
         self.bad_href = href
         self.INDIVIDUAL_FIX = _('Remove the entry for %s from the manifest') % href
 
-    def __call__(self, container):
-        [container.remove_from_xml(elem) for elem in container.opf_xpath('/opf:package/opf:manifest/opf:item[@href]')
-         if elem.get('href') == self.bad_href]
+    def __call__(self, container: Container) -> bool:
+        [container.remove_from_xml(elem) for elem in container.opf_xpath('/opf:package/opf:manifest/opf:item[@href]') if elem.get('href') == self.bad_href]
         container.dirty(container.opf_name)
         return True
 
 
 class NonLinearItems(BaseError):
-
     level = WARN
     has_multiple_locations = True
 
-    HELP = xml(_('There are items marked as non-linear in the <spine>.'
-                 ' These will be displayed in random order by different e-book readers.'
-                 ' Some will ignore the non-linear attribute, some will display'
-                 ' them at the end or the beginning of the book and some will'
-                 ' fail to display them at all. Instead of using non-linear items'
-                 ' simply place the items in the order you want them to be displayed.'))
+    HELP = xml(
+        _(
+            'There are items marked as non-linear in the <spine>.'
+            ' These will be displayed in random order by different e-book readers.'
+            ' Some will ignore the non-linear attribute, some will display'
+            ' them at the end or the beginning of the book and some will'
+            ' fail to display them at all. Instead of using non-linear items'
+            ' simply place the items in the order you want them to be displayed.'
+        )
+    )
 
     INDIVIDUAL_FIX = _('Mark all non-linear items as linear')
 
-    def __init__(self, name, locs):
+    def __init__(self, name: str, locs: Iterable[int | None]) -> None:
         BaseError.__init__(self, _('Non-linear items in the spine'), name)
         self.all_locations = [(name, x, None) for x in locs]
 
-    def __call__(self, container):
+    def __call__(self, container: Container) -> bool:
         [elem.attrib.pop('linear') for elem in container.opf_xpath('//opf:spine/opf:itemref[@linear]')]
         container.dirty(container.opf_name)
         return True
 
 
 class DuplicateHref(BaseError):
-
+    RULE_NAME = _('Duplicate item in manifest or spine')
     has_multiple_locations = True
 
-    INDIVIDUAL_FIX = _(
-        'Remove all but the first duplicate item')
+    INDIVIDUAL_FIX = _('Remove all but the first duplicate item')
 
-    def __init__(self, name, eid, locs, for_spine=False):
+    def __init__(self, name: str, eid: str, locs: Iterable[int], for_spine: bool = False) -> None:
         loc = 'spine' if for_spine else 'manifest'
         BaseError.__init__(self, _('Duplicate item in {0}: {1}').format(loc, eid), name)
-        self.HELP = _(
-            'The item {0} is present more than once in the {2} in {1}. This is'
-            ' not allowed.').format(eid, name, loc)
+        self.HELP = _('The item {0} is present more than once in the {2} in {1}. This is not allowed.').format(eid, name, loc)
         self.all_locations = [(name, lnum, None) for lnum in sorted(locs)]
         self.duplicate_href = eid
         self.xpath = '/opf:package/opf:' + ('spine/opf:itemref[@idref]' if for_spine else 'manifest/opf:item[@href]')
         self.attr = 'idref' if for_spine else 'href'
 
-    def __call__(self, container):
+    def __call__(self, container: Container) -> bool:
         items = [e for e in container.opf_xpath(self.xpath) if e.get(self.attr) == self.duplicate_href]
         [container.remove_from_xml(e) for e in items[1:]]
         container.dirty(self.name)
@@ -204,44 +218,40 @@ class DuplicateHref(BaseError):
 
 
 class MultipleCovers(BaseError):
-
     has_multiple_locations = True
-    HELP = xml(_(
-        'There is more than one <meta name="cover"> tag defined. There should be only one.'))
+    HELP = xml(_('There is more than one <meta name="cover"> tag defined. There should be only one.'))
     INDIVIDUAL_FIX = _('Remove all but the first meta cover tag')
 
-    def __init__(self, name, locs):
+    def __init__(self, name: str, locs: Iterable[int]) -> None:
         BaseError.__init__(self, _('There is more than one cover defined'), name)
         self.all_locations = [(name, lnum, None) for lnum in sorted(locs)]
 
-    def __call__(self, container):
-        items = [e for e in container.opf_xpath('/opf:package/opf:metadata/opf:meta[@name="cover"]')]
+    def __call__(self, container: Container) -> bool:
+        items = list(container.opf_xpath('/opf:package/opf:metadata/opf:meta[@name="cover"]'))
         [container.remove_from_xml(e) for e in items[1:]]
         container.dirty(self.name)
         return True
 
 
 class NoUID(BaseError):
-
-    HELP = xml(_(
-        'The OPF must have a unique identifier, i.e. a <dc:identifier> element whose id is referenced'
-        ' by the <package> element'))
+    HELP = xml(_('The OPF must have an unique identifier, i.e. a <dc:identifier> element whose id is referenced by the <package> element'))
     INDIVIDUAL_FIX = _('Auto-generate a unique identifier')
 
-    def __init__(self, name):
+    def __init__(self, name: str) -> None:
         BaseError.__init__(self, _('The OPF has no unique identifier'), name)
 
-    def __call__(self, container):
+    def __call__(self, container: Container) -> bool:
         from calibre.ebooks.oeb.base import uuid_id
+
         opf = container.opf
         uid = uuid_id()
         opf.set('unique-identifier', uid)
         m = container.opf_xpath('/opf:package/opf:metadata')
         if not m:
-            m = [container.opf.makeelement(OPF('metadata'), nsmap={'dc':DC11_NS})]
+            m = [container.opf.makeelement(OPF('metadata'), nsmap={'dc': DC11_NS})]
             container.insert_into_xml(container.opf, m[0], 0)
         m = m[0]
-        dc = m.makeelement(DC('identifier'), id=uid, nsmap={'opf':OPF2_NS})
+        dc = m.makeelement(DC('identifier'), id=uid, nsmap={'opf': OPF2_NS})
         dc.set(OPF('scheme'), 'uuid')
         dc.text = uid
         container.insert_into_xml(m, dc)
@@ -250,50 +260,50 @@ class NoUID(BaseError):
 
 
 class EmptyIdentifier(BaseError):
-
     HELP = xml(_('The <dc:identifier> element must not be empty.'))
+    INDIVIDUAL_FIX = _('Remove empty identifiers')
 
-    def __init__(self, name, lnum):
+    def __init__(self, name: str, lnum: int | None) -> None:
         BaseError.__init__(self, _('Empty identifier element'), name, lnum)
+
+    def __call__(self, container: Container) -> bool:
+        for dcid in container.opf_xpath('/opf:package/opf:metadata/dc:identifier'):
+            if not dcid.text or not dcid.text.strip():
+                container.remove_from_xml(dcid)
+        container.dirty(container.opf_name)
+        return True
 
 
 class BadSpineMime(BaseError):
-
-    def __init__(self, name, iid, mt, lnum, opf_name):
+    def __init__(self, name: str, iid: str | None, mt: str, lnum: int | None, opf_name: str) -> None:
         BaseError.__init__(self, _('Incorrect media-type for spine item'), opf_name, lnum)
         self.HELP = _(
             'The item {0} present in the spine has the media-type {1}. '
             ' Most e-book software cannot handle non-HTML spine items. '
             ' If the item is actually HTML, you should change its media-type to {2}.'
             ' If it is not-HTML you should consider replacing it with an HTML item, as it'
-            ' is unlikely to work in most readers.').format(name, mt, XHTML_MIME)
+            ' is unlikely to work in most readers.'
+        ).format(name, mt, XHTML_MIME)
         if iid is not None:
             self.INDIVIDUAL_FIX = _('Change the media-type to %s') % XHTML_MIME
             self.iid = iid
 
-    def __call__(self, container):
-        container.opf_xpath('/opf:package/opf:manifest/opf:item[@id=%r]' % self.iid)[0].set(
-            'media-type', XHTML_MIME)
+    def __call__(self, container: Container) -> bool:
+        container.opf_xpath(f'/opf:package/opf:manifest/opf:item[@id={self.iid!r}]')[0].set('media-type', XHTML_MIME)
         container.dirty(container.opf_name)
         container.refresh_mime_map()
         return True
 
 
-def check_opf(container):
-    errors = []
+def check_opf(container: Container) -> list[BaseError]:
+    errors: list[BaseError] = []
     opf_version = container.opf_version_parsed
 
     if container.opf.tag != OPF('package'):
-        err = BaseError(_('The OPF does not have the correct root element'), container.opf_name, container.opf.sourceline)
-        err.HELP = xml(_(
-            'The opf must have the root element <package> in namespace {0}, like this: <package xmlns="{0}">')).format(OPF2_NS)
-        errors.append(err)
+        errors.append(BadOPFRoot(container.opf_name, container.opf.sourceline))
 
     elif container.opf.get('version') is None and container.book_type == 'epub':
-        err = BaseError(_('The OPF does not have a version'), container.opf_name, container.opf.sourceline)
-        err.HELP = xml(_(
-            'The <package> tag in the OPF must have a version attribute. This is usually version="2.0" for EPUB2 and AZW3 and version="3.0" for EPUB3'))
-        errors.append(err)
+        errors.append(MissingOPFVersion(container.opf_name, container.opf.sourceline))
 
     for tag in ('metadata', 'manifest', 'spine'):
         if not container.opf_xpath('/opf:package/opf:' + tag):
@@ -319,7 +329,8 @@ def check_opf(container):
             errors.append(NoHref(container.opf_name, item.get('id', None), item.sourceline))
         else:
             hname = container.href_to_name(href, container.opf_name)
-            if not hname or not container.exists(hname):
+            # Case mismatches are reported, with a fix, by check_links()
+            if not hname or (not container.exists(hname) and case_mismatched_name(container, hname) is None):
                 errors.append(MissingHref(container.opf_name, href, item.sourceline))
             if href in seen:
                 if href not in dups:
@@ -327,7 +338,7 @@ def check_opf(container):
                 dups[href].append(item.sourceline)
             else:
                 seen[href] = item.sourceline
-    errors.extend(DuplicateHref(container.opf_name, eid, locs) for eid, locs in iteritems(dups))
+    errors.extend(DuplicateHref(container.opf_name, eid, locs) for eid, locs in dups.items())
 
     seen, dups = {}, {}
     for item in container.opf_xpath('/opf:package/opf:spine/opf:itemref[@idref]'):
@@ -338,7 +349,7 @@ def check_opf(container):
             dups[ref].append(item.sourceline)
         else:
             seen[ref] = item.sourceline
-    errors.extend(DuplicateHref(container.opf_name, eid, locs, for_spine=True) for eid, locs in iteritems(dups))
+    errors.extend(DuplicateHref(container.opf_name, eid, locs, for_spine=True) for eid, locs in dups.items())
 
     spine = container.opf_xpath('/opf:package/opf:spine[@toc]')
     if spine:
@@ -357,7 +368,7 @@ def check_opf(container):
             ncx = container.manifest_type_map.get(guess_type('a.ncx'))
             if ncx:
                 ncx_name = ncx[0]
-                rmap = {v:k for k, v in iteritems(container.manifest_id_map)}
+                rmap = {v: k for k, v in container.manifest_id_map.items()}
                 ncx_id = rmap.get(ncx_name)
                 if ncx_id:
                     errors.append(MissingNCXRef(container.opf_name, spine.sourceline, ncx_id))
@@ -374,7 +385,8 @@ def check_opf(container):
     covers = container.opf_xpath('/opf:package/opf:metadata/opf:meta[@name="cover"]')
     if len(covers) > 0:
         if len(covers) > 1:
-            errors.append(MultipleCovers(container.opf_name, [c.sourceline for c in covers]))
+            # elements parsed from the OPF file always have a sourceline
+            errors.append(MultipleCovers(container.opf_name, [cast('int', c.sourceline) for c in covers]))
         manifest_ids = set(container.opf_xpath('/opf:package/opf:manifest/opf:item/@id'))
         for cover in covers:
             if cover.get('content', None) not in manifest_ids:
@@ -388,8 +400,12 @@ def check_opf(container):
                 errors.append(NookCover(container.opf_name, cover.sourceline))
 
     uid = container.opf.get('unique-identifier', None)
-    if uid is None or not container.opf_xpath('/opf:package/opf:metadata/dc:identifier[@id=%r]' % uid):
+    if uid is None:
         errors.append(NoUID(container.opf_name))
+    else:
+        dcid = container.opf_xpath(f'/opf:package/opf:metadata/dc:identifier[@id={uid!r}]')
+        if not dcid or not dcid[0].text or not dcid[0].text.strip():
+            errors.append(NoUID(container.opf_name))
     for elem in container.opf_xpath('/opf:package/opf:metadata/dc:identifier'):
         if not elem.text or not elem.text.strip():
             errors.append(EmptyIdentifier(container.opf_name, elem.sourceline))
@@ -400,7 +416,7 @@ def check_opf(container):
             iid = item.get('idref', None)
             lnum = None
             if iid:
-                mitem = container.opf_xpath('/opf:package/opf:manifest/opf:item[@id=%r]' % iid)
+                mitem = container.opf_xpath(f'/opf:package/opf:manifest/opf:item[@id={iid!r}]')
                 if mitem:
                     lnum = mitem[0].sourceline
                 else:

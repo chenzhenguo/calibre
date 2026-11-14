@@ -1,83 +1,98 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2015, Kovid Goyal <kovid at kovidgoyal.net>'
-
-import hashlib, zlib, string, time, os
+import hashlib
+import http.client
+import string
+import time
+from compression import zlib
 from io import BytesIO
 from tempfile import NamedTemporaryFile
+from typing import TYPE_CHECKING, Never
 
 from calibre import guess_type
-from calibre.srv.tests.base import BaseTest, TestServer
+from calibre.srv.tests.base import BaseTest, TestServer, is_ci
 from calibre.srv.utils import eintr_retry_call
 from calibre.utils.monotonic import monotonic
-from polyglot.builtins import iteritems, range, unicode_type
-from polyglot import http_client
+from calibre.utils.resources import get_path as P
 
-is_ci = os.environ.get('CI', '').lower() == 'true'
+if TYPE_CHECKING:
+    from calibre.srv.http_response import RequestData, StaticOutput
 
 
 class TestHTTP(BaseTest):
-
-    def test_header_parsing(self):  # {{{
-        'Test parsing of HTTP headers'
+    def test_header_parsing(self) -> None:  # {{{
+        "Test parsing of HTTP headers"
         from calibre.srv.http_request import HTTPHeaderParser
 
-        def test(name, *lines, **kwargs):
+        def test(name: str, *lines: bytes, **kwargs: str) -> None:
             p = HTTPHeaderParser()
             p.push(*lines)
             self.assertTrue(p.finished)
-            self.assertSetEqual(set(p.hdict.items()), {(k.replace('_', '-').title(), v) for k, v in iteritems(kwargs)}, name + ' failed')
+            self.assertSetEqual(set(p.hdict.items()), {(k.replace('_', '-').title(), v) for k, v in kwargs.items()}, name + ' failed')
 
-        test('Continuation line parsing',
-             b'a: one',
-             b'b: two',
-             b' 2',
-             b'\t3',
-             b'c:three',
-             b'\r\n', a='one', b='two 2 3', c='three')
+        test(
+            'Continuation line parsing',
+            b'a: one',
+            b'b: two',
+            b' 2',
+            b'\t3',
+            b'c:three',
+            b'\r\n',
+            a='one',
+            b='two 2 3',
+            c='three',
+        )
 
-        test('Non-ascii headers parsing',
-             'a:mūs\r'.encode('utf-8'), b'\r\n', a='mūs')
+        test('Non-ascii headers parsing', 'a:mūs\r'.encode(), b'\r\n', a='mūs')
 
-        test('Comma-separated parsing',
-             b'Accept-Encoding: one',
-             b'accept-Encoding: two',
-             b'\r\n', accept_encoding='one, two')
+        test(
+            'Comma-separated parsing',
+            b'Accept-Encoding: one',
+            b'accept-Encoding: two',
+            b'\r\n',
+            accept_encoding='one, two',
+        )
 
-        def parse(*lines):
+        test('Empty values', b'Connection\r\n', b'\r\n', connection='')
+
+        def parse(*lines: bytes) -> None:
             lines = list(lines)
             lines.append(b'\r\n')
-            self.assertRaises(ValueError, HTTPHeaderParser().push, *lines)
+            with self.assertRaises(ValueError, msg=str(lines)):
+                HTTPHeaderParser().push(*lines)
 
         parse('Connection:mūs\r\n'.encode('utf-16'))
-        parse(b'Connection\r\n')
         parse(b'Connection:a\r\n', b'\r\n')
         parse(b' Connection:a\n')
         parse(b':a\n')
+
     # }}}
 
-    def test_accept_encoding(self):  # {{{
-        'Test parsing of Accept-Encoding'
+    def test_accept_encoding(self) -> None:  # {{{
+        "Test parsing of Accept-Encoding"
         from calibre.srv.http_response import acceptable_encoding
 
-        def test(name, val, ans, allowed={'gzip'}):
+        def test(name: str, val: str, ans: str | None, allowed: set[str] | None = None) -> None:
+            if allowed is None:
+                allowed = {'gzip'}
             self.ae(acceptable_encoding(val, allowed), ans, name + ' failed')
+
         test('Empty field', '', None)
         test('Simple', 'gzip', 'gzip')
         test('Case insensitive', 'GZIp', 'gzip')
         test('Multiple', 'gzip, identity', 'gzip')
         test('Priority', '1;q=0.5, 2;q=0.75, 3;q=1.0', '3', {'1', '2', '3'})
+
     # }}}
 
-    def test_accept_language(self):  # {{{
-        'Test parsing of Accept-Language'
+    def test_accept_language(self) -> None:  # {{{
+        "Test parsing of Accept-Language"
         from calibre.srv.http_response import preferred_lang
 
-        def test(name, val, ans):
-            self.ae(preferred_lang(val, lambda x:(True, x, None)), ans, name + ' failed')
+        def test(name: str, val: str, ans: str) -> None:
+            self.ae(preferred_lang(val, lambda x: (True, x, None)), ans, name + ' failed')
+
         test('Empty field', '', 'en')
         test('Simple', 'de', 'de')
         test('Case insensitive', 'Es', 'es')
@@ -90,19 +105,19 @@ class TestHTTP(BaseTest):
             time.sleep(3)
             self.do_accept_language()
 
-    def do_accept_language(self):
+    def do_accept_language(self) -> None:
         from calibre.utils.localization import get_translator
 
-        def handler(data):
+        def handler(data: RequestData) -> str:
             return data.lang_code + data._('Unknown')
 
         with TestServer(handler, timeout=1) as server:
             conn = server.connect()
 
-            def test(al, q):
+            def test(al: str, q: str) -> None:
                 conn.request('GET', '/', headers={'Accept-Language': al})
                 r = conn.getresponse()
-                self.ae(r.status, http_client.OK)
+                self.ae(r.status, http.client.OK)
                 q += get_translator(q)[-1].gettext('Unknown')
                 self.ae(r.read(), q.encode('utf-8'))
 
@@ -112,16 +127,17 @@ class TestHTTP(BaseTest):
 
     # }}}
 
-    def test_range_parsing(self):  # {{{
-        'Test parsing of Range header'
+    def test_range_parsing(self) -> None:  # {{{
+        "Test parsing of Range header"
         from calibre.srv.http_response import get_ranges
 
-        def test(val, *args):
+        def test(val: str, *args: tuple[int, int, int] | None) -> None:
             pval = get_ranges(val, 100)
             if len(args) == 1 and args[0] is None:
                 self.assertIsNone(pval, val)
             else:
                 self.assertListEqual([tuple(x) for x in pval], list(args), val)
+
         test('crap', None)
         test('crap=', None)
         test('crap=1', None)
@@ -132,10 +148,39 @@ class TestHTTP(BaseTest):
         test('bytes=-5', (95, 99, 5))
         test('bytes=95-', (95, 99, 5))
         test('bytes=-200', (0, 99, 100))
+        # Only plain decimal digits are allowed
+        test('bytes=+1-2')
+        test('bytes=1_0-20')
+        test('bytes=--5')
+        test('bytes=-0')
+        test('bytes=5')
+        test('bytes=1--5')
+        # Values too large for int() are treated as beyond the end
+        huge = '9' * 5000
+        test(f'bytes={huge}-')
+        test(f'bytes=0-{huge}', (0, 99, 100))
+        test(f'bytes=-{huge}', (0, 99, 100))
+        test('bytes=0-99999999999999999999', (0, 99, 100))
+        # Leading zeros are allowed
+        test('bytes=' + '0' * 5000 + '5-' + '0' * 5000 + '10', (5, 10, 6))
+        test('bytes=-' + '0' * 5000)
+        # Non-overlapping ranges keep their order
+        test('bytes=50-60,0-9', (50, 60, 11), (0, 9, 10))
+        test('bytes=0-25,26-50', (0, 25, 26), (26, 50, 25))
+        # Overlapping ranges are coalesced
+        test('bytes=0-99,0-99,0-99', (0, 99, 100))
+        test('bytes=10-20,15-30,-5,0-1', (0, 1, 2), (10, 30, 21), (95, 99, 5))
+        test('bytes=' + ','.join(['0-'] * 50), (0, 99, 100))
+        # Too many ranges cause the header to be ignored
+        from calibre.srv.http_response import MAX_RANGES
+
+        test('bytes=' + ','.join(f'{i}-{i}' for i in range(MAX_RANGES)), *((i, i, 1) for i in range(MAX_RANGES)))
+        test('bytes=' + ','.join(f'{i}-{i}' for i in range(MAX_RANGES + 1)), None)
+
     # }}}
 
-    def test_http_basic(self):  # {{{
-        'Test basic HTTP protocol conformance'
+    def test_http_basic(self) -> None:  # {{{
+        "Test basic HTTP protocol conformance"
         try:
             self.do_http_basic()
         except Exception:
@@ -143,155 +188,218 @@ class TestHTTP(BaseTest):
             time.sleep(3)
             self.do_http_basic()
 
-    def do_http_basic(self):
+    def do_http_basic(self) -> None:
         from calibre.srv.errors import HTTPNotFound, HTTPRedirect
+
         body = 'Requested resource not found'
 
-        def handler(data):
+        def handler(_data: RequestData) -> Never:
             raise HTTPNotFound(body)
 
-        def raw_send(conn, raw):
+        def raw_send(conn: http.client.HTTPConnection, raw: bytes) -> http.client.HTTPResponse:
             conn.send(raw)
-            conn._HTTPConnection__state = http_client._CS_REQ_SENT
+            conn._HTTPConnection__state = http.client._CS_REQ_SENT  # type: ignore
             return conn.getresponse()
 
         base_timeout = 0.5 if is_ci else 0.1
 
-        with TestServer(handler, timeout=base_timeout, max_header_line_size=100./1024, max_request_body_size=100./(1024*1024)) as server:
+        with TestServer(
+            handler,
+            timeout=base_timeout,
+            max_header_line_size=100.0 / 1024,
+            max_request_body_size=100.0 / (1024 * 1024),
+        ) as server:
             conn = server.connect()
             r = raw_send(conn, b'hello\n')
-            self.ae(r.status, http_client.BAD_REQUEST)
+            self.ae(r.status, http.client.BAD_REQUEST)
             self.ae(r.read(), b'HTTP requires CRLF line terminators')
 
             r = raw_send(conn, b'\r\nGET /index.html HTTP/1.1\r\n\r\n')
-            self.ae(r.status, http_client.NOT_FOUND), self.ae(r.read(), b'Requested resource not found')
+            self.ae(r.status, http.client.NOT_FOUND), self.ae(r.read(), b'Requested resource not found')
 
             r = raw_send(conn, b'\r\n\r\nGET /index.html HTTP/1.1\r\n\r\n')
-            self.ae(r.status, http_client.BAD_REQUEST)
+            self.ae(r.status, http.client.BAD_REQUEST)
             self.ae(r.read(), b'Multiple leading empty lines not allowed')
 
             r = raw_send(conn, b'hello world\r\n')
-            self.ae(r.status, http_client.BAD_REQUEST)
+            self.ae(r.status, http.client.BAD_REQUEST)
             self.ae(r.read(), b'Malformed Request-Line')
 
             r = raw_send(conn, b'x' * 200)
-            self.ae(r.status, http_client.BAD_REQUEST)
+            self.ae(r.status, http.client.BAD_REQUEST)
             self.ae(r.read(), b'')
 
             r = raw_send(conn, b'XXX /index.html HTTP/1.1\r\n\r\n')
-            self.ae(r.status, http_client.BAD_REQUEST), self.ae(r.read(), b'Unknown HTTP method')
+            self.ae(r.status, http.client.BAD_REQUEST), self.ae(r.read(), b'Unknown HTTP method')
 
             # Test 404
             conn.request('HEAD', '/moose')
             r = conn.getresponse()
-            self.ae(r.status, http_client.NOT_FOUND)
+            self.ae(r.status, http.client.NOT_FOUND)
             self.assertIsNotNone(r.getheader('Date', None))
-            self.ae(r.getheader('Content-Length'), unicode_type(len(body)))
+            self.ae(r.getheader('Content-Length'), str(len(body)))
             self.ae(r.getheader('Content-Type'), 'text/plain; charset=UTF-8')
             self.ae(len(r.getheaders()), 3)
             self.ae(r.read(), b'')
             conn.request('GET', '/choose')
             r = conn.getresponse()
-            self.ae(r.status, http_client.NOT_FOUND)
+            self.ae(r.status, http.client.NOT_FOUND)
             self.ae(r.read(), b'Requested resource not found')
 
             # Test 500
-            server.change_handler(lambda data:1/0)
+            server.change_handler(lambda _data: 1 / 0)
             conn = server.connect()
             conn.request('GET', '/test/')
             r = conn.getresponse()
-            self.ae(r.status, http_client.INTERNAL_SERVER_ERROR)
+            self.ae(r.status, http.client.INTERNAL_SERVER_ERROR)
 
             # Test 301
-            def handler(data):
+            def handler(_data: RequestData) -> Never:
                 raise HTTPRedirect('/somewhere-else')
+
             server.change_handler(handler)
             conn = server.connect()
             conn.request('GET', '/')
             r = conn.getresponse()
-            self.ae(r.status, http_client.MOVED_PERMANENTLY)
+            self.ae(r.status, http.client.MOVED_PERMANENTLY)
             self.ae(r.getheader('Location'), '/somewhere-else')
             self.ae(b'', r.read())
 
-            server.change_handler(lambda data:data.path[0] + data.read().decode('ascii'))
+            server.change_handler(lambda data: data.path[0] + data.read().decode('ascii'))
             conn = server.connect(timeout=base_timeout * 5)
 
             # Test simple GET
             conn.request('GET', '/test/')
             r = conn.getresponse()
-            self.ae(r.status, http_client.OK)
+            self.ae(r.status, http.client.OK)
             self.ae(r.read(), b'test')
 
             # Test TRACE
             lines = ['TRACE /xxx HTTP/1.1', 'Test: value', 'Xyz: abc, def', '', '']
             r = raw_send(conn, ('\r\n'.join(lines)).encode('ascii'))
-            self.ae(r.status, http_client.OK)
+            self.ae(r.status, http.client.OK)
             self.ae(r.read().decode('utf-8'), '\n'.join(lines[:-2]))
 
             # Test POST with simple body
             conn.request('POST', '/test', 'body')
             r = conn.getresponse()
-            self.ae(r.status, http_client.OK)
+            self.ae(r.status, http.client.OK)
             self.ae(r.read(), b'testbody')
+
+            def bad_request(raw: bytes, msg: bytes) -> None:
+                conn = server.connect()
+                r = raw_send(conn, raw)
+                self.ae(r.status, http.client.BAD_REQUEST)
+                self.assertIn(msg, r.read())
+
+            # Identical Content-Length headers are harmless, conflicting or
+            # malformed ones are rejected before the body is read.
+            r = raw_send(server.connect(), b'POST /test HTTP/1.1\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\nbody')
+            self.ae(r.status, http.client.OK)
+            self.ae(r.read(), b'testbody')
+            bad_request(
+                b'POST /test HTTP/1.1\r\nContent-Length: -1\r\n\r\nbody',
+                b'Content-Length is not a valid decimal integer',
+            )
+            bad_request(
+                b'POST /test HTTP/1.1\r\nContent-Length: abc\r\n\r\nbody',
+                b'Content-Length is not a valid decimal integer',
+            )
+            bad_request(
+                b'POST /test HTTP/1.1\r\nContent-Length: 4\r\nContent-Length: 5\r\n\r\nbodyx',
+                b'Conflicting Content-Length headers',
+            )
+            bad_request(
+                b'POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 200\r\n\r\n4\r\nbody\r\n0\r\n\r\n',
+                b'Cannot specify both Transfer-Encoding and Content-Length',
+            )
 
             # Test POST with chunked transfer encoding
             conn.request('POST', '/test', headers={'Transfer-Encoding': 'chunked'})
             conn.send(b'4\r\nbody\r\na\r\n1234567890\r\n0\r\n\r\n')
             r = conn.getresponse()
-            self.ae(r.status, http_client.OK)
+            self.ae(r.status, http.client.OK)
             self.ae(r.read(), b'testbody1234567890')
 
             conn.request('GET', '/test' + ('a' * 200))
             r = conn.getresponse()
-            self.ae(r.status, http_client.BAD_REQUEST)
+            self.ae(r.status, http.client.BAD_REQUEST)
 
             conn = server.connect()
             conn.request('GET', '/test', ('a' * 200))
             r = conn.getresponse()
-            self.ae(r.status, http_client.REQUEST_ENTITY_TOO_LARGE)
+            self.ae(r.status, http.client.REQUEST_ENTITY_TOO_LARGE)
 
             conn = server.connect()
             conn.request('POST', '/test', headers={'Transfer-Encoding': 'chunked'})
             conn.send(b'x\r\nbody\r\n0\r\n\r\n')
             r = conn.getresponse()
-            self.ae(r.status, http_client.BAD_REQUEST)
+            self.ae(r.status, http.client.BAD_REQUEST)
             self.assertIn(b'not a valid chunk size', r.read())
 
             conn.request('POST', '/test', headers={'Transfer-Encoding': 'chunked'})
             conn.send(b'4\r\nbody\r\n200\r\n\r\n')
             r = conn.getresponse()
-            self.ae(r.status, http_client.REQUEST_ENTITY_TOO_LARGE)
-            conn.request('POST', '/test', body='a'*200)
+            self.ae(r.status, http.client.REQUEST_ENTITY_TOO_LARGE)
+            conn.request('POST', '/test', body='a' * 200)
             r = conn.getresponse()
-            self.ae(r.status, http_client.REQUEST_ENTITY_TOO_LARGE)
+            self.ae(r.status, http.client.REQUEST_ENTITY_TOO_LARGE)
+
+            # Chunk sizes must be plain hex digits, in particular negative
+            # sizes must not bypass the max request body size check
+            for bad_size in (b'-1', b'-200', b'+4', b'0x4', b'0_4', b' -0'):
+                conn = server.connect()
+                conn.request('POST', '/test', headers={'Transfer-Encoding': 'chunked'})
+                conn.send(b'4\r\nbody\r\n' + bad_size + b'\r\n' + b'a' * 200 + b'\r\n0\r\n\r\n')
+                r = conn.getresponse()
+                self.ae(r.status, http.client.BAD_REQUEST, bad_size)
+                self.assertIn(b'not a valid chunk size', r.read())
 
             conn = server.connect()
             conn.request('POST', '/test', headers={'Transfer-Encoding': 'chunked'})
             conn.send(b'3\r\nbody\r\n0\r\n\r\n')
             r = conn.getresponse()
-            self.ae(r.status, http_client.BAD_REQUEST), self.ae(r.read(), b'Chunk does not have trailing CRLF')
+            self.ae(r.status, http.client.BAD_REQUEST), self.ae(r.read(), b'Chunk does not have trailing CRLF')
 
             conn = server.connect(timeout=base_timeout * 5)
             conn.request('POST', '/test', headers={'Transfer-Encoding': 'chunked'})
             conn.send(b'30\r\nbody\r\n0\r\n\r\n')
             r = conn.getresponse()
-            self.ae(r.status, http_client.REQUEST_TIMEOUT)
+            self.ae(r.status, http.client.REQUEST_TIMEOUT)
             self.assertIn(b'', r.read())
 
             conn = server.connect()
 
             # Test closing
             server.loop.opts.timeout = 10  # ensure socket is not closed because of timeout
-            conn.request('GET', '/close', headers={'Connection':'close'})
+
+            def assert_no_active_connections() -> None:
+                server.loop.wakeup()
+                num = 10
+                while num and server.loop.num_active_connections != 0:
+                    time.sleep(0.01)
+                    num -= 1
+                self.ae(server.loop.num_active_connections, 0)
+
+            conn.request('GET', '/close', headers={'Connection': 'Close, Upgrade'})
             r = conn.getresponse()
             self.ae(r.status, 200), self.ae(r.read(), b'close')
-            server.loop.wakeup()
-            num = 10
-            while num and server.loop.num_active_connections != 0:
-                time.sleep(0.01)
-                num -= 1
-            self.ae(server.loop.num_active_connections, 0)
+            assert_no_active_connections()
             self.assertIsNone(conn.sock)
+
+            conn = server.connect()
+            r = raw_send(conn, b'GET /close HTTP/1.0\r\nConnection: keep-alive, close\r\n\r\n')
+            self.ae(r.status, 200), self.ae(r.read(), b'close')
+            self.assertIsNone(r.getheader('Connection'))
+            assert_no_active_connections()
+            conn.close()
+
+            conn = server.connect()
+            r = raw_send(conn, b'GET /keep-alive HTTP/1.0\r\nConnection: keep-alive, upgrade\r\n\r\n')
+            self.ae(r.status, 200), self.ae(r.read(), b'keep-alive')
+            self.ae(r.getheader('Connection'), 'Keep-Alive')
+            self.assertIsNotNone(conn.sock)
+            conn.close()
 
             # Test timeout
             server.loop.opts.timeout = 0.1
@@ -300,16 +408,21 @@ class TestHTTP(BaseTest):
             r = conn.getresponse()
             self.ae(r.status, 200), self.ae(r.read(), b'something')
             self.assertIn(b'Request Timeout', eintr_retry_call(conn.sock.recv, 500))
+
     # }}}
 
-    def test_http_response(self):  # {{{
-        'Test HTTP protocol responses'
+    def test_http_response(self) -> None:  # {{{
+        "Test HTTP protocol responses"
         from calibre.srv.http_response import parse_multipart_byterange
 
-        def handler(conn):
-            return conn.generate_static_output('test', lambda : ''.join(conn.path))
-        with NamedTemporaryFile(suffix='test.epub') as f, open(P('localization/locales.zip'), 'rb') as lf, \
-                TestServer(handler, timeout=1, compress_min_size=0) as server:
+        def handler(conn: RequestData) -> StaticOutput:
+            return conn.generate_static_output('test', lambda: ''.join(conn.path))
+
+        with (
+            NamedTemporaryFile(suffix='test.epub') as f,
+            open(P('localization/locales.zip'), 'rb') as lf,
+            TestServer(handler, timeout=1, compress_min_size=0) as server,
+        ):
             fdata = (string.ascii_letters * 100).encode('ascii')
             f.write(fdata), f.seek(0)
 
@@ -317,103 +430,151 @@ class TestHTTP(BaseTest):
             conn = server.connect()
             conn.request('GET', '/an_etagged_path')
             r = conn.getresponse()
-            self.ae(r.status, http_client.OK), self.ae(r.read(), b'an_etagged_path')
+            self.ae(r.status, http.client.OK), self.ae(r.read(), b'an_etagged_path')
             etag = r.getheader('ETag')
-            self.ae(etag, '"%s"' % hashlib.sha1(b'an_etagged_path').hexdigest())
-            conn.request('GET', '/an_etagged_path', headers={'If-None-Match':etag})
+            self.ae(etag, '"{}"'.format(hashlib.sha1(b'an_etagged_path').hexdigest()))
+            conn.request('GET', '/an_etagged_path', headers={'If-None-Match': etag})
             r = conn.getresponse()
-            self.ae(r.status, http_client.NOT_MODIFIED)
+            self.ae(r.status, http.client.NOT_MODIFIED)
             self.ae(r.read(), b'')
 
             # Test gzip
-            raw = b'a'*20000
-            server.change_handler(lambda conn: raw)
+            raw = b'a' * 20000
+            server.change_handler(lambda _conn: raw)
             conn = server.connect()
-            conn.request('GET', '/an_etagged_path', headers={'Accept-Encoding':'gzip'})
+            conn.request('GET', '/an_etagged_path', headers={'Accept-Encoding': 'gzip'})
             r = conn.getresponse()
-            self.ae(unicode_type(len(raw)), r.getheader('Calibre-Uncompressed-Length'))
-            self.ae(r.status, http_client.OK), self.ae(zlib.decompress(r.read(), 16+zlib.MAX_WBITS), raw)
+            self.ae(str(len(raw)), r.getheader('Calibre-Uncompressed-Length'))
+            self.ae(r.status, http.client.OK), self.ae(zlib.decompress(r.read(), 16 + zlib.MAX_WBITS), raw)
+            # HTTP/1.0 has no chunked transfer encoding, so no gzip
+            conn = server.connect()
+            conn.send(b'GET /an_etagged_path HTTP/1.0\r\nAccept-Encoding: gzip\r\n\r\n')
+            conn._HTTPConnection__state = http.client._CS_REQ_SENT  # type: ignore
+            r = conn.getresponse()
+            self.ae(r.status, http.client.OK)
+            self.assertIsNone(r.getheader('Content-Encoding'))
+            self.assertIsNone(r.getheader('Transfer-Encoding'))
+            self.ae(r.getheader('Content-Length'), str(len(raw)))
+            self.ae(r.read(), raw)
+            conn.close()
+
+            # Test generated output, which has no known length
+            server.change_handler(lambda _conn: (x for x in (b'gen', b'erated')))
+            conn = server.connect()
+            conn.request('GET', '/an_etagged_path', headers={'Accept-Encoding': 'gzip'})
+            r = conn.getresponse()
+            self.ae(r.status, http.client.OK)
+            self.ae(r.getheader('Transfer-Encoding'), 'chunked')
+            self.ae(r.read(), b'generated')
 
             # Test dynamic etagged content
             num_calls = [0]
 
-            def edfunc():
+            def edfunc() -> bytes:
                 num_calls[0] += 1
                 return b'data'
-            server.change_handler(lambda conn:conn.etagged_dynamic_response("xxx", edfunc))
+
+            server.change_handler(lambda conn: conn.etagged_dynamic_response('xxx', edfunc))
             conn = server.connect()
             conn.request('GET', '/an_etagged_path')
             r = conn.getresponse()
-            self.ae(r.status, http_client.OK), self.ae(r.read(), b'data')
+            self.ae(r.status, http.client.OK), self.ae(r.read(), b'data')
             etag = r.getheader('ETag')
             self.ae(etag, '"xxx"')
             self.ae(r.getheader('Content-Length'), '4')
-            conn.request('GET', '/an_etagged_path', headers={'If-None-Match':etag})
+            # Range requests are not supported for dynamic output
+            self.assertIsNone(r.getheader('Accept-Ranges'))
+            conn.request('GET', '/an_etagged_path', headers={'If-None-Match': etag})
             r = conn.getresponse()
-            self.ae(r.status, http_client.NOT_MODIFIED)
+            self.ae(r.status, http.client.NOT_MODIFIED)
             self.ae(r.read(), b'')
             self.ae(num_calls[0], 1)
 
             # Test getting a filesystem file
             for use_sendfile in (True, False):
-                server.change_handler(lambda conn: f)
+                server.change_handler(lambda _conn: f)
                 server.loop.opts.use_sendfile = use_sendfile
                 conn = server.connect()
                 conn.request('GET', '/test')
                 r = conn.getresponse()
-                etag = unicode_type(r.getheader('ETag'))
+                etag = str(r.getheader('ETag'))
                 self.assertTrue(etag)
                 self.ae(r.getheader('Content-Type'), guess_type(f.name)[0])
-                self.ae(unicode_type(r.getheader('Accept-Ranges')), 'bytes')
+                self.ae(str(r.getheader('Accept-Ranges')), 'bytes')
                 self.ae(int(r.getheader('Content-Length')), len(fdata))
-                self.ae(r.status, http_client.OK), self.ae(r.read(), fdata)
+                self.ae(r.status, http.client.OK), self.ae(r.read(), fdata)
 
-                conn.request('GET', '/test', headers={'Range':'bytes=2-25'})
+                conn.request('GET', '/test', headers={'Range': 'bytes=2-25'})
                 r = conn.getresponse()
-                self.ae(r.status, http_client.PARTIAL_CONTENT)
-                self.ae(unicode_type(r.getheader('Accept-Ranges')), 'bytes')
-                self.ae(unicode_type(r.getheader('Content-Range')), 'bytes 2-25/%d' % len(fdata))
+                self.ae(r.status, http.client.PARTIAL_CONTENT)
+                self.ae(str(r.getheader('Accept-Ranges')), 'bytes')
+                self.ae(str(r.getheader('Content-Range')), f'bytes 2-25/{len(fdata)}')
                 self.ae(int(r.getheader('Content-Length')), 24)
                 self.ae(r.read(), fdata[2:26])
 
-                conn.request('GET', '/test', headers={'Range':'bytes=100000-'})
+                conn.request('GET', '/test', headers={'Range': 'bytes=100000-'})
                 r = conn.getresponse()
-                self.ae(r.status, http_client.REQUESTED_RANGE_NOT_SATISFIABLE)
-                self.ae(unicode_type(r.getheader('Content-Range')), 'bytes */%d' % len(fdata))
+                self.ae(r.status, http.client.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.ae(str(r.getheader('Content-Range')), f'bytes */{len(fdata)}')
+                self.ae(r.read(), b'')
 
-                conn.request('GET', '/test', headers={'Range':'bytes=25-50', 'If-Range':etag})
+                conn.request('GET', '/test', headers={'Range': 'bytes=25-50', 'If-Range': etag})
                 r = conn.getresponse()
-                self.ae(r.status, http_client.PARTIAL_CONTENT), self.ae(r.read(), fdata[25:51])
+                self.ae(r.status, http.client.PARTIAL_CONTENT), self.ae(r.read(), fdata[25:51])
                 self.ae(int(r.getheader('Content-Length')), 26)
 
-                conn.request('GET', '/test', headers={'Range':'bytes=0-1000000'})
+                conn.request('GET', '/test', headers={'Range': 'bytes=0-1000000'})
                 r = conn.getresponse()
-                self.ae(r.status, http_client.PARTIAL_CONTENT), self.ae(r.read(), fdata)
+                self.ae(r.status, http.client.PARTIAL_CONTENT), self.ae(r.read(), fdata)
 
-                conn.request('GET', '/test', headers={'Range':'bytes=25-50', 'If-Range':'"nomatch"'})
+                conn.request('GET', '/test', headers={'Range': 'bytes=25-50', 'If-Range': '"nomatch"'})
                 r = conn.getresponse()
-                self.ae(r.status, http_client.OK), self.ae(r.read(), fdata)
+                self.ae(r.status, http.client.OK), self.ae(r.read(), fdata)
                 self.assertFalse(r.getheader('Content-Range'))
                 self.ae(int(r.getheader('Content-Length')), len(fdata))
 
-                conn.request('GET', '/test', headers={'Range':'bytes=0-25,26-50'})
+                # A numeric range beyond Python's integer digit limit must not
+                # turn an otherwise valid request into a server error.
+                conn.request('GET', '/test', headers={'Range': 'bytes=0-0,' + '9' * 5000 + '-'})
                 r = conn.getresponse()
-                self.ae(r.status, http_client.PARTIAL_CONTENT)
+                self.ae(r.status, http.client.PARTIAL_CONTENT)
+                self.ae(r.read(), fdata[:1])
+                conn.request('GET', '/test', headers={'Range': 'bytes=0-' + '9' * 5000})
+                r = conn.getresponse()
+                self.ae(r.status, http.client.PARTIAL_CONTENT)
+                self.ae(r.read(), fdata)
+
+                conn.request('GET', '/test', headers={'Range': 'bytes=0-25,26-50'})
+                r = conn.getresponse()
+                self.ae(r.status, http.client.PARTIAL_CONTENT)
                 clen = int(r.getheader('Content-Length'))
                 data = r.read()
                 self.ae(clen, len(data))
                 buf = BytesIO(data)
                 self.ae(parse_multipart_byterange(buf, r.getheader('Content-Type')), [(0, fdata[:26]), (26, fdata[26:51])])
 
+                # Overlapping ranges must not amplify the response size
+                conn.request('GET', '/test', headers={'Range': 'bytes=' + ','.join(['0-'] * 50)})
+                r = conn.getresponse()
+                self.ae(r.status, http.client.PARTIAL_CONTENT)
+                self.ae(str(r.getheader('Content-Range')), f'bytes 0-{len(fdata) - 1}/{len(fdata)}')
+                self.ae(r.read(), fdata)
+
+                # Too many ranges cause the Range header to be ignored
+                conn.request('GET', '/test', headers={'Range': 'bytes=' + ','.join(f'{i}-{i}' for i in range(500))})
+                r = conn.getresponse()
+                self.ae(r.status, http.client.OK), self.ae(r.read(), fdata)
+                self.assertFalse(r.getheader('Content-Range'))
+
                 # Test sending of larger file
                 start_time = monotonic()
                 lf.seek(0)
-                data =  lf.read()
-                server.change_handler(lambda conn: lf)
+                data = lf.read()
+                server.change_handler(lambda _conn: lf)
                 conn = server.connect(timeout=1)
                 conn.request('GET', '/test')
                 r = conn.getresponse()
-                self.ae(r.status, http_client.OK)
+                self.ae(r.status, http.client.OK)
                 rdata = r.read()
                 self.ae(len(data), len(rdata))
                 self.ae(hashlib.sha1(data).hexdigest(), hashlib.sha1(rdata).hexdigest())
@@ -423,19 +584,21 @@ class TestHTTP(BaseTest):
 
     # }}}
 
-    def test_static_generation(self):  # {{{
-        'Test static generation'
+    def test_static_generation(self) -> None:  # {{{
+        "Test static generation"
         nums = list(map(str, range(10)))
 
-        def handler(conn):
+        def handler(conn: RequestData) -> StaticOutput:
             return conn.generate_static_output('test', nums.pop)
+
         with TestServer(handler) as server:
             conn = server.connect()
             conn.request('GET', '/an_etagged_path')
             r = conn.getresponse()
             data = r.read()
-            for i in range(5):
+            for _ in range(5):
                 conn.request('GET', '/an_etagged_path')
                 r = conn.getresponse()
                 self.assertEqual(data, r.read())
+
     # }}}

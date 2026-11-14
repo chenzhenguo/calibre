@@ -1,18 +1,26 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-import threading, re, json
+import json
+import re
+import threading
+from typing import TYPE_CHECKING, TypedDict
 
 from calibre import browser
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
 
-class xISBN(object):
 
+class XISBNRecord(TypedDict, total=False):
+    isbn: list[str]
+    form: list[str]
+    year: str
+    lang: str
+    ed: str
+
+
+class xISBN:
     '''
     This class is used to find the ISBN numbers of "related" editions of a
     book, given its ISBN. Useful when querying services for metadata by ISBN,
@@ -21,21 +29,21 @@ class xISBN(object):
 
     QUERY = 'http://xisbn.worldcat.org/webservices/xid/isbn/%s?method=getEditions&format=json&fl=form,year,lang,ed'
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.lock = threading.RLock()
-        self._data = []
-        self._map = {}
+        self._data: list[list[XISBNRecord]] = []
+        self._map: dict[str, int] = {}
 
         self.isbn_pat = re.compile(r'[^0-9X]', re.IGNORECASE)
 
-    def purify(self, isbn):
+    def purify(self, isbn: str) -> str:
         return self.isbn_pat.sub('', isbn.upper())
 
-    def fetch_data(self, isbn):
+    def fetch_data(self, isbn: str) -> list[XISBNRecord]:
         # xisbn service has been de-comissioned see
         # https://www.oclc.org/developer/news/2018/xid-decommission.en.html
         return []
-        url = self.QUERY%isbn
+        url = self.QUERY % isbn
         data = browser().open_novisit(url).read()
         data = json.loads(data)
         if data.get('stat', None) != 'ok':
@@ -50,19 +58,19 @@ class xISBN(object):
                 ans.append(rec)
         return ans
 
-    def isbns_in_data(self, data):
+    def isbns_in_data(self, data: Iterable[XISBNRecord]) -> Iterator[str]:
         for rec in data:
-            for i in rec.get('isbn', []):
-                yield i
+            yield from rec.get('isbn', [])
 
-    def get_data(self, isbn):
+    def get_data(self, isbn: str) -> list[XISBNRecord]:
         isbn = self.purify(isbn)
         with self.lock:
             if isbn not in self._map:
                 try:
                     data = self.fetch_data(isbn)
-                except:
+                except Exception:
                     import traceback
+
                     traceback.print_exc()
                     data = []
                 id_ = len(self._data)
@@ -72,7 +80,7 @@ class xISBN(object):
                 self._map[isbn] = id_
             return self._data[self._map[isbn]]
 
-    def get_associated_isbns(self, isbn):
+    def get_associated_isbns(self, isbn: str) -> set[str]:
         data = self.get_data(isbn)
         ans = set()
         for rec in data:
@@ -80,9 +88,9 @@ class xISBN(object):
                 ans.add(i)
         return ans
 
-    def get_isbn_pool(self, isbn):
+    def get_isbn_pool(self, isbn: str) -> tuple[frozenset[str], int | None]:
         data = self.get_data(isbn)
-        raw = tuple(x.get('isbn') for x in data if 'isbn' in x)
+        raw = tuple(x['isbn'] for x in data if 'isbn' in x)
         isbns = []
         for x in raw:
             isbns += x
@@ -91,9 +99,8 @@ class xISBN(object):
         for x in data:
             try:
                 year = int(x['year'])
-                if year < min_year:
-                    min_year = year
-            except:
+                min_year = min(min_year, year)
+            except Exception:
                 continue
         if min_year == 100000:
             min_year = None
@@ -103,7 +110,9 @@ class xISBN(object):
 xisbn = xISBN()
 
 if __name__ == '__main__':
-    import sys, pprint
+    import pprint
+    import sys
+
     isbn = sys.argv[-1]
     print(pprint.pprint(xisbn.get_data(isbn)))
     print()

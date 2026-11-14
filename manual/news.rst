@@ -105,7 +105,7 @@ This is Python, so indentation is important. After you've added the lines, it sh
 
 In the above, ``def print_version(self, url)`` defines a *method* that is called by calibre for every article. ``url`` is the URL of the original article. What ``print_version`` does is take that url and replace it with the new URL that points to the print version of the article. To learn about `Python <https://www.python.org>`_ see the `tutorial <https://docs.python.org/tutorial/>`_.
 
-Now, click the :guilabel:`Add/update recipe` button and your changes will be saved. Re-download the e-book. You should have a much improved e-book. One of the problems with the new version is that the fonts on the print version webpage are too small. This is automatically fixed when converting to an e-book, but even after the fixing process, the font size of the menus and navigation bar to become too large relative to the article text. To fix this, we will do some more customization, in the next section.
+Now, click the :guilabel:`Add/update recipe` button and your changes will be saved. Re-download the e-book. You should have a much improved e-book. One of the problems with the new version is that the fonts on the print version webpage are too small. This is automatically fixed when converting to an e-book, but even after the fixing process, the font size of the menus and navigation bar become too large relative to the article text. To fix this, we will do some more customization, in the next section.
 
 Replacing article styles
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -138,7 +138,7 @@ This can be removed by adding::
 
     remove_tags    = [dict(name='div', attrs={'class':'footer'})]
 
-to the recipe. Finally, lets replace some of the :term:`CSS` that we disabled earlier, with our own :term:`CSS` that is suitable for conversion to an e-book::
+to the recipe. Finally, let's replace some of the :term:`CSS` that we disabled earlier, with our own :term:`CSS` that is suitable for conversion to an e-book::
 
     extra_css      = '.headline {font-size: x-large;} \n .fact { padding-top: 10pt  }'
 
@@ -175,7 +175,7 @@ A reasonably complex real life example that exposes more of the :term:`API` of `
        extra_css = 'h1 {font: sans-serif large;}\n.byline {font:monospace;}'
 
        def get_browser(self):
-           br = BasicNewsRecipe.get_browser()
+           br = BasicNewsRecipe.get_browser(self)
            if self.username is not None and self.password is not None:
                br.open('https://www.nytimes.com/auth/login')
                br.select_form(name='login')
@@ -262,9 +262,9 @@ The next interesting feature is::
 The next new feature is the
 :meth:`calibre.web.feeds.news.BasicNewsRecipe.parse_index` method. Its job is
 to go to https://www.nytimes.com/pages/todayspaper/index.html and fetch the list
-of articles that appear in *todays* paper. While more complex than simply using
+of articles that appear in *today's* paper. While more complex than simply using
 :term:`RSS`, the recipe creates an e-book that corresponds very closely to the
-days paper. ``parse_index`` makes heavy use of `BeautifulSoup
+day's paper. ``parse_index`` makes heavy use of `BeautifulSoup
 <https://www.crummy.com/software/BeautifulSoup/bs4/doc/>`_ to parse
 the daily paper webpage. You can also use other, more modern parsers if you
 dislike BeautifulSoup. calibre comes with `lxml <https://lxml.de/>`_ and
@@ -294,7 +294,7 @@ them to the EPUB file :file:`myrecipe.epub`. The ``-vv`` option makes
 ebook-convert spit out a lot of information about what it is doing. The
 :option:`ebook-convert-recipe-input --test` option makes it download only a couple of articles from at most two
 feeds. In addition, ebook-convert will put the downloaded HTML into the
-``debug/input`` directory, where ``debug`` is the directory you specified in
+``debug/input`` folder, where ``debug`` is the folder you specified in
 the :option:`ebook-convert --debug-pipeline` option.
 
 Once the download is complete, you can look at the downloaded :term:`HTML` by opening the file :file:`debug/input/index.html` in a browser. Once you're satisfied that the download and preprocessing is happening correctly, you can generate e-books in different formats as shown below::

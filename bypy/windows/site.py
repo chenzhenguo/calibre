@@ -6,13 +6,14 @@ import builtins
 import os
 import sys
 from importlib import import_module
-from importlib.util import spec_from_file_location
 from importlib.machinery import EXTENSION_SUFFIXES
+from importlib.util import spec_from_file_location
 
 import _sitebuiltins
 
 pyd_items = None
 extension_suffixes = sorted(EXTENSION_SUFFIXES, key=len, reverse=True)
+USER_SITE = None
 
 
 def remove_extension_suffix(name):
@@ -49,6 +50,13 @@ def run_entry_point():
     return getattr(pmod, func)()
 
 
+def setup_langtool():
+    # The langtool data files, including the precompiled rule tables, are
+    # placed in resources/langtool by the freeze scripts, as they must be real
+    # files, not frozen
+    os.environ['LANGTOOL_RESOURCE_DIR'] = os.path.join(sys.resources_location, 'langtool')
+
+
 def set_helper():
     builtins.help = _sitebuiltins._Helper()
 
@@ -57,6 +65,14 @@ def set_quit():
     eof = 'Ctrl-Z plus Return'
     builtins.quit = _sitebuiltins.Quitter('quit', eof)
     builtins.exit = _sitebuiltins.Quitter('exit', eof)
+
+
+def exit_code(ret: object) -> int:
+    # Entry points may return None or arbitrary non-numeric objects, only
+    # integers (including bools) are meaningful as process exit codes
+    if isinstance(ret, int):
+        return int(ret)
+    return 0
 
 
 def main():
@@ -73,18 +89,21 @@ def main():
 
     set_helper()
     set_quit()
+    setup_langtool()
 
     return run_entry_point()
 
 
 if __name__ == '__main__':
     try:
-        main()
+        ret = main()
     except Exception:
         if sys.gui_app and sys.excepthook == sys.__excepthook__:
             import traceback
+
             import calibre_os_module
             calibre_os_module.gui_error_message(
                 f"Unhandled exception running {sys.calibre_basename}",
                 traceback.format_exc())
         raise
+    sys.exit(exit_code(ret))

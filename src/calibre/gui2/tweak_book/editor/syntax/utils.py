@@ -1,11 +1,7 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
-
-from PyQt5.Qt import QTextCharFormat
+from qt.core import QTextCharFormat
 
 NULL_FMT = QTextCharFormat()
 
@@ -16,9 +12,11 @@ def pygments_map():
     global _pyg_map
     if _pyg_map is None:
         from pygments.token import Token
+
         _pyg_map = {
             Token: None,
-            Token.Comment: 'Comment', Token.Comment.Preproc: 'PreProc',
+            Token.Comment: 'Comment',
+            Token.Comment.Preproc: 'PreProc',
             Token.String: 'String',
             Token.Number: 'Number',
             Token.Keyword.Type: 'Type',
@@ -48,6 +46,3 @@ def format_for_pygments_token(theme, cache, token):
         return ans
     cache[token] = ans = NULL_FMT
     return ans
-
-
-

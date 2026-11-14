@@ -5,6 +5,7 @@ novine.novilist.hr
 '''
 
 import re
+
 from calibre import strftime
 from calibre.web.feeds.news import BasicNewsRecipe
 
@@ -26,25 +27,20 @@ class NoviList_hr(BasicNewsRecipe):
     needs_subscription = True
     masthead_url = 'http://novine.novilist.hr/images/system/novilist-logo.jpg'
     index = 'http://novine.novilist.hr/'
-    extra_css             = """
+    extra_css = '''
                                @font-face {font-family: "sans1";src:url(res:///opt/sony/ebook/FONT/tt0003m_.ttf)}
                                body{font-family: Geneva,Arial,Helvetica,Swiss,sans1,sans-serif }
                                img{display:block; margin-bottom: 0.4em; margin-top: 0.4em}
                                .nadnaslov,.podnaslov{font-size: small; display: block; margin-bottom: 1em}
                                .naslov{font-size: x-large; color: maroon; font-weight: bold; display: block; margin-bottom: 1em;}
                                p{display: block}
-                            """
+                            '''
 
-    preprocess_regexps = [(re.compile(u'\u0110'), lambda match: u'\u00D0')]
+    preprocess_regexps = [(re.compile('\u0110'), lambda match: '\u00d0')]  # ruff: ignore[unraw-re-pattern]
 
-    conversion_options = {
-        'comment': description, 'tags': category, 'publisher': publisher, 'language': language, 'linearize_tables': True
-    }
+    conversion_options = {'comment': description, 'tags': category, 'publisher': publisher, 'language': language, 'linearize_tables': True}
 
-    keep_only_tags = [
-        dict(name='td', attrs={'class': ['nadnaslov', 'naslov', 'podnaslov']}),
-        dict(name='font', attrs={'face': 'Geneva,Arial,Helvetica,Swiss'})
-    ]
+    keep_only_tags = [dict(name='td', attrs={'class': ['nadnaslov', 'naslov', 'podnaslov']}), dict(name='font', attrs={'face': 'Geneva,Arial,Helvetica,Swiss'})]
 
     remove_tags = [dict(name=['meta', 'link', 'iframe', 'embed', 'object'])]
     remove_attributes = ['border', 'lang', 'size', 'face', 'bgcolor']
@@ -80,9 +76,7 @@ class NoviList_hr(BasicNewsRecipe):
             inarts = []
             for alink in feedpage.findAll('a', attrs={'class': 'naslovlinkdesno'}):
                 url = self.index + alink['href']
-                inarts.append({
-                    'title': self.tag_to_string(alink), 'date': strftime(self.timefmt), 'url': url, 'description': ''
-                })
+                inarts.append({'title': self.tag_to_string(alink), 'date': strftime(self.timefmt), 'url': url, 'description': ''})
             if self.remove_empty_feeds:
                 if inarts:
                     articles.append((section, inarts))

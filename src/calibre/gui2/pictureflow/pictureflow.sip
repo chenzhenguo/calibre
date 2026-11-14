@@ -31,14 +31,18 @@ class PictureFlow : QWidget  {
 
 
 public :
-    
+
   PictureFlow(QWidget *parent /TransferThis/ = 0, int queueLength = 3);
 
   void setImages(FlowImages *images);
-  
+  int count();
+
   QSize slideSize() const;
 
   void setSlideSize(QSize size);
+
+  bool activateOnDoubleClick() const;
+  void setActivateOnDoubleClick(bool on);
 
   bool preserveAspectRatio() const;
 
@@ -58,6 +62,9 @@ public :
 
   void setShowReflections(bool show);
 
+  int maxFontSize() const;
+  void setMaxFontSize(int val);
+
 public slots:
 
   void setCurrentSlide(int index);
@@ -69,7 +76,7 @@ public slots:
   void showNext();
 
   void showSlide(int index);
-  
+
   void dataChanged();
 
 signals:
@@ -86,4 +93,3 @@ protected:
   void resizeEvent(QResizeEvent* event);
   void timerEvent(QTimerEvent* event);
 };
-

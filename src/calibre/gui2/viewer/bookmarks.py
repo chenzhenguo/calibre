@@ -1,39 +1,59 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPL v3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
-
 
 import json
 from operator import itemgetter
-from PyQt5.Qt import (
-    QAction, QComboBox, QGridLayout, QHBoxLayout, QIcon, QInputDialog,
-    QItemSelectionModel, QLabel, QListWidget, QListWidgetItem, QPushButton, Qt,
-    QWidget, pyqtSignal
+
+from qt.core import (
+    QAbstractItemView,
+    QAction,
+    QComboBox,
+    QGridLayout,
+    QHBoxLayout,
+    QIcon,
+    QInputDialog,
+    QItemSelectionModel,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    Qt,
+    QWidget,
+    pyqtSignal,
 )
 
-from calibre.gui2 import choose_files, choose_save_file
+from calibre.gui2 import choose_files, choose_save_file, error_dialog
 from calibre.gui2.dialogs.confirm_delete import confirm
+from calibre.gui2.gestures import GestureManager
 from calibre.gui2.viewer.shortcuts import get_shortcut_for
 from calibre.gui2.viewer.web_view import vprefs
 from calibre.utils.date import EPOCH, utcnow
-from calibre.utils.icu import sort_key
-from polyglot.builtins import range, unicode_type
+from calibre.utils.icu import primary_sort_key
+from calibre.utils.localization import _
 
 
 class BookmarksList(QListWidget):
-
     changed = pyqtSignal()
     bookmark_activated = pyqtSignal(object)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QListWidget.__init__(self, parent)
         self.setAlternatingRowColors(True)
         self.setStyleSheet('QListView::item { padding: 0.5ex }')
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
-        self.ac_edit = ac = QAction(QIcon(I('edit_input.png')), _('Rename this bookmark'), self)
+        self.ac_edit = ac = QAction(QIcon.ic('edit_input.png'), _('Rename this bookmark'), self)
         self.addAction(ac)
-        self.ac_delete = ac = QAction(QIcon(I('trash.png')), _('Remove this bookmark'), self)
+        self.ac_delete = ac = QAction(QIcon.ic('trash.png'), _('Remove this bookmark'), self)
         self.addAction(ac)
+        self.gesture_manager = GestureManager(self)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+
+    def viewportEvent(self, e):
+        if hasattr(self, 'gesture_manager'):
+            ret = self.gesture_manager.handle_event(e)
+            if ret is not None:
+                return ret
+        return super().viewportEvent(e)
 
     @property
     def current_non_removed_item(self):
@@ -43,28 +63,30 @@ class BookmarksList(QListWidget):
             if not bm.get('removed'):
                 return ans
 
-    def keyPressEvent(self, ev):
-        if ev.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
             i = self.current_non_removed_item
             if i is not None:
                 self.bookmark_activated.emit(i)
-                ev.accept()
+                e.accept()
                 return
-        if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+        if e.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             i = self.current_non_removed_item
             if i is not None:
                 self.ac_delete.trigger()
-                ev.accept()
+                e.accept()
                 return
-        return QListWidget.keyPressEvent(self, ev)
+        return QListWidget.keyPressEvent(self, e)
 
-    def activate_related_bookmark(self, delta=1):
+    def activate_related_bookmark(self, delta=1) -> None:
         if not self.count():
             return
         items = [self.item(r) for r in range(self.count())]
         row = self.currentRow()
         current_item = items[row]
-        items = [i for i in items if not i.isHidden()]
+        if current_item is None:
+            return
+        items = [i for i in items if i is not None and not i.isHidden()]
         count = len(items)
         if not count:
             return
@@ -73,55 +95,54 @@ class BookmarksList(QListWidget):
         self.setCurrentItem(items[nrow])
         self.bookmark_activated.emit(self.currentItem())
 
-    def next_bookmark(self):
+    def next_bookmark(self) -> None:
         self.activate_related_bookmark()
 
-    def previous_bookmark(self):
+    def previous_bookmark(self) -> None:
         self.activate_related_bookmark(-1)
 
 
 class BookmarkManager(QWidget):
-
     edited = pyqtSignal(object)
     activated = pyqtSignal(object)
     create_requested = pyqtSignal()
     toggle_requested = pyqtSignal()
 
-    def __init__(self, parent):
+    def __init__(self, parent) -> None:
         QWidget.__init__(self, parent)
         self.l = l = QGridLayout(self)
         l.setContentsMargins(0, 0, 0, 0)
         self.setLayout(l)
+        self.toc = parent.toc
 
         self.bookmarks_list = bl = BookmarksList(self)
         bl.itemChanged.connect(self.item_changed)
         l.addWidget(bl, 0, 0, 1, -1)
         bl.itemClicked.connect(self.item_activated)
         bl.bookmark_activated.connect(self.item_activated)
-        bl.changed.connect(lambda : self.edited.emit(self.get_bookmarks()))
+        bl.changed.connect(lambda: self.edited.emit(self.get_bookmarks()))
         bl.ac_edit.triggered.connect(self.edit_bookmark)
         bl.ac_delete.triggered.connect(self.delete_bookmark)
 
-        self.la = la = QLabel(_(
-            'Double click to edit the bookmarks'))
+        self.la = la = QLabel(_('Double click to edit the bookmarks'))
         la.setWordWrap(True)
         l.addWidget(la, l.rowCount(), 0, 1, -1)
 
-        self.button_new = b = QPushButton(QIcon(I('bookmarks.png')), _('&New'), self)
+        self.button_new = b = QPushButton(QIcon.ic('bookmarks.png'), _('&New'), self)
         b.clicked.connect(self.create_requested)
         b.setToolTip(_('Create a new bookmark at the current location'))
         l.addWidget(b)
 
-        self.button_delete = b = QPushButton(QIcon(I('trash.png')), _('&Remove'), self)
+        self.button_delete = b = QPushButton(QIcon.ic('trash.png'), _('&Remove'), self)
         b.setToolTip(_('Remove the currently selected bookmark'))
         b.clicked.connect(self.delete_bookmark)
         l.addWidget(b, l.rowCount() - 1, 1)
 
-        self.button_prev = b = QPushButton(QIcon(I('back.png')), _('Pre&vious'), self)
+        self.button_prev = b = QPushButton(QIcon.ic('back.png'), _('Pre&vious'), self)
         b.clicked.connect(self.bookmarks_list.previous_bookmark)
         l.addWidget(b)
 
-        self.button_next = b = QPushButton(QIcon(I('forward.png')), _('Nex&t'), self)
+        self.button_next = b = QPushButton(QIcon.ic('forward.png'), _('Nex&t'), self)
         b.clicked.connect(self.bookmarks_list.next_bookmark)
         l.addWidget(b, l.rowCount() - 1, 1)
 
@@ -148,7 +169,7 @@ class BookmarkManager(QWidget):
         b.clicked.connect(self.import_bookmarks)
         l.addWidget(b, l.rowCount() - 1, 1)
 
-    def item_activated(self, item):
+    def item_activated(self, item) -> None:
         bm = self.item_to_bm(item)
         self.activated.emit(bm['pos'])
 
@@ -156,24 +177,29 @@ class BookmarkManager(QWidget):
     def current_sort_by(self):
         return self.sort_by.currentData()
 
-    def sort_by_changed(self):
+    def sort_by_changed(self) -> None:
         vprefs['bookmarks_sort'] = self.current_sort_by
         self.set_bookmarks(self.get_bookmarks())
 
-    def set_bookmarks(self, bookmarks=()):
+    def set_bookmarks(self, bookmarks=()) -> None:
         csb = self.current_sort_by
-        if csb == 'name':
-            sk = lambda x: sort_key(x['title'])
+        if csb in ('name', 'title'):
+
+            def sk(x):
+                return primary_sort_key(x['title'])
+
         elif csb == 'timestamp':
             sk = itemgetter('timestamp')
         else:
             from calibre.ebooks.epub.cfi.parse import cfi_sort_key
+
             defval = cfi_sort_key('/99999999')
 
             def pos_key(b):
                 if b.get('pos_type') == 'epubcfi':
                     return cfi_sort_key(b['pos'], only_path=False)
                 return defval
+
             sk = pos_key
 
         bookmarks = sorted(bookmarks, key=sk)
@@ -189,6 +215,7 @@ class BookmarkManager(QWidget):
                 i.setHidden(True)
         for i in range(self.bookmarks_list.count()):
             item = self.bookmarks_list.item(i)
+            assert item is not None
             if not item.isHidden():
                 self.bookmarks_list.setCurrentItem(item, QItemSelectionModel.SelectionFlag.ClearAndSelect)
                 break
@@ -202,14 +229,14 @@ class BookmarkManager(QWidget):
             return item.data(Qt.ItemDataRole.DisplayRole)
 
     @current_bookmark_id.setter
-    def current_bookmark_id(self, val):
+    def current_bookmark_id(self, val) -> None:
         for i, q in enumerate(self):
             if q['title'] == val:
                 item = self.bookmarks_list.item(i)
                 self.bookmarks_list.setCurrentItem(item, QItemSelectionModel.SelectionFlag.ClearAndSelect)
                 self.bookmarks_list.scrollToItem(item)
 
-    def set_current_bookmark(self, bm):
+    def set_current_bookmark(self, bm) -> None:
         for i, q in enumerate(self):
             if bm == q:
                 l = self.bookmarks_list
@@ -225,6 +252,7 @@ class BookmarkManager(QWidget):
         remove = []
         for i in range(self.bookmarks_list.count()):
             item = self.bookmarks_list.item(i)
+            assert item is not None
             bm = item.data(Qt.ItemDataRole.UserRole)
             if bm.get('removed') and bm['title'] == base:
                 remove.append(i)
@@ -235,12 +263,12 @@ class BookmarkManager(QWidget):
         q = base
         while q in all_titles:
             c += 1
-            q = '{} #{}'.format(base, c)
+            q = f'{base} #{c}'
         return q
 
-    def item_changed(self, item):
+    def item_changed(self, item) -> None:
         self.bookmarks_list.blockSignals(True)
-        title = unicode_type(item.data(Qt.ItemDataRole.DisplayRole)) or _('Unknown')
+        title = str(item.data(Qt.ItemDataRole.DisplayRole)) or _('Unknown')
         title = self.uniqify_bookmark_title(title)
         item.setData(Qt.ItemDataRole.DisplayRole, title)
         item.setData(Qt.ItemDataRole.ToolTipRole, title)
@@ -251,13 +279,15 @@ class BookmarkManager(QWidget):
         self.bookmarks_list.blockSignals(False)
         self.edited.emit(self.get_bookmarks())
 
-    def delete_bookmark(self):
+    def delete_bookmark(self) -> None:
         item = self.bookmarks_list.current_non_removed_item
         if item is not None:
             bm = item.data(Qt.ItemDataRole.UserRole)
             if confirm(
                 _('Are you sure you want to delete the bookmark: {0}?').format(bm['title']),
-                'delete-bookmark-from-viewer', parent=self, config_set=vprefs
+                'delete-bookmark-from-viewer',
+                parent=self,
+                config_set=vprefs,
             ):
                 bm['removed'] = True
                 bm['timestamp'] = utcnow().isoformat()
@@ -267,7 +297,7 @@ class BookmarkManager(QWidget):
                 item.setHidden(True)
                 self.edited.emit(self.get_bookmarks())
 
-    def edit_bookmark(self):
+    def edit_bookmark(self) -> None:
         item = self.bookmarks_list.current_non_removed_item
         if item is not None:
             self.bookmarks_list.editItem(item)
@@ -281,30 +311,41 @@ class BookmarkManager(QWidget):
     def get_bookmarks(self):
         return list(self)
 
-    def export_bookmarks(self):
+    def export_bookmarks(self) -> None:
         filename = choose_save_file(
-            self, 'export-viewer-bookmarks', _('Export bookmarks'),
-            filters=[(_('Saved bookmarks'), ['calibre-bookmarks'])], all_files=False, initial_filename='bookmarks.calibre-bookmarks')
+            self,
+            'export-viewer-bookmarks',
+            _('Export bookmarks'),
+            filters=[(_('Saved bookmarks'), ['calibre-bookmarks'])],
+            all_files=False,
+            initial_filename='bookmarks.calibre-bookmarks',
+        )
         if filename:
             bm = [x for x in self.get_bookmarks() if not x.get('removed')]
             data = json.dumps({'type': 'bookmarks', 'entries': bm}, indent=True)
             if not isinstance(data, bytes):
                 data = data.encode('utf-8')
-            with lopen(filename, 'wb') as fileobj:
+            with open(filename, 'wb') as fileobj:
                 fileobj.write(data)
 
-    def import_bookmarks(self):
-        files = choose_files(self, 'export-viewer-bookmarks', _('Import bookmarks'),
-            filters=[(_('Saved bookmarks'), ['calibre-bookmarks'])], all_files=False, select_only_single_file=True)
+    def import_bookmarks(self) -> None:
+        files = choose_files(
+            self,
+            'export-viewer-bookmarks',
+            _('Import bookmarks'),
+            filters=[(_('Saved bookmarks'), ['calibre-bookmarks'])],
+            all_files=False,
+            select_only_single_file=True,
+        )
         if not files:
             return
         filename = files[0]
 
         imported = None
-        with lopen(filename, 'rb') as fileobj:
+        with open(filename, 'rb') as fileobj:
             imported = json.load(fileobj)
 
-        def import_old_bookmarks(imported):
+        def import_old_bookmarks(imported) -> None:
             try:
                 for bm in imported:
                     if 'title' not in bm:
@@ -323,7 +364,7 @@ class BookmarkManager(QWidget):
             self.set_bookmarks(bookmarks)
             self.edited.emit(self.get_bookmarks())
 
-        def import_current_bookmarks(imported):
+        def import_current_bookmarks(imported) -> None:
             if imported.get('type') != 'bookmarks':
                 return
             bookmarks = self.get_bookmarks()
@@ -339,23 +380,25 @@ class BookmarkManager(QWidget):
             else:
                 import_current_bookmarks(imported)
 
-    def create_new_bookmark(self, pos_data):
-        base_default_title = _('Bookmark')
+    def create_new_bookmark(self, pos_data) -> None:
+        base_default_title = self.toc.model().title_for_current_node or _('Bookmark')
         all_titles = {bm['title'] for bm in self.get_bookmarks()}
         c = 0
         while True:
             c += 1
-            default_title = '{} #{}'.format(base_default_title, c)
+            default_title = f'{base_default_title} #{c}'
             if default_title not in all_titles:
                 break
 
-        title, ok = QInputDialog.getText(self, _('Add bookmark'),
-                _('Enter title for bookmark:'), text=pos_data.get('selected_text') or default_title)
-        title = unicode_type(title).strip()
+        title, ok = QInputDialog.getText(self, _('Add bookmark'), _('Enter title for bookmark:'), text=pos_data.get('selected_text') or default_title)
+        title = str(title).strip()
         if not ok or not title:
             return
         title = self.uniqify_bookmark_title(title)
         cfi = (pos_data.get('selection_bounds') or {}).get('start') or pos_data['cfi']
+        if not cfi:
+            error_dialog(self, _('Failed to bookmark'), _('Could not calculate position in book'), show=True)
+            return
         bm = {
             'title': title,
             'pos_type': 'epubcfi',
@@ -368,12 +411,12 @@ class BookmarkManager(QWidget):
         self.set_current_bookmark(bm)
         self.edited.emit(bookmarks)
 
-    def keyPressEvent(self, ev):
-        sc = get_shortcut_for(self, ev)
-        if ev.key() == Qt.Key.Key_Escape or sc == 'toggle_bookmarks':
+    def keyPressEvent(self, a0):
+        sc = get_shortcut_for(self, a0)
+        if a0.key() == Qt.Key.Key_Escape or sc == 'toggle_bookmarks':
             self.toggle_requested.emit()
             return
         if sc == 'new_bookmark':
             self.create_requested.emit()
             return
-        return QWidget.keyPressEvent(self, ev)
+        return QWidget.keyPressEvent(self, a0)

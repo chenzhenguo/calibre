@@ -1,57 +1,88 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
-
-from multiprocessing.pool import ThreadPool
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from contextlib import closing
+from typing import TYPE_CHECKING
 
 from calibre import detect_ncpus as cpu_count
-from polyglot.builtins import range
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Sequence
+
+    from calibre.ebooks.oeb.polish.container import Container
 
 DEBUG, INFO, WARN, ERROR, CRITICAL = range(5)
 
+#: A location of an error of the form: (name, lnum, col)
+type ErrorLocation = tuple[str, int | None, int | None]
 
-class BaseError(object):
 
+class BaseError:
     HELP = ''
     INDIVIDUAL_FIX = ''
+    # A human readable name for the type of this error, used when displaying
+    # the list of skipped rules. Defaults to the error message.
+    RULE_NAME = ''
     level = ERROR
     has_multiple_locations = False
+    # Set by the GUI to the index into all_locations the user activated
+    current_location_index: int | None = None
+    is_parsing_error = False
+    # True for problems found by the optional accessibility checks
+    is_accessibility_problem = False
 
-    def __init__(self, msg, name, line=None, col=None):
+    def __init__(self, msg: str, name: str, line: int | None = None, col: int | None = None) -> None:
         self.msg, self.line, self.col = msg, line, col
         self.name = name
         # A list with entries of the form: (name, lnum, col)
-        self.all_locations = None
+        self.all_locations: list[ErrorLocation] | None = None
 
-    def __str__(self):
-        return '%s:%s (%s, %s):%s' % (self.__class__.__name__, self.name, self.line, self.col, self.msg)
+    if TYPE_CHECKING:
+        # Errors that have INDIVIDUAL_FIX set implement this to fix the error,
+        # returning False if nothing was changed
+        def __call__(self, container: Container) -> bool | None: ...
+
+    @property
+    def rule_id(self) -> str:
+        """A stable identifier for the type of this error, used to skip it"""
+        return self.__class__.__name__
+
+    @property
+    def rule_name(self) -> str:
+        return self.RULE_NAME or self.msg
+
+    @property
+    def can_be_skipped(self) -> bool:
+        return not self.is_parsing_error
+
+    def __str__(self) -> str:
+        return f'{self.__class__.__name__}:{self.name} ({self.line}, {self.col}):{self.msg}'
 
     __repr__ = __str__
 
 
-def worker(func, args):
+def worker[T](func: Callable[..., T], args: Sequence[object]) -> tuple[T | None, str | None]:
     try:
         result = func(*args)
         tb = None
-    except:
+    except Exception:
         result = None
         import traceback
+
         tb = traceback.format_exc()
     return result, tb
 
 
-def run_checkers(func, args_list):
-    num = cpu_count()
-    pool = ThreadPool(num)
-    ans = []
-    with closing(pool):
+def run_checkers[T](func: Callable[..., Iterable[T]], args_list: Iterable[Sequence[object]]) -> list[T]:
+    # Use concurrent.futures rather than multiprocessing.pool.ThreadPool as the
+    # latter needs the multiprocessing resource tracker process for its
+    # semaphores, which breaks if that process is not running
+    ans: list[T] = []
+    with ThreadPoolExecutor(max_workers=cpu_count()) as pool:
         for result, tb in pool.map(partial(worker, func), args_list):
             if tb is not None:
-                raise Exception('Failed to run worker: \n%s' % tb)
+                raise Exception(f'Failed to run worker: \n{tb}')
+            assert result is not None  # tb is None so result is the return value of func
             ans.extend(result)
     return ans

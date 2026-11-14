@@ -38,7 +38,7 @@ def split_on_comma(tokens):
 
 
 def strip_whitespace(tokens):
-    """Remove whitespace at the beggining and end of a token list.
+    """Remove whitespace at the beginning and end of a token list.
 
     Whitespace tokens in-between other tokens in the list are preserved.
 
@@ -144,15 +144,15 @@ class ParseError(ValueError):
 
     .. attribute:: line
 
-        Source line where the error occured.
+        Source line where the error occurred.
 
     .. attribute:: column
 
-        Column in the source line where the error occured.
+        Column in the source line where the error occurred.
 
     .. attribute:: reason
 
-        What happend (a string).
+        What happened (a string).
 
     """
     def __init__(self, subject, reason):

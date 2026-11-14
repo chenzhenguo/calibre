@@ -1,15 +1,18 @@
-from calibre.web.feeds.news import BasicNewsRecipe
+#!/usr/bin/env python
+# vim:fileencoding=utf-8
 import os
 import time
 
+from calibre.web.feeds.news import BasicNewsRecipe
+
 
 class AdvancedUserRecipe1277129332(BasicNewsRecipe):
-    title = u'人民日报'
+    title = '人民日报'
     oldest_article = 2
     max_articles_per_feed = 100
-    __author__ = 'zzh'
+    __author__ = 'ceapas'
 
-    pubisher = 'people.com.cn'
+    publisher = 'people.com.cn'
     description = 'People Daily Newspaper'
     language = 'zh'
     category = 'News, China'
@@ -17,29 +20,42 @@ class AdvancedUserRecipe1277129332(BasicNewsRecipe):
     use_embedded_content = False
     no_stylesheets = True
     encoding = 'GB2312'
-    language = 'zh'
     conversion_options = {'linearize_tables': True}
     masthead_url = 'http://www.people.com.cn/img/2010wb/images/logo.gif'
 
+    recipe_specific_options = {
+        'days': {
+            'short': 'Oldest article to download from this news source. In days ',
+            'long': 'For example, 0.5, gives you articles from the past 12 hours',
+            'default': str(oldest_article),
+        }
+    }
+
+    def __init__(self, *args, **kwargs):
+        BasicNewsRecipe.__init__(self, *args, **kwargs)
+        d = self.recipe_specific_options.get('days')
+        if d and isinstance(d, str):
+            self.oldest_article = float(d)
+
     feeds = [
-        (u'时政', u'http://www.people.com.cn/rss/politics.xml'),
-        (u'国际', u'http://www.people.com.cn/rss/world.xml'),
-        (u'经济', u'http://www.people.com.cn/rss/finance.xml'),
-        (u'体育', u'http://www.people.com.cn/rss/sports.xml'),
-        (u'教育', u'http://www.people.com.cn/rss/edu.xml'),
-        (u'文化', u'http://www.people.com.cn/rss/culture.xml'),
-        (u'社会', u'http://www.people.com.cn/rss/society.xml'),
-        (u'传媒', u'http://www.people.com.cn/rss/media.xml'),
-        (u'娱乐', u'http://www.people.com.cn/rss/ent.xml'),
+        ('时政', 'http://www.people.com.cn/rss/politics.xml'),
+        ('国际', 'http://www.people.com.cn/rss/world.xml'),
+        ('经济', 'http://www.people.com.cn/rss/finance.xml'),
+        ('体育', 'http://www.people.com.cn/rss/sports.xml'),
+        ('教育', 'http://www.people.com.cn/rss/edu.xml'),
+        ('文化', 'http://www.people.com.cn/rss/culture.xml'),
+        ('社会', 'http://www.people.com.cn/rss/society.xml'),
+        ('传媒', 'http://www.people.com.cn/rss/media.xml'),
+        ('娱乐', 'http://www.people.com.cn/rss/ent.xml'),
         # (u'汽车', u'http://www.people.com.cn/rss/auto.xml'),
-        (u'海峡两岸', u'http://www.people.com.cn/rss/haixia.xml'),
+        ('海峡两岸', 'http://www.people.com.cn/rss/haixia.xml'),
         # (u'IT频道', u'http://www.people.com.cn/rss/it.xml'),
         # (u'环保', u'http://www.people.com.cn/rss/env.xml'),
         # (u'科技', u'http://www.people.com.cn/rss/scitech.xml'),
         # (u'新农村', u'http://www.people.com.cn/rss/nc.xml'),
         # (u'天气频道', u'http://www.people.com.cn/rss/weather.xml'),
-        (u'生活提示', u'http://www.people.com.cn/rss/life.xml'),
-        (u'卫生', u'http://www.people.com.cn/rss/medicine.xml'),
+        ('生活提示', 'http://www.people.com.cn/rss/life.xml'),
+        ('卫生', 'http://www.people.com.cn/rss/medicine.xml'),
         # (u'人口', u'http://www.people.com.cn/rss/npmpc.xml'),
         # (u'读书', u'http://www.people.com.cn/rss/booker.xml'),
         # (u'食品', u'http://www.people.com.cn/rss/shipin.xml'),
@@ -68,15 +84,13 @@ class AdvancedUserRecipe1277129332(BasicNewsRecipe):
         # (u'中国人大新闻', u'http://www.people.com.cn/rss/14576.xml'),
         # (u'中国政协新闻', u'http://www.people.com.cn/rss/34948.xml'),
     ]
-    keep_only_tags = [
-        dict(name='div', attrs={'class': 'text_c'}),
-    ]
-    remove_tags = [
-        dict(name='div', attrs={'class': 'tools'}),
-    ]
-    remove_tags_after = [
-        dict(name='div', attrs={'id': 'p_content'}),
-    ]
+    # keep_only_tags = [
+    #     dict(name='p'),
+    # ]
+    remove_tags = [dict(name='div', class_='channel cf')]
+
+    remove_tags_before = [dict(name='div', class_='layout rm_txt cf')]
+    remove_tags_after = [dict(name='div', class_='edit cf')]
 
     def append_page(self, soup, appendtag, position):
         pager = soup.find('img', attrs={'src': '/img/next_b.gif'})
@@ -92,15 +106,14 @@ class AdvancedUserRecipe1277129332(BasicNewsRecipe):
             appendtag.insert(position, texttag)
 
     def skip_ad_pages(self, soup):
-        if ('advertisement' in soup.find('title').string.lower()):
+        if 'advertisement' in soup.find('title').string.lower():
             href = soup.find('a').get('href')
             return self.browser.open(href).read().decode('GB2312', 'ignore')
         else:
             return None
 
     def preprocess_html(self, soup):
-        mtag = '<meta http-equiv="content-type" content="text/html;charset=GB2312" />\n<meta http-equiv="content-language" content="GB2312" />'
-        soup.head.insert(0, mtag)
+
         for item in soup.findAll(style=True):
             del item['form']
         self.append_page(soup, soup.body, 3)
@@ -113,12 +126,11 @@ class AdvancedUserRecipe1277129332(BasicNewsRecipe):
         year = time.strftime('%Y')
         month = time.strftime('%m')
         day = time.strftime('%d')
-        cover = 'http://paper.people.com.cn/rmrb/page/' + year + '-' + \
-            month + '/' + day + '/01/RMRB' + year + month + day + 'B001_b.jpg'
+        cover = 'http://paper.people.com.cn/rmrb/images/' + year + '-' + month + '/' + day + '/01/rmrb' + year + month + day + '01_b.jpg'
         br = BasicNewsRecipe.get_browser(self)
         try:
             br.open(cover)
-        except:
-            self.log("\nCover unavailable: " + cover)
+        except Exception:
+            self.log('\nCover unavailable: ' + cover)
             cover = None
         return cover

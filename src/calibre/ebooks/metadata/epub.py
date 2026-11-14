@@ -1,27 +1,29 @@
 #!/usr/bin/env python
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2008, Kovid Goyal <kovid at kovidgoyal.net>'
-
-'''Read meta information from epub files'''
-
+"""Read meta information from epub files"""
 
 import io
 import os
 import posixpath
-from contextlib import closing
+from contextlib import closing, contextmanager, suppress
+from typing import IO, TYPE_CHECKING
 
 from calibre import CurrentDir
-from calibre.ebooks.metadata.opf import (
-    get_metadata as get_metadata_from_opf, set_metadata as set_metadata_opf
-)
+from calibre.ebooks.metadata.opf import get_metadata as get_metadata_from_opf
+from calibre.ebooks.metadata.opf import set_metadata as set_metadata_opf
 from calibre.ebooks.metadata.opf2 import OPF
-from calibre.utils.xml_parse import safe_xml_fromstring
 from calibre.ptempfile import TemporaryDirectory
+from calibre.utils.imghdr import what as what_image_type
 from calibre.utils.localunzip import LocalZipFile
+from calibre.utils.xml_parse import safe_xml_fromstring
 from calibre.utils.zipfile import BadZipfile, ZipFile, safe_replace
-from polyglot.builtins import getcwd
+
+if TYPE_CHECKING:
+    import unittest
+    from collections.abc import Callable, Generator, Iterator
+
+    from calibre.ebooks.metadata.book.base import Metadata
 
 
 class EPubException(Exception):
@@ -37,40 +39,43 @@ class ContainerException(OCFException):
 
 
 class Container(dict):
-
-    def __init__(self, stream=None):
+    def __init__(self, stream: IO[bytes] | None = None, file_exists: Callable[[str], bool | None] | None = None) -> None:
         if not stream:
             return
         container = safe_xml_fromstring(stream.read())
         if container.get('version', None) != '1.0':
-            raise EPubException("unsupported version of OCF")
+            raise EPubException('unsupported version of OCF')
         rootfiles = container.xpath('./*[local-name()="rootfiles"]')
         if not rootfiles:
-            raise EPubException("<rootfiles/> element missing")
+            raise EPubException('<rootfiles/> element missing')
         for rootfile in rootfiles[0].xpath('./*[local-name()="rootfile"]'):
             mt, fp = rootfile.get('media-type'), rootfile.get('full-path')
             if not mt or not fp:
-                raise EPubException("<rootfile/> element malformed")
-            self[mt] = fp
+                raise EPubException('<rootfile/> element malformed')
+
+            if file_exists and not file_exists(fp):
+                # Some Kobo epubs have multiple rootfile entries, but only one
+                # exists.  Ignore the ones that don't exist.
+                continue
+            if mt not in self:
+                self[mt] = fp
 
 
-class OCF(object):
-    MIMETYPE        = 'application/epub+zip'
-    CONTAINER_PATH  = 'META-INF/container.xml'
+class OCF:
+    MIMETYPE = 'application/epub+zip'
+    CONTAINER_PATH = 'META-INF/container.xml'
     ENCRYPTION_PATH = 'META-INF/encryption.xml'
 
-    def __init__(self):
+    def __init__(self) -> None:
         raise NotImplementedError('Abstract base class')
 
 
-class Encryption(object):
+class Encryption:
+    OBFUSCATION_ALGORITHMS = frozenset(['http://ns.adobe.com/pdf/enc#RC', 'http://www.idpf.org/2008/embedding'])
 
-    OBFUSCATION_ALGORITHMS = frozenset(['http://ns.adobe.com/pdf/enc#RC',
-            'http://www.idpf.org/2008/embedding'])
-
-    def __init__(self, raw):
+    def __init__(self, raw: bytes | None) -> None:
         self.root = safe_xml_fromstring(raw) if raw else None
-        self.entries = {}
+        self.entries: dict[str, str] = {}
         if self.root is not None:
             for em in self.root.xpath('descendant::*[contains(name(), "EncryptionMethod")]'):
                 algorithm = em.get('Algorithm', '')
@@ -80,43 +85,49 @@ class Encryption(object):
                     if uri and algorithm:
                         self.entries[uri] = algorithm
 
-    def is_encrypted(self, uri):
+    def is_encrypted(self, uri: str) -> bool:
         algo = self.entries.get(uri, None)
         return algo is not None and algo not in self.OBFUSCATION_ALGORITHMS
 
 
 class OCFReader(OCF):
+    root: str
 
-    def __init__(self):
+    def open(self, name: str) -> IO[bytes]:
+        raise NotImplementedError()
+
+    def __init__(self) -> None:
         try:
             mimetype = self.read_bytes('mimetype').decode('utf-8').rstrip()
             if mimetype != OCF.MIMETYPE:
                 print('WARNING: Invalid mimetype declaration', mimetype)
-        except:
-            print('WARNING: Epub doesn\'t contain a valid mimetype declaration')
+        except Exception:
+            print("WARNING: Epub doesn't contain a valid mimetype declaration")
 
         try:
             with closing(self.open(OCF.CONTAINER_PATH)) as f:
-                self.container = Container(f)
+                self.container = Container(f, self.exists)
         except KeyError:
-            raise EPubException("missing OCF container.xml file")
-        self.opf_path = self.container[OPF.MIMETYPE]
-        if not self.opf_path:
-            raise EPubException("missing OPF package file entry in container")
-        self._opf_cached = self._encryption_meta_cached = None
+            raise EPubException('missing OCF container.xml file')
+        opf_path = self.container.get(OPF.MIMETYPE)
+        if not opf_path:
+            raise EPubException('missing OPF package file entry in container')
+        self.opf_path: str = opf_path
+        self._opf_cached: OPF | None = None
+        self._encryption_meta_cached: Encryption | None = None
 
     @property
-    def opf(self):
+    def opf(self) -> OPF:
         if self._opf_cached is None:
             try:
                 with closing(self.open(self.opf_path)) as f:
                     self._opf_cached = OPF(f, self.root, populate_spine=False)
             except KeyError:
-                raise EPubException("missing OPF package file")
+                raise EPubException('missing OPF package file')
         return self._opf_cached
 
     @property
-    def encryption_meta(self):
+    def encryption_meta(self) -> Encryption:
         if self._encryption_meta_cached is None:
             try:
                 self._encryption_meta_cached = Encryption(self.read_bytes(self.ENCRYPTION_PATH))
@@ -124,39 +135,53 @@ class OCFReader(OCF):
                 self._encryption_meta_cached = Encryption(None)
         return self._encryption_meta_cached
 
-    def read_bytes(self, name):
+    def read_bytes(self, name: str) -> bytes:
         return self.open(name).read()
+
+    def exists(self, path: str) -> bool | None:
+        try:
+            self.open(path).close()
+            return True
+        except OSError:
+            return False
 
 
 class OCFZipReader(OCFReader):
-
-    def __init__(self, stream, mode='r', root=None):
+    def __init__(self, stream: LocalZipFile | ZipFile | IO[bytes], mode: str = 'r', root: str | None = None) -> None:
         if isinstance(stream, (LocalZipFile, ZipFile)):
             self.archive = stream
         else:
             try:
                 self.archive = ZipFile(stream, mode=mode)
             except BadZipfile:
-                raise EPubException("not a ZIP .epub OCF container")
-        self.root = root
-        if self.root is None:
-            name = getattr(stream, 'name', False)
-            if name:
+                raise EPubException('not a ZIP .epub OCF container')
+        if root is not None:
+            self.root = root
+        else:
+            name = getattr(stream, 'name', None)
+            if isinstance(name, str) and name:
                 self.root = os.path.abspath(os.path.dirname(name))
             else:
-                self.root = getcwd()
-        super(OCFZipReader, self).__init__()
+                self.root = os.getcwd()
+        super().__init__()
 
-    def open(self, name):
+    def open(self, name: str) -> IO[bytes]:
         if isinstance(self.archive, LocalZipFile):
             return self.archive.open(name)
         return io.BytesIO(self.archive.read(name))
 
-    def read_bytes(self, name):
+    def read_bytes(self, name: str) -> bytes:
         return self.archive.read(name)
 
+    def exists(self, path: str) -> bool | None:
+        try:
+            self.archive.getinfo(path)
+            return True
+        except KeyError:
+            return False
 
-def get_zip_reader(stream, root=None):
+
+def get_zip_reader(stream: IO[bytes], root: str | None = None) -> OCFZipReader:
     try:
         zf = ZipFile(stream, mode='r')
     except Exception:
@@ -166,20 +191,19 @@ def get_zip_reader(stream, root=None):
 
 
 class OCFDirReader(OCFReader):
-
-    def __init__(self, path):
+    def __init__(self, path: str) -> None:
         self.root = path
-        super(OCFDirReader, self).__init__()
+        super().__init__()
 
-    def open(self, path):
-        return lopen(os.path.join(self.root, path), 'rb')
+    def open(self, name: str) -> IO[bytes]:
+        return open(os.path.join(self.root, name), 'rb')
 
-    def read_bytes(self, path):
-        with self.open(path) as f:
+    def read_bytes(self, name: str) -> bytes:
+        with self.open(name) as f:
             return f.read()
 
 
-def render_cover(cpage, zf, reader=None):
+def render_cover(cpage: str | None, zf: ZipFile | LocalZipFile, reader: OCFReader | None = None) -> bytes | None:
     from calibre.ebooks import render_html_svg_workaround
     from calibre.utils.logging import default_log
 
@@ -194,10 +218,37 @@ def render_cover(cpage, zf, reader=None):
             cpage = os.path.join(tdir, cpage)
             if not os.path.exists(cpage):
                 return
-            return render_html_svg_workaround(cpage, default_log)
+
+            with suppress(Exception):
+                # In the case of manga, the first spine item may be an image
+                # already, so treat it as a raster cover.
+                file_format = what_image_type(cpage)
+                if file_format == 'jpeg':
+                    # Only JPEG is allowed since elsewhere we assume raster covers
+                    # are JPEG.  In principle we could convert other image formats
+                    # but this is already an out-of-spec case that happens to
+                    # arise in books from some stores.
+                    with open(cpage, 'rb') as source:
+                        return source.read()
+
+            return render_html_svg_workaround(cpage, default_log, root=tdir)
 
 
-def get_cover(raster_cover, first_spine_item, reader):
+epub_allow_rendered_cover = True
+
+
+@contextmanager
+def epub_metadata_settings(allow_rendered_cover: bool = epub_allow_rendered_cover) -> Generator[None]:
+    global epub_allow_rendered_cover
+    oarc = epub_allow_rendered_cover
+    epub_allow_rendered_cover = allow_rendered_cover
+    try:
+        yield
+    finally:
+        epub_allow_rendered_cover = oarc
+
+
+def get_cover(raster_cover: str | None, first_spine_item: str | None, reader: OCFZipReader) -> bytes | None:
     zf = reader.archive
 
     if raster_cover:
@@ -208,15 +259,16 @@ def get_cover(raster_cover, first_spine_item, reader):
         except Exception:
             pass
 
-    return render_cover(first_spine_item, zf, reader=reader)
+    if epub_allow_rendered_cover:
+        return render_cover(first_spine_item, zf, reader=reader)
 
 
-def get_metadata(stream, extract_cover=True):
-    """ Return metadata as a :class:`Metadata` object """
+def get_metadata(stream: IO[bytes], extract_cover: bool = True, ftype: str = 'epub') -> Metadata:
+    """Return metadata as a :class:`Metadata` object"""
     stream.seek(0)
     reader = get_zip_reader(stream)
     opfbytes = reader.read_bytes(reader.opf_path)
-    mi, ver, raster_cover, first_spine_item = get_metadata_from_opf(opfbytes)
+    mi, ver, raster_cover, first_spine_item = get_metadata_from_opf(opfbytes, ftype)
     if extract_cover:
         base = posixpath.dirname(reader.opf_path)
         if raster_cover:
@@ -229,62 +281,196 @@ def get_metadata(stream, extract_cover=True):
                 mi.cover_data = ('jpg', cdata)
         except Exception:
             import traceback
+
             traceback.print_exc()
     mi.timestamp = None
     return mi
 
 
-def get_quick_metadata(stream):
+def get_quick_metadata(stream: IO[bytes], ftype: str = 'epub') -> Metadata:
     return get_metadata(stream, False)
 
 
-def serialize_cover_data(new_cdata, cpath):
+def serialize_cover_data(new_cdata: bytes, cpath: str) -> bytes:
     from calibre.utils.img import save_cover_data_to
+
     return save_cover_data_to(new_cdata, data_fmt=os.path.splitext(cpath)[1][1:])
 
 
-def set_metadata(stream, mi, apply_null=False, update_timestamp=False, force_identifiers=False, add_missing_cover=True):
+def set_metadata(
+    stream: IO[bytes],
+    mi: Metadata,
+    apply_null: bool = False,
+    update_timestamp: bool = False,
+    force_identifiers: bool = False,
+    add_missing_cover: bool = True,
+    ftype: str = 'epub',
+) -> None:
     stream.seek(0)
-    reader = get_zip_reader(stream, root=getcwd())
-    new_cdata = None
+    reader = get_zip_reader(stream, root=os.getcwd())
+    new_cdata: bytes | None = None
     try:
         new_cdata = mi.cover_data[1]
         if not new_cdata:
             raise Exception('no cover')
     except Exception:
         try:
-            with lopen(mi.cover, 'rb') as f:
+            assert mi.cover is not None  # failures are ignored below
+            with open(mi.cover, 'rb') as f:
                 new_cdata = f.read()
         except Exception:
             pass
 
     opfbytes, ver, raster_cover = set_metadata_opf(
-        reader.read_bytes(reader.opf_path), mi, cover_prefix=posixpath.dirname(reader.opf_path),
-        cover_data=new_cdata, apply_null=apply_null, update_timestamp=update_timestamp,
-        force_identifiers=force_identifiers, add_missing_cover=add_missing_cover)
+        reader.read_bytes(reader.opf_path),
+        mi,
+        cover_prefix=posixpath.dirname(reader.opf_path),
+        cover_data=new_cdata,
+        apply_null=apply_null,
+        update_timestamp=update_timestamp,
+        force_identifiers=force_identifiers,
+        add_missing_cover=add_missing_cover,
+        ftype=ftype,
+    )
     cpath = None
-    replacements = {}
+    replacements: dict[str, bytes | IO[bytes]] = {}
     if new_cdata and raster_cover:
         try:
-            cpath = posixpath.join(posixpath.dirname(reader.opf_path),
-                    raster_cover)
-            cover_replacable = not reader.encryption_meta.is_encrypted(cpath) and \
-                    os.path.splitext(cpath)[1].lower() in ('.png', '.jpg', '.jpeg')
+            cpath = posixpath.join(posixpath.dirname(reader.opf_path), raster_cover)
+            cover_replacable = not reader.encryption_meta.is_encrypted(cpath) and os.path.splitext(cpath)[1].lower() in ('.png', '.jpg', '.jpeg')
             if cover_replacable:
                 replacements[cpath] = serialize_cover_data(new_cdata, cpath)
         except Exception:
             import traceback
+
             traceback.print_exc()
 
     if isinstance(reader.archive, LocalZipFile):
-        reader.archive.safe_replace(reader.container[OPF.MIMETYPE], opfbytes,
-            extra_replacements=replacements, add_missing=True)
+        reader.archive.safe_replace(reader.container[OPF.MIMETYPE], opfbytes, extra_replacements=replacements, add_missing=True)
     else:
-        safe_replace(stream, reader.container[OPF.MIMETYPE], opfbytes,
-            extra_replacements=replacements, add_missing=True)
-    try:
-        if cpath is not None:
-            replacements[cpath].close()
-            os.remove(replacements[cpath].name)
-    except Exception:
-        pass
+        safe_replace(stream, reader.container[OPF.MIMETYPE], opfbytes, extra_replacements=replacements, add_missing=True)
+
+
+def find_tests() -> unittest.TestSuite:
+    import unittest
+
+    from calibre.utils.zipfile import ZIP_DEFLATED, ZIP_STORED
+
+    opf = b'''<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<dc:identifier id="id">test-id</dc:identifier><dc:title>Recovery test</dc:title>
+<dc:creator>Test Author</dc:creator><dc:language>en</dc:language>
+</metadata><manifest/><spine/></package>'''
+
+    def container_xml(*paths: str) -> bytes:
+        rootfiles = ''.join(f'<rootfile full-path="{path}" media-type="{OPF.MIMETYPE}"/>' for path in paths)
+        return f'<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles>{rootfiles}</rootfiles></container>'.encode()
+
+    def make_epubs(files: dict[str, bytes], compression: int) -> Iterator[tuple[bool, io.BytesIO]]:
+        stream = io.BytesIO()
+        with ZipFile(stream, 'w') as zf:
+            zf.writestr('mimetype', OCF.MIMETYPE.encode(), compression=ZIP_STORED)
+            for name, data in files.items():
+                zf.writestr(name, data, compression=compression)
+            central_directory_offset = stream.tell()
+        raw = stream.getvalue()
+        for damaged in (False, True):
+            # Keep local headers and data intact while removing the central directory.
+            yield damaged, io.BytesIO(raw[:central_directory_offset] if damaged else raw)
+
+    class TestEPUBMetadata(unittest.TestCase):
+        def test_epub_missing_rootfiles(self) -> None:
+            for compression in (ZIP_STORED, ZIP_DEFLATED):
+                for paths in (
+                    ('OPS/content.opf',),
+                    ('missing.opf', 'OPS/content.opf'),
+                    ('OPS/content.opf', 'missing.opf'),
+                ):
+                    files = {OCF.CONTAINER_PATH: container_xml(*paths), 'OPS/content.opf': opf}
+                    for damaged, stream in make_epubs(files, compression):
+                        with self.subTest(compression=compression, paths=paths, damaged=damaged):
+                            reader = get_zip_reader(stream)
+                            self.assertIsInstance(reader.archive, LocalZipFile if damaged else ZipFile)
+                            self.assertEqual(reader.opf_path, 'OPS/content.opf')
+                            mi = get_metadata(stream, extract_cover=False)
+                            self.assertEqual(mi.title, 'Recovery test')
+                            self.assertEqual(mi.authors, ['Test Author'])
+
+        def test_epub_missing_container_entries(self) -> None:
+            for label, files, msg in (
+                ('no container', {'OPS/content.opf': opf}, 'missing OCF container.xml file'),
+                ('no opf', {OCF.CONTAINER_PATH: container_xml('missing.opf')}, 'missing OPF package file entry in container'),
+            ):
+                for damaged, stream in make_epubs(files, ZIP_DEFLATED):
+                    with self.subTest(label, damaged=damaged), self.assertRaisesRegex(EPubException, msg):
+                        get_zip_reader(stream)
+
+        def test_epub_data_descriptors_without_central_directory(self) -> None:
+            from struct import pack
+            from zlib import compressobj, crc32
+
+            from calibre.utils.localunzip import DATA_DESCRIPTOR_SIG, HEADER_SIG, local_header_fmt
+
+            def entry(name: str, data: bytes, signed: bool) -> bytes:
+                # A deflated entry whose sizes and CRC are only in the data
+                # descriptor after it, which may or may not have its optional signature
+                c = compressobj(wbits=-15)
+                cdata = c.compress(data) + c.flush()
+                fname = name.encode()
+                header = pack(local_header_fmt, HEADER_SIG, 20, 1 << 3, ZIP_DEFLATED, 0, 0, 0, 0, 0, len(fname), 0)
+                desc = (DATA_DESCRIPTOR_SIG if signed else b'') + pack('<LLL', crc32(data), len(cdata), len(data))
+                return header + fname + cdata + desc
+
+            mimetype = OCF.MIMETYPE.encode()
+            mimetype_entry = pack(local_header_fmt, HEADER_SIG, 20, 0, ZIP_STORED, 0, 0, crc32(mimetype), len(mimetype), len(mimetype), 8, 0)
+            mimetype_entry += b'mimetype' + mimetype
+            for signed in (False, True):
+                with self.subTest(signed=signed):
+                    raw = mimetype_entry + entry(OCF.CONTAINER_PATH, container_xml('OPS/content.opf'), signed) + entry('OPS/content.opf', opf, signed)
+                    stream = io.BytesIO(raw)
+                    reader = get_zip_reader(stream)
+                    self.assertIsInstance(reader.archive, LocalZipFile)
+                    self.assertEqual(reader.archive.read('OPS/content.opf'), opf)
+                    mi = get_metadata(stream, extract_cover=False)
+                    self.assertEqual(mi.title, 'Recovery test')
+
+        def test_html_cover_images_confined_to_root(self) -> None:
+            from calibre.ebooks import extract_calibre_cover, extract_cover_from_embedded_svg
+            from calibre.ptempfile import TemporaryDirectory
+            from calibre.utils.logging import default_log
+
+            png = b'\x89PNG\r\n\x1a\n' + b'\0' * 32
+            with TemporaryDirectory() as tdir:
+                root = os.path.join(tdir, 'book')
+                text_dir = os.path.join(root, 'text')
+                os.makedirs(os.path.join(root, 'images'))
+                os.mkdir(text_dir)
+                for path in (os.path.join(tdir, 'secret.png'), os.path.join(root, 'images', 'cover.png')):
+                    with open(path, 'wb') as f:
+                        f.write(png)
+                outside = os.path.join(tdir, 'secret.png').replace(os.sep, '/')
+
+                def html(src: str) -> str:
+                    return f'<html><body><img src="{src}" alt="cover"/></body></html>'
+
+                def svg(src: str) -> str:
+                    return (
+                        '<html xmlns="http://www.w3.org/1999/xhtml"><body><svg xmlns="http://www.w3.org/2000/svg"'
+                        f' xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="{src}"/></svg></body></html>'
+                    )
+
+                for func, make in ((extract_calibre_cover, html), (extract_cover_from_embedded_svg, svg)):
+                    with self.subTest(func=func.__name__):
+                        self.assertEqual(func(make('../images/cover.png'), text_dir, default_log, root=root), png)
+                        self.assertIsNone(func(make('../../secret.png'), text_dir, default_log, root=root))
+                        self.assertIsNone(func(make(outside), text_dir, default_log, root=root))
+                        self.assertIsNone(func(make('../images/cover.png'), text_dir, default_log))
+
+                # The text alternative of the image in calibre generated SVG
+                # cover pages does not prevent extracting the cover
+                titled = svg('../images/cover.png').replace('<image ', '<title>A Book</title><desc>Cover</desc><image ')
+                self.assertEqual(extract_cover_from_embedded_svg(titled, text_dir, default_log, root=root), png)
+                extra = svg('../images/cover.png').replace('<image ', '<rect width="1"/><image ')
+                self.assertIsNone(extract_cover_from_embedded_svg(extra, text_dir, default_log, root=root))
+
+    return unittest.defaultTestLoader.loadTestsFromTestCase(TestEPUBMetadata)

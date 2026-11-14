@@ -1,59 +1,109 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2017, Kovid Goyal <kovid at kovidgoyal.net>
-
 
 import json
 import os
 import sys
 from textwrap import TextWrapper
+from typing import TYPE_CHECKING, cast
 
 from calibre.db.cli.utils import str_width
 from calibre.ebooks.metadata import authors_to_string
 from calibre.utils.date import isoformat
-from polyglot.builtins import as_bytes, iteritems, map, unicode_type
+from calibre.utils.localization import _
+from polyglot.builtins import as_bytes
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Iterator, Sequence
+    from optparse import Values
+    from typing import TypedDict
+
+    from calibre.db.cache import Cache
+    from calibre.db.cli.main import DBContext
+    from calibre.srv.changes import ChangeEvent
+    from calibre.utils.config import OptionParser
+
+    class ListResult(TypedDict):
+        book_ids: list[int]
+        data: dict[str, dict[int, object]]
+        metadata: dict[str, dict[str, object]]
+        fields: Sequence[str]
+
 
 readonly = True
 version = 0  # change this if you change signature of implementation()
 FIELDS = {
-    'title', 'authors', 'author_sort', 'publisher', 'rating', 'timestamp', 'size',
-    'tags', 'comments', 'series', 'series_index', 'formats', 'isbn', 'uuid',
-    'pubdate', 'cover', 'last_modified', 'identifiers', 'languages'
+    'title',
+    'authors',
+    'author_sort',
+    'publisher',
+    'rating',
+    'timestamp',
+    'size',
+    'tags',
+    'comments',
+    'series',
+    'series_index',
+    'formats',
+    'isbn',
+    'uuid',
+    'pubdate',
+    'cover',
+    'last_modified',
+    'identifiers',
+    'languages',
+    'template',
 }
 
 
-def formats(db, book_id):
+def formats(db: Cache, book_id: int) -> Iterator[str]:
     for fmt in db.formats(book_id, verify_formats=False):
         path = db.format_abspath(book_id, fmt)
         if path:
             yield path.replace(os.sep, '/')
 
 
-def cover(db, book_id):
+def cover(db: Cache, book_id: int) -> str | None:
     return db.format_abspath(book_id, '__COVER_INTERNAL__')
 
 
 def implementation(
-    db, notify_changes, fields, sort_by, ascending, search_text, limit
-):
+    db: Cache,
+    notify_changes: Callable[[ChangeEvent], None] | None,
+    fields: Sequence[str],
+    sort_by: str | None,
+    ascending: bool,
+    search_text: str | None,
+    limit: int,
+    template: str | None = None,
+) -> str | ListResult:
     is_remote = notify_changes is not None
+    if is_remote:
+        # templates allow arbitrary code execution via python templates. We
+        # could possibly disallow only python templates but that is more work
+        # than I feel like doing for this, so simply ignore templates on remote
+        # connections.
+        template = None
+    formatter = None
     with db.safe_read_lock:
         fm = db.field_metadata
         afields = set(FIELDS) | {'id'}
         for k in fm.custom_field_keys():
             afields.add('*' + k[1:])
         if 'all' in fields:
-            fields = sorted(afields)
+            fields = sorted(afields if template else (afields - {'template'}))
         sort_by = sort_by or 'id'
-        if sort_by not in afields:
-            return 'Unknown sort field: {}'.format(sort_by)
+        sort_fields = sort_by.split(',')
+        for sf in sort_fields:
+            if sf not in afields:
+                return f'Unknown sort field: {sf}'
+        sort_spec = [((sf if not sf.startswith('*') else '#' + sf[1:]), ascending) for sf in sort_fields]
         if not set(fields).issubset(afields):
             return 'Unknown fields: {}'.format(', '.join(set(fields) - afields))
         if search_text:
-            book_ids = db.multisort([(sort_by, ascending)],
-                                    ids_to_sort=db.search(search_text))
+            book_ids = db.multisort(sort_spec, ids_to_sort=db.search(search_text, allow_templates=not is_remote))
         else:
-            book_ids = db.multisort([(sort_by, ascending)])
+            book_ids = db.multisort(sort_spec)
         if limit > -1:
             book_ids = book_ids[:limit]
         data = {}
@@ -63,7 +113,24 @@ def implementation(
                 continue
             if field == 'isbn':
                 x = db.all_field_for('identifiers', book_ids, default_value={})
-                data[field] = {k: v.get('isbn') or '' for k, v in iteritems(x)}
+                data[field] = {k: v.get('isbn') or '' for k, v in x.items()}
+                continue
+            if field == 'template':
+                from calibre.utils.formatter import TEMPLATE_ERROR
+
+                if not template:
+                    data['template'] = _('Template not allowed') if is_remote else _('No template specified')
+                    continue
+                vals = {}
+                global_vars = {}
+                if formatter is None:
+                    from calibre.ebooks.metadata.book.formatter import SafeFormat
+
+                    formatter = SafeFormat()
+                for book_id in book_ids:
+                    mi = db.get_proxy_metadata(book_id)
+                    vals[book_id] = formatter.safe_format(template, {}, TEMPLATE_ERROR, mi, global_vars=global_vars)
+                data['template'] = vals
                 continue
             field = field.replace('*', '#')
             metadata[field] = fm[field]
@@ -75,82 +142,88 @@ def implementation(
                     data[field] = {k: cover(db, k) for k in book_ids}
                     continue
             data[field] = db.all_field_for(field, book_ids)
-    return {'book_ids': book_ids, "data": data, 'metadata': metadata, 'fields':fields}
+    return {'book_ids': book_ids, 'data': data, 'metadata': metadata, 'fields': fields}  # ty: ignore[invalid-argument-type, invalid-explicit-return]
 
 
-def stringify(data, metadata, for_machine):
-    for field, m in iteritems(metadata):
+def stringify(data: dict[str, dict[int, object]], metadata: dict[str, dict[str, object]], for_machine: bool) -> None:
+    for field, m in metadata.items():
         if field == 'authors':
-            data[field] = {
-                k: authors_to_string(v)
-                for k, v in iteritems(data[field])
-            }
+            data[field] = {k: authors_to_string(cast('Iterable[str]', v)) for k, v in data[field].items()}  # authors values are tuples of str
         else:
             dt = m['datatype']
             if dt == 'datetime':
-                data[field] = {
-                    k: isoformat(v, as_utc=for_machine) if v else 'None'
-                    for k, v in iteritems(data[field])
-                }
+                data[field] = {k: isoformat(v, as_utc=for_machine) if v else 'None' for k, v in data[field].items()}  # ty: ignore[invalid-argument-type]
             elif not for_machine:
                 ism = m['is_multiple']
                 if ism:
-                    data[field] = {
-                        k: ism['list_to_ui'].join(v)
-                        for k, v in iteritems(data[field])
-                    }
-                    if field == 'formats':
-                        data[field] = {
-                            k: '[' + v + ']'
-                            for k, v in iteritems(data[field])
-                        }
+                    if field == 'identifiers':
+                        data[field] = {k: ism['list_to_ui'].join(f'{key}:{val}' for key, val in v.items()) for k, v in data[field].items()}  # ty: ignore[not-subscriptable, missing-attribute]
+                    else:
+                        data[field] = {k: ism['list_to_ui'].join(v) for k, v in data[field].items()}  # ty: ignore[not-subscriptable]
+                        if field == 'formats':
+                            data[field] = {k: '[' + v + ']' for k, v in data[field].items()}  # ty: ignore[unsupported-operator]
 
 
-def as_machine_data(book_ids, data, metadata):
+def as_machine_data(book_ids: Iterable[int], data: dict[str, dict[int, object]], metadata: dict[str, dict[str, object]]) -> Iterator[dict[str, object]]:
     for book_id in book_ids:
         ans = {'id': book_id}
-        for field, val_map in iteritems(data):
+        for field, val_map in data.items():
             val = val_map.get(book_id)
             if val is not None:
                 ans[field.replace('#', '*')] = val
         yield ans
 
 
-def prepare_output_table(fields, book_ids, data, metadata):
+def prepare_output_table(
+    fields: Iterable[str], book_ids: Iterable[int], data: dict[str, dict[int, object]], metadata: dict[str, dict[str, object]]
+) -> list[list[str]]:
     ans = []
     for book_id in book_ids:
         row = []
         ans.append(row)
         for field in fields:
             if field == 'id':
-                row.append(unicode_type(book_id))
+                row.append(str(book_id))
                 continue
             val = data.get(field.replace('*', '#'), {}).get(book_id)
-            row.append(unicode_type(val).replace('\n', ' '))
+            row.append(str(val).replace('\n', ' '))
     return ans
 
 
 def do_list(
-    dbctx,
-    fields,
-    afields,
-    sort_by,
-    ascending,
-    search_text,
-    line_width,
-    separator,
-    prefix,
-    limit,
-    for_machine=False
-):
+    dbctx: DBContext,
+    fields: list[str],
+    afields: set[str],
+    sort_by: str | None,
+    ascending: bool,
+    search_text: str | None,
+    line_width: int,
+    separator: str,
+    prefix: str | None,
+    limit: int,
+    template: str | None,
+    template_file: str | None,
+    template_title: str,
+    for_machine: bool = False,
+) -> None:
     if sort_by is None:
         ascending = True
-    ans = dbctx.run('list', fields, sort_by, ascending, search_text, limit)
+    if dbctx.is_remote and (template or template_file):
+        raise SystemExit(_('The use of templates is disallowed when connecting to remote servers for security reasons'))
+    if 'template' in (f.strip() for f in fields):
+        if template_file:
+            with open(template_file, 'rb') as f:
+                template = f.read().decode('utf-8')
+        if not template:
+            raise SystemExit(_('You must provide a template'))
+        ans = cast('str | ListResult', dbctx.run('list', fields, sort_by, ascending, search_text, limit, template))
+    else:
+        ans = cast('str | ListResult', dbctx.run('list', fields, sort_by, ascending, search_text, limit))
     try:
-        book_ids, data, metadata = ans['book_ids'], ans['data'], ans['metadata']
+        book_ids, data, metadata = ans['book_ids'], ans['data'], ans['metadata']  # ty: ignore[invalid-argument-type]
     except TypeError:
         raise SystemExit(ans)
-    fields = list(ans['fields'])
+    fields = list(ans['fields'])  # ty: ignore[invalid-argument-type]
     try:
         fields.remove('id')
     except ValueError:
@@ -158,19 +231,19 @@ def do_list(
     fields = ['id'] + fields
     stringify(data, metadata, for_machine)
     if for_machine:
-        raw = json.dumps(
-            list(as_machine_data(book_ids, data, metadata)),
-            indent=2,
-            sort_keys=True
-        )
+        raw = json.dumps(list(as_machine_data(book_ids, data, metadata)), indent=2, sort_keys=True)
         if not isinstance(raw, bytes):
             raw = raw.encode('utf-8')
-        getattr(sys.stdout, 'buffer', sys.stdout).write(raw)
+        buf = getattr(sys.stdout, 'buffer', None)
+        if buf is not None:
+            buf.write(raw)
+        else:
+            sys.stdout.write(raw.decode('utf-8'))
         return
     from calibre.utils.terminal import ColoredStream, geometry
 
     output_table = prepare_output_table(fields, book_ids, data, metadata)
-    widths = list(map(lambda x: 0, fields))
+    widths = [0 for x in fields]
 
     for record in output_table:
         for j in range(len(fields)):
@@ -180,15 +253,13 @@ def do_list(
     if not screen_width:
         screen_width = 80
     field_width = screen_width // len(fields)
-    base_widths = list(map(lambda x: min(x + 1, field_width), widths))
+    base_widths = [min(x + 1, field_width) for x in widths]
 
     while sum(base_widths) < screen_width:
         adjusted = False
         for i in range(len(widths)):
             if base_widths[i] < widths[i]:
-                base_widths[i] += min(
-                    screen_width - sum(base_widths), widths[i] - base_widths[i]
-                )
+                base_widths[i] += min(screen_width - sum(base_widths), widths[i] - base_widths[i])
                 adjusted = True
                 break
         if not adjusted:
@@ -196,32 +267,40 @@ def do_list(
 
     widths = list(base_widths)
     titles = map(
-        lambda x, y: '%-*s%s' % (x - len(separator), y, separator), widths,
-        fields
+        lambda x, y: '%-*s%s' % (x - len(separator), y, separator),  # ruff: ignore[printf-string-formatting]
+        widths,
+        [template_title if v == 'template' else v for v in fields],
     )
     with ColoredStream(sys.stdout, fg='green'):
         print(''.join(titles), flush=True)
-    stdout = getattr(sys.stdout, 'buffer', sys.stdout)
+    stdout_buf = getattr(sys.stdout, 'buffer', None)
     linesep = as_bytes(os.linesep)
 
     wrappers = [TextWrapper(x - 1).wrap if x > 1 else lambda y: y for x in widths]
 
     for record in output_table:
-        text = [
-            wrappers[i](record[i]) for i, field in enumerate(fields)
-        ]
+        text = [wrappers[i](record[i]) for i in range(len(fields))]
         lines = max(map(len, text))
         for l in range(lines):
-            for i, field in enumerate(text):
+            for i in range(len(text)):
                 ft = text[i][l] if l < len(text[i]) else ''
-                stdout.write(ft.encode('utf-8'))
+                if stdout_buf is not None:
+                    stdout_buf.write(ft.encode('utf-8'))
+                else:
+                    sys.stdout.write(ft)
                 if i < len(text) - 1:
-                    filler = ('%*s' % (widths[i] - str_width(ft) - 1, ''))
-                    stdout.write((filler + separator).encode('utf-8'))
-            stdout.write(linesep)
+                    filler = ' ' * (widths[i] - str_width(ft) - 1)
+                    if stdout_buf is not None:
+                        stdout_buf.write((filler + separator).encode('utf-8'))
+                    else:
+                        sys.stdout.write(filler + separator)
+            if stdout_buf is not None:
+                stdout_buf.write(linesep)
+            else:
+                sys.stdout.write(linesep.decode('utf-8'))
 
 
-def option_parser(get_parser, args):
+def option_parser(get_parser: Callable[[str], OptionParser], args: Sequence[str]) -> OptionParser:
     parser = get_parser(
         _(
             '''\
@@ -243,72 +322,76 @@ List the books available in the calibre database.
             ' In addition to the builtin fields above, custom fields are'
             ' also available as *field_name, for example, for a custom field'
             ' #rating, use the name: *rating'
-        ) % ', '.join(sorted(FIELDS))
+        )
+        % ', '.join(sorted(FIELDS)),
     )
     parser.add_option(
         '--sort-by',
         default=None,
         help=_(
-            'The field by which to sort the results.\nAvailable fields: {0}\nDefault: {1}'
-        ).format(', '.join(sorted(FIELDS)), 'id')
+            'The field by which to sort the results. You can specify multiple fields by'
+            ' separating them with commas.\nAvailable fields: {0}\nDefault: {1}.'
+            ' In addition to the builtin fields above, custom fields are'
+            ' also available as *field_name, for example, for a custom field'
+            ' #rating, use the name: *rating'
+        ).format(', '.join(sorted(FIELDS)), 'id'),
     )
-    parser.add_option(
-        '--ascending',
-        default=False,
-        action='store_true',
-        help=_('Sort results in ascending order')
-    )
+    parser.add_option('--ascending', default=False, action='store_true', help=_('Sort results in ascending order'))
     parser.add_option(
         '-s',
         '--search',
         default=None,
         help=_(
-            'Filter the results by the search query. For the format of the search query,'
-            ' please see the search related documentation in the User Manual. Default is to do no filtering.'
-        )
+            'Filter the results by the search query. For the format of the search '
+            'query, please see the search related documentation in the User '
+            'Manual. Default is to do no filtering.'
+        ),
     )
     parser.add_option(
         '-w',
         '--line-width',
         default=-1,
         type=int,
-        help=_(
-            'The maximum width of a single line in the output. Defaults to detecting screen size.'
-        )
+        help=_('The maximum width of a single line in the output. Defaults to detecting screen size.'),
     )
-    parser.add_option(
-        '--separator',
-        default=' ',
-        help=_('The string used to separate fields. Default is a space.')
-    )
+    parser.add_option('--separator', default=' ', help=_('The string used to separate fields. Default is a space.'))
     parser.add_option(
         '--prefix',
         default=None,
-        help=_(
-            'The prefix for all file paths. Default is the absolute path to the library folder.'
-        )
+        help=_('The prefix for all file paths. Default is the absolute path to the library folder.'),
     )
-    parser.add_option(
-        '--limit',
-        default=-1,
-        type=int,
-        help=_('The maximum number of results to display. Default: all')
-    )
+    parser.add_option('--limit', default=-1, type=int, help=_('The maximum number of results to display. Default: all'))
     parser.add_option(
         '--for-machine',
         default=False,
         action='store_true',
-        help=_(
-            'Generate output in JSON format, which is more suitable for machine parsing. Causes the line width and separator options to be ignored.'
-        )
+        help=_('Generate output in JSON format, which is more suitable for machine parsing. Causes the line width and separator options to be ignored.'),
+    )
+    parser.add_option(
+        '--template',
+        default=None,
+        help=_('The template to run if "{}" is in the field list. Note that templates are ignored while connecting to a calibre server. Default: None').format(
+            'template'
+        ),
+    )
+    parser.add_option(
+        '--template_file',
+        '-t',
+        default=None,
+        help=_('Path to a file containing the template to run if "{}" is in the field list. Default: None').format('template'),
+    )
+    parser.add_option(
+        '--template_heading',
+        default='template',
+        help=_('Heading for the template column. Default: %default. This option is ignored if the option {} is set').format('--for-machine'),
     )
     return parser
 
 
-def main(opts, args, dbctx):
+def main(opts: Values, args: list[str], dbctx: DBContext) -> int:
     afields = set(FIELDS) | {'id'}
     if opts.fields.strip():
-        fields = [unicode_type(f.strip().lower()) for f in opts.fields.split(',')]
+        fields = [str(f.strip().lower()) for f in opts.fields.split(',')]
     else:
         fields = []
 
@@ -323,6 +406,9 @@ def main(opts, args, dbctx):
         opts.separator,
         opts.prefix,
         opts.limit,
-        for_machine=opts.for_machine
+        opts.template,
+        opts.template_file,
+        opts.template_heading,
+        for_machine=opts.for_machine,
     )
     return 0

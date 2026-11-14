@@ -1,50 +1,123 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2011, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+from calibre.utils.localization import _
 
 DEBUG_DIALOG = False
 
 # Imports {{{
-import os, time
-from threading import Thread, Event
-from operator import attrgetter
+import os
+import time
 from io import BytesIO
+from operator import attrgetter
+from queue import Empty, Queue
+from threading import Event, Thread
 
-from PyQt5.Qt import (
-    QStyledItemDelegate, QTextDocument, QRectF, QIcon, Qt, QApplication,
-    QDialog, QVBoxLayout, QLabel, QDialogButtonBox, QStyle, QStackedWidget,
-    QWidget, QTableView, QGridLayout, QPalette, QTimer, pyqtSignal,
-    QAbstractTableModel, QSize, QListView, QPixmap, QModelIndex,
-    QAbstractListModel, QRect, QTextBrowser, QStringListModel, QMenu, QItemSelectionModel,
-    QCursor, QHBoxLayout, QPushButton, QSizePolicy, QSplitter, QAbstractItemView)
+from qt.core import (
+    QAbstractItemView,
+    QAbstractListModel,
+    QAbstractTableModel,
+    QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QGridLayout,
+    QHBoxLayout,
+    QIcon,
+    QItemSelectionModel,
+    QLabel,
+    QListView,
+    QMenu,
+    QModelIndex,
+    QObject,
+    QPalette,
+    QPixmap,
+    QPushButton,
+    QRect,
+    QRectF,
+    QSize,
+    QSizePolicy,
+    QSplitter,
+    QStackedWidget,
+    QStringListModel,
+    QStyle,
+    QStyledItemDelegate,
+    Qt,
+    QTableView,
+    QTextBrowser,
+    QTextDocument,
+    QTimer,
+    QVBoxLayout,
+    QWidget,
+    pyqtSignal,
+)
 
+from calibre import force_unicode
 from calibre.customize.ui import metadata_plugins
+from calibre.db.constants import COVER_FILE_NAME, DATA_DIR_NAME
 from calibre.ebooks.metadata import authors_to_string, rating_to_stars
-from calibre.utils.logging import GUILog as Log
-from calibre.ebooks.metadata.sources.identify import urls_from_identifiers
 from calibre.ebooks.metadata.book.base import Metadata
 from calibre.ebooks.metadata.opf2 import OPF
-from calibre.gui2 import error_dialog, rating_font, gprefs
+from calibre.ebooks.metadata.sources.identify import urls_from_identifiers
+from calibre.gui2 import choose_save_file, error_dialog, gprefs, qapplication_or_fail, rating_font
 from calibre.gui2.progress_indicator import SpinAnimator
 from calibre.gui2.widgets2 import HTMLDisplay
-from calibre.utils.date import (utcnow, fromordinal, format_date,
-        UNDEFINED_DATE, as_utc)
 from calibre.library.comments import comments_to_html
-from calibre import force_unicode
-from calibre.utils.ipc.simple_worker import fork_job, WorkerError
 from calibre.ptempfile import TemporaryDirectory
-from polyglot.builtins import iteritems, itervalues, unicode_type, range, getcwd
-from polyglot.queue import Queue, Empty
+from calibre.utils.date import UNDEFINED_DATE, as_utc, format_date, fromordinal, utcnow
+from calibre.utils.img import image_to_data, save_image
+from calibre.utils.ipc.simple_worker import WorkerError, fork_job
+from calibre.utils.logging import GUILog as Log
+from calibre.utils.resources import get_image_path as I
+
+
+class BrowserFailureNotifier(QObject):
+    """Tells the user, once per session, when the browser used by some
+    metadata sources cannot be used, for example because installing it failed.
+    The sources manage without it, so this is not worth interrupting the user
+    over, the details are in the logs of the downloads."""
+
+    failed = pyqtSignal(str)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.reported = False
+        self.failed.connect(self.report, type=Qt.ConnectionType.QueuedConnection)
+
+    def report(self, message: str) -> None:
+        from calibre.gui2.ui import get_gui
+
+        if self.reported or (gui := get_gui()) is None:
+            return
+        self.reported = True
+        # The first paragraph is the explanation, the rest is the traceback
+        summary = message.strip().partition('\n\n')[0]
+        gui.status_bar.show_message(_('Some metadata sources cannot be used. {}').format(summary), 30_000)
+
+
+browser_failure_notifier: BrowserFailureNotifier | None = None
+
+
+def watch_for_browser_failures() -> None:
+    """Have failures to launch the browser used by metadata sources reported to
+    the user. Must be called in the GUI thread, before metadata_job_env()."""
+    global browser_failure_notifier
+    if browser_failure_notifier is None:
+        browser_failure_notifier = BrowserFailureNotifier(qapplication_or_fail())
+
+
+def metadata_job_env() -> dict[str, str]:
+    from calibre.web.automate.metadata import env_for_metadata_jobs, session_worker
+
+    if (notifier := browser_failure_notifier) is not None:
+        session_worker.on_launch_failure = notifier.failed.emit
+    return env_for_metadata_jobs()
+
+
 # }}}
 
 
 class RichTextDelegate(QStyledItemDelegate):  # {{{
-
-    def __init__(self, parent=None, max_width=160):
+    def __init__(self, parent=None, max_width=160) -> None:
         QStyledItemDelegate.__init__(self, parent)
         self.max_width = max_width
         self.dummy_model = QStringListModel([' '], self)
@@ -54,11 +127,10 @@ class RichTextDelegate(QStyledItemDelegate):  # {{{
         doc = QTextDocument()
         if option is not None and option.state & QStyle.StateFlag.State_Selected:
             p = option.palette
-            group = (QPalette.ColorGroup.Active if option.state & QStyle.StateFlag.State_Active else
-                    QPalette.ColorGroup.Inactive)
+            group = QPalette.ColorGroup.Active if option.state & QStyle.StateFlag.State_Active else QPalette.ColorGroup.Inactive
             c = p.color(group, QPalette.ColorRole.HighlightedText)
-            c = 'rgb(%d, %d, %d)'%c.getRgb()[:3]
-            doc.setDefaultStyleSheet(' * { color: %s }'%c)
+            c = 'rgb({}, {}, {})'.format(*c.getRgb()[:3])
+            doc.setDefaultStyleSheet(f' * {{ color: {c} }}')
         doc.setHtml(index.data() or '')
         return doc
 
@@ -67,41 +139,43 @@ class RichTextDelegate(QStyledItemDelegate):  # {{{
         ans = doc.size().toSize()
         if ans.width() > self.max_width - 10:
             ans.setWidth(self.max_width)
-        ans.setHeight(ans.height()+10)
+        ans.setHeight(ans.height() + 10)
         return ans
 
-    def paint(self, painter, option, index):
+    def paint(self, painter, option, index) -> None:
         QStyledItemDelegate.paint(self, painter, option, self.dummy_index)
         painter.save()
         painter.setClipRect(QRectF(option.rect))
         painter.translate(option.rect.topLeft())
         self.to_doc(index, option).drawContents(painter)
         painter.restore()
+
+
 # }}}
 
 
 class CoverDelegate(QStyledItemDelegate):  # {{{
-
     ICON_SIZE = 150, 200
 
     needs_redraw = pyqtSignal()
 
-    def __init__(self, parent):
+    def __init__(self, parent) -> None:
         QStyledItemDelegate.__init__(self, parent)
         self.animator = SpinAnimator(self)
         self.animator.updated.connect(self.needs_redraw)
         self.color = parent.palette().color(QPalette.ColorRole.WindowText)
         self.spinner_width = 64
 
-    def start_animation(self):
+    def start_animation(self) -> None:
         self.animator.start()
 
-    def stop_animation(self):
+    def stop_animation(self) -> None:
         self.animator.stop()
 
-    def paint(self, painter, option, index):
+    def paint(self, painter, option, index) -> None:
         QStyledItemDelegate.paint(self, painter, option, index)
         style = QApplication.style()
+        assert style is not None
         waiting = self.animator.is_running() and bool(index.data(Qt.ItemDataRole.UserRole))
         if waiting:
             rect = QRect(0, 0, self.spinner_width, self.spinner_width)
@@ -109,24 +183,26 @@ class CoverDelegate(QStyledItemDelegate):  # {{{
             self.animator.draw(painter, rect, self.color)
         else:
             # Ensure the cover is rendered over any selection rect
-            style.drawItemPixmap(painter, option.rect, Qt.AlignmentFlag.AlignTop|Qt.AlignmentFlag.AlignHCenter,
-                QPixmap(index.data(Qt.ItemDataRole.DecorationRole)))
+            style.drawItemPixmap(
+                painter,
+                option.rect,
+                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter,
+                QPixmap(index.data(Qt.ItemDataRole.DecorationRole)),
+            )
+
 
 # }}}
 
 
 class ResultsModel(QAbstractTableModel):  # {{{
-
-    COLUMNS = (
-            '#', _('Title'), _('Published'), _('Has cover'), _('Has summary')
-            )
+    COLUMNS = ('#', _('Title'), _('Published'), _('Has cover'), _('Has summary'))
     HTML_COLS = (1, 2)
     ICON_COLS = (3, 4)
 
-    def __init__(self, results, parent=None):
+    def __init__(self, results, parent=None) -> None:
         QAbstractTableModel.__init__(self, parent)
         self.results = results
-        self.yes_icon = (QIcon(I('ok.png')))
+        self.yes_icon = QIcon.ic('ok.png')
 
     def rowCount(self, parent=None):
         return len(self.results)
@@ -134,36 +210,36 @@ class ResultsModel(QAbstractTableModel):  # {{{
     def columnCount(self, parent=None):
         return len(self.COLUMNS)
 
-    def headerData(self, section, orientation, role):
+    def headerData(self, section, orientation, role=...):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             try:
-                return (self.COLUMNS[section])
-            except:
+                return self.COLUMNS[section]
+            except Exception:
                 return None
         return None
 
     def data_as_text(self, book, col):
         if col == 0:
-            return unicode_type(book.gui_rank+1)
+            return str(book.gui_rank + 1)
         if col == 1:
-            t = book.title if book.title else _('Unknown')
+            t = book.title or _('Unknown')
             a = authors_to_string(book.authors) if book.authors else ''
-            return '<b>%s</b><br><i>%s</i>' % (t, a)
+            return f'<b>{t}</b><br><i>{a}</i>'
         if col == 2:
             d = format_date(book.pubdate, 'yyyy') if book.pubdate else _('Unknown')
-            p = book.publisher if book.publisher else ''
-            return '<b>%s</b><br><i>%s</i>' % (d, p)
+            p = book.publisher or ''
+            return f'<b>{d}</b><br><i>{p}</i>'
 
-    def data(self, index, role):
+    def data(self, index, role=...):
         row, col = index.row(), index.column()
         try:
             book = self.results[row]
-        except:
+        except Exception:
             return None
         if role == Qt.ItemDataRole.DisplayRole and col not in self.ICON_COLS:
             res = self.data_as_text(book, col)
             if res:
-                return (res)
+                return res
             return None
         elif role == Qt.ItemDataRole.DecorationRole and col in self.ICON_COLS:
             if col == 3 and getattr(book, 'has_cached_cover_url', False):
@@ -173,45 +249,54 @@ class ResultsModel(QAbstractTableModel):  # {{{
         elif role == Qt.ItemDataRole.UserRole:
             return book
         elif role == Qt.ItemDataRole.ToolTipRole and col == 3:
-            return (
-                _('The "has cover" indication is not fully\n'
-                    'reliable. Sometimes results marked as not\n'
-                    'having a cover will find a cover in the download\n'
-                    'cover stage, and vice versa.'))
+            return _(
+                'The "has cover" indication is not fully\n'
+                'reliable. Sometimes results marked as not\n'
+                'having a cover will find a cover in the download\n'
+                'cover stage, and vice versa.'
+            )
 
         return None
 
-    def sort(self, col, order=Qt.SortOrder.AscendingOrder):
-        key = lambda x: x
-        if col == 0:
+    def sort(self, column, order=Qt.SortOrder.AscendingOrder) -> None:
+        if column == 0:
             key = attrgetter('gui_rank')
-        elif col == 1:
+        elif column == 1:
             key = attrgetter('title')
-        elif col == 2:
+        elif column == 2:
+
             def dategetter(x):
                 x = getattr(x, 'pubdate', None)
                 if x is None:
                     x = UNDEFINED_DATE
                 return as_utc(x)
+
             key = dategetter
-        elif col == 3:
+        elif column == 3:
             key = attrgetter('has_cached_cover_url')
-        elif key == 4:
-            key = lambda x: bool(x.comments)
+        elif column == 4:
+
+            def key(x):
+                return bool(x.comments)
+
+        else:
+
+            def key(x):
+                return x
 
         self.beginResetModel()
-        self.results.sort(key=key, reverse=order==Qt.SortOrder.AscendingOrder)
+        self.results.sort(key=key, reverse=order == Qt.SortOrder.AscendingOrder)
         self.endResetModel()
+
 
 # }}}
 
 
 class ResultsView(QTableView):  # {{{
-
     show_details_signal = pyqtSignal(object)
     book_selected = pyqtSignal(object)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QTableView.__init__(self, parent)
         self.rt_delegate = RichTextDelegate(self)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -222,7 +307,7 @@ class ResultsView(QTableView):  # {{{
         self.doubleClicked.connect(self.select_index)
         self.setSortingEnabled(True)
 
-    def show_results(self, results):
+    def show_results(self, results) -> None:
         self._model = ResultsModel(results, self)
         self.setModel(self._model)
         for i in self._model.HTML_COLS:
@@ -230,18 +315,21 @@ class ResultsView(QTableView):  # {{{
         self.resizeRowsToContents()
         self.resizeColumnsToContents()
         self.setFocus(Qt.FocusReason.OtherFocusReason)
-        idx = self.model().index(0, 0)
-        if idx.isValid() and self.model().rowCount() > 0:
+        model = self.model()
+        assert model is not None
+        idx = model.index(0, 0)
+        if idx.isValid() and model.rowCount() > 0:
             self.show_details(idx)
             sm = self.selectionModel()
-            sm.select(idx, QItemSelectionModel.SelectionFlag.ClearAndSelect|QItemSelectionModel.SelectionFlag.Rows)
+            assert sm is not None
+            sm.select(idx, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
 
-    def resize_delegate(self):
-        self.rt_delegate.max_width = int(self.width()/2.1)
+    def resize_delegate(self) -> None:
+        self.rt_delegate.max_width = int(self.width() / 2.1)
         self.resizeColumnsToContents()
 
-    def resizeEvent(self, ev):
-        ret = super(ResultsView, self).resizeEvent(ev)
+    def resizeEvent(self, e):
+        ret = super().resizeEvent(e)
         self.resize_delegate()
         return ret
 
@@ -250,63 +338,70 @@ class ResultsView(QTableView):  # {{{
         self.show_details(current)
         return ret
 
-    def show_details(self, index):
+    def show_details(self, index) -> None:
         f = rating_font()
-        book = self.model().data(index, Qt.ItemDataRole.UserRole)
+        model = self.model()
+        assert model is not None
+        book = model.data(index, Qt.ItemDataRole.UserRole)
         parts = [
             '<center>',
-            '<h2>%s</h2>'%book.title,
-            '<div><i>%s</i></div>'%authors_to_string(book.authors),
+            f'<h2>{book.title}</h2>',
+            f'<div><i>{authors_to_string(book.authors)}</i></div>',
         ]
         if not book.is_null('series'):
             series = book.format_field('series')
             if series[1]:
-                parts.append('<div>%s: %s</div>'%series)
+                parts.append('<div>{}: {}</div>'.format(*series))
         if not book.is_null('rating'):
-            style = 'style=\'font-family:"%s"\''%f
-            parts.append('<div %s>%s</div>'%(style, rating_to_stars(int(2 * book.rating))))
+            style = f'style=\'font-family:"{f}"\''
+            parts.append(f'<div {style}>{rating_to_stars(int(2 * book.rating))}</div>')
         parts.append('</center>')
         if book.identifiers:
             urls = urls_from_identifiers(book.identifiers)
-            ids = ['<a href="%s">%s</a>'%(url, name) for name, ign, ign, url in urls]
+            ids = [f'<a href="{url}">{name}</a>' for name, ign, ign, url in urls]
             if ids:
-                parts.append('<div><b>%s:</b> %s</div><br>'%(_('See at'), ', '.join(ids)))
+                parts.append('<div><b>{}:</b> {}</div><br>'.format(_('See at'), ', '.join(ids)))
         if book.tags:
-            parts.append('<div>%s</div><div>\u00a0</div>'%', '.join(book.tags))
+            parts.append('<div>{}</div><div>\u00a0</div>'.format(', '.join(book.tags)))
         if book.comments:
             parts.append(comments_to_html(book.comments))
 
         self.show_details_signal.emit(''.join(parts))
 
-    def select_index(self, index):
-        if self.model() is None:
+    def select_index(self, index) -> None:
+        model = self.model()
+        if model is None:
             return
         if not index.isValid():
-            index = self.model().index(0, 0)
-        book = self.model().data(index, Qt.ItemDataRole.UserRole)
+            index = model.index(0, 0)
+        book = model.data(index, Qt.ItemDataRole.UserRole)
         self.book_selected.emit(book)
 
-    def get_result(self):
+    def get_result(self) -> None:
         self.select_index(self.currentIndex())
 
-    def keyPressEvent(self, ev):
-        if ev.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
-            ac = QAbstractItemView.CursorAction.MoveDown if ev.key() == Qt.Key.Key_Right else QAbstractItemView.CursorAction.MoveUp
-            index = self.moveCursor(ac, ev.modifiers())
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            ac = QAbstractItemView.CursorAction.MoveDown if e.key() == Qt.Key.Key_Right else QAbstractItemView.CursorAction.MoveUp
+            index = self.moveCursor(ac, e.modifiers())
             if index.isValid() and index != self.currentIndex():
                 m = self.selectionModel()
-                m.select(index, QItemSelectionModel.SelectionFlag.Select|QItemSelectionModel.SelectionFlag.Current|QItemSelectionModel.SelectionFlag.Rows)
+                assert m is not None
+                m.select(
+                    index,
+                    QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Current | QItemSelectionModel.SelectionFlag.Rows,
+                )
                 self.setCurrentIndex(index)
-                ev.accept()
+                e.accept()
                 return
-        return QTableView.keyPressEvent(self, ev)
+        return QTableView.keyPressEvent(self, e)
+
 
 # }}}
 
 
 class Comments(HTMLDisplay):  # {{{
-
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         HTMLDisplay.__init__(self, parent)
         self.setAcceptDrops(False)
         self.wait_timer = QTimer(self)
@@ -315,25 +410,24 @@ class Comments(HTMLDisplay):  # {{{
         self.dots_count = 0
         self.anchor_clicked.connect(self.link_activated)
 
-    def link_activated(self, url):
+    def link_activated(self, url) -> None:
         from calibre.gui2 import open_url
+
         if url.scheme() in {'http', 'https'}:
             open_url(url)
 
-    def show_wait(self):
+    def show_wait(self) -> None:
         self.dots_count = 0
         self.wait_timer.start()
         self.update_wait()
 
-    def update_wait(self):
+    def update_wait(self) -> None:
         self.dots_count += 1
         self.dots_count %= 10
         self.dots_count = self.dots_count or 1
-        self.setHtml(
-            '<h2>'+_('Please wait')+
-            '<br><span id="dots">{}</span></h2>'.format('.' * self.dots_count))
+        self.setHtml('<h2>' + _('Please wait') + '<br><span id="dots">{}</span></h2>'.format('.' * self.dots_count))
 
-    def show_data(self, html):
+    def show_data(self, html) -> None:
         self.wait_timer.stop()
 
         def color_to_string(col):
@@ -341,41 +435,40 @@ class Comments(HTMLDisplay):  # {{{
             if col.isValid():
                 col = col.toRgb()
                 if col.isValid():
-                    ans = unicode_type(col.name())
+                    ans = str(col.name())
             return ans
 
-        c = color_to_string(QApplication.palette().color(QPalette.ColorGroup.Normal,
-                        QPalette.ColorRole.WindowText))
-        templ = '''\
+        c = color_to_string(QApplication.palette().color(QPalette.ColorGroup.Normal, QPalette.ColorRole.WindowText))
+        templ = f'''\
         <html>
             <head>
             <style type="text/css">
-                body, td {background-color: transparent; color: %s }
-                a { text-decoration: none; }
-                div.description { margin-top: 0; padding-top: 0; text-indent: 0 }
-                table { margin-bottom: 0; padding-bottom: 0; }
+                body, td {{background-color: transparent; color: {c} }}
+                a {{ text-decoration: none; }}
+                div.description {{ margin-top: 0; padding-top: 0; text-indent: 0 }}
+                table {{ margin-bottom: 0; padding-bottom: 0; }}
             </style>
             </head>
             <body>
             <div class="description">
-            %%s
+            %s
             </div>
             </body>
         <html>
-        '''%(c,)
-        self.setHtml(templ%html)
+        '''
+        self.setHtml(templ % html)
+
+
 # }}}
 
 
 class IdentifyWorker(Thread):  # {{{
-
-    def __init__(self, log, abort, title, authors, identifiers, caches):
+    def __init__(self, log, abort, title, authors, identifiers, caches) -> None:
         Thread.__init__(self)
         self.daemon = True
 
         self.log, self.abort = log, abort
-        self.title, self.authors, self.identifiers = (title, authors,
-                identifiers)
+        self.title, self.authors, self.identifiers = (title, authors, identifiers)
 
         self.results = []
         self.error = None
@@ -386,8 +479,8 @@ class IdentifyWorker(Thread):  # {{{
         m2 = Metadata('The Great Gatsby - An extra long title to test resizing', ['F. Scott Fitzgerald'])
         m1.has_cached_cover_url = True
         m2.has_cached_cover_url = False
-        m1.comments  = 'Some comments '*10
-        m1.tags = ['tag%d'%i for i in range(20)]
+        m1.comments = 'Some comments ' * 10
+        m1.tags = [f'tag{i}' for i in range(20)]
         m1.rating = 4.4
         m1.language = 'en'
         m2.language = 'fr'
@@ -398,18 +491,25 @@ class IdentifyWorker(Thread):  # {{{
 
         return [m1, m2]
 
-    def run(self):
+    def run(self) -> None:
         try:
             if DEBUG_DIALOG:
                 self.results = self.sample_results()
             else:
                 res = fork_job(
-                        'calibre.ebooks.metadata.sources.worker',
-                        'single_identify', (self.title, self.authors,
-                            self.identifiers), no_output=True, abort=self.abort)
+                    'calibre.ebooks.metadata.sources.worker',
+                    'single_identify',
+                    (self.title, self.authors, self.identifiers),
+                    no_output=True,
+                    abort=self.abort,
+                    env=metadata_job_env(),
+                )
+                if res['result'] is None:
+                    # The download was aborted by the user, so there are no results
+                    self.results = []
+                    return
                 self.results, covers, caches, log_dump = res['result']
-                self.results = [OPF(BytesIO(r), basedir=getcwd(),
-                    populate_spine=False).to_book_metadata() for r in self.results]
+                self.results = [OPF(BytesIO(r), basedir=os.getcwd(), populate_spine=False).to_book_metadata() for r in self.results]
                 for r, cov in zip(self.results, covers):
                     r.has_cached_cover_url = cov
                 self.caches.update(caches)
@@ -418,20 +518,21 @@ class IdentifyWorker(Thread):  # {{{
                 result.gui_rank = i
         except WorkerError as e:
             self.error = force_unicode(e.orig_tb)
-        except:
+        except Exception:
             import traceback
+
             self.error = force_unicode(traceback.format_exc())
+
 
 # }}}
 
 
 class IdentifyWidget(QWidget):  # {{{
-
     rejected = pyqtSignal()
     results_found = pyqtSignal()
     book_selected = pyqtSignal(object, object)
 
-    def __init__(self, log, parent=None):
+    def __init__(self, log, parent=None) -> None:
         QWidget.__init__(self, parent)
         self.log = log
         self.abort = Event()
@@ -439,10 +540,8 @@ class IdentifyWidget(QWidget):  # {{{
 
         self.l = l = QVBoxLayout(self)
 
-        names = ['<b>'+p.name+'</b>' for p in metadata_plugins(['identify']) if
-                p.is_configured()]
-        self.top = QLabel('<p>'+_('calibre is downloading metadata from: ') +
-            ', '.join(names))
+        names = ['<b>' + p.name + '</b>' for p in metadata_plugins(['identify']) if p.is_configured()]
+        self.top = QLabel('<p>' + _('calibre is downloading metadata from: ') + ', '.join(names))
         self.top.setWordWrap(True)
         l.addWidget(self.top)
 
@@ -463,6 +562,7 @@ class IdentifyWidget(QWidget):  # {{{
 
         self.query = QLabel('download starting...')
         self.query.setWordWrap(True)
+        self.query.setTextFormat(Qt.TextFormat.PlainText)
         l.addWidget(self.query)
 
         self.comments_view.show_wait()
@@ -470,93 +570,111 @@ class IdentifyWidget(QWidget):  # {{{
         if state is not None:
             s.restoreState(state)
 
-    def save_state(self):
+    def save_state(self) -> None:
         gprefs['metadata-download-identify-widget-splitter-state'] = bytearray(self.splitter.saveState())
 
-    def emit_book_selected(self, book):
+    def emit_book_selected(self, book) -> None:
         self.book_selected.emit(book, self.caches)
 
-    def start(self, title=None, authors=None, identifiers={}):
+    def start(self, title=None, authors=None, identifiers=None) -> None:
+        if identifiers is None:
+            identifiers = {}
         self.log.clear()
         self.log('Starting download')
         parts, simple_desc = [], ''
         if title:
-            parts.append('title:'+title)
+            parts.append('title:' + title)
             simple_desc += _('Title: %s ') % title
         if authors:
-            parts.append('authors:'+authors_to_string(authors))
+            parts.append('authors:' + authors_to_string(authors))
             simple_desc += _('Authors: %s ') % authors_to_string(authors)
         if identifiers:
-            x = ', '.join('%s:%s'%(k, v) for k, v in iteritems(identifiers))
+            x = ', '.join(f'{k}:{v}' for k, v in identifiers.items())
             parts.append(x)
             if 'isbn' in identifiers:
-                simple_desc += 'ISBN: %s' % identifiers['isbn']
+                simple_desc += 'ISBN: {}'.format(identifiers['isbn'])
         self.query.setText(simple_desc)
-        self.log(unicode_type(self.query.text()))
+        self.log(str(self.query.text()))
 
-        self.worker = IdentifyWorker(self.log, self.abort, title,
-                authors, identifiers, self.caches)
+        self.worker = IdentifyWorker(self.log, self.abort, title, authors, identifiers, self.caches)
 
         self.worker.start()
 
-        QTimer.singleShot(50, self.update)
+        QTimer.singleShot(50, self.poll_results)
 
-    def update(self):
+    def poll_results(self) -> None:
+        if self.abort.is_set():
+            return
         if self.worker.is_alive():
-            QTimer.singleShot(50, self.update)
+            QTimer.singleShot(50, self.poll_results)
         else:
             self.process_results()
 
-    def process_results(self):
+    def process_results(self) -> None:
         if self.worker.error is not None:
-            error_dialog(self, _('Download failed'),
-                    _('Failed to download metadata. Click '
-                        'Show Details to see details'),
-                    show=True, det_msg=self.worker.error)
+            error_dialog(
+                self,
+                _('Download failed'),
+                _('Failed to download metadata. Click Show Details to see details'),
+                show=True,
+                det_msg=self.worker.error,
+            )
             self.rejected.emit()
             return
 
         if not self.worker.results:
             log = ''.join(self.log.plain_text)
-            error_dialog(self, _('No matches found'), '<p>' +
-                    _('Failed to find any books that '
-                        'match your search. Try making the search <b>less '
-                        'specific</b>. For example, use only the author\'s '
-                        'last name and a single distinctive word from '
-                        'the title.<p>To see the full log, click "Show details".'),
-                    show=True, det_msg=log)
+            error_dialog(
+                self,
+                _('No matches found'),
+                '<p>'
+                + _(
+                    'Failed to find any books that '
+                    'match your search. Try making the search <b>less '
+                    "specific</b>. For example, use only the author's "
+                    'last name and a single distinctive word from '
+                    'the title.<p>To see the full log, click "Show details".'
+                ),
+                show=True,
+                det_msg=log,
+            )
             self.rejected.emit()
             return
 
         self.results_view.show_results(self.worker.results)
         self.results_found.emit()
 
-    def cancel(self):
+    def cancel(self) -> None:
         self.abort.set()
+
+
 # }}}
 
 
 class CoverWorker(Thread):  # {{{
-
-    def __init__(self, log, abort, title, authors, identifiers, caches):
+    def __init__(self, log, abort, title, authors, identifiers, caches) -> None:
         Thread.__init__(self, name='CoverWorker')
         self.daemon = True
 
         self.log, self.abort = log, abort
-        self.title, self.authors, self.identifiers = (title, authors,
-                identifiers)
+        self.title, self.authors, self.identifiers = (title, authors, identifiers)
         self.caches = caches
 
         self.rq = Queue()
         self.error = None
 
-    def fake_run(self):
-        images = ['donate.png', 'config.png', 'column.png', 'eject.png', ]
+    def fake_run(self) -> None:
+        images = [
+            'donate.png',
+            'config.png',
+            'column.png',
+            'eject.png',
+        ]
         time.sleep(2)
         for pl, im in zip(metadata_plugins(['cover']), images):
             self.rq.put((pl.name, 1, 1, 'png', I(im, data=True)))
 
-    def run(self):
+    def run(self) -> None:
         try:
             if DEBUG_DIALOG:
                 self.fake_run()
@@ -564,11 +682,12 @@ class CoverWorker(Thread):  # {{{
                 self.run_fork()
         except WorkerError as e:
             self.error = force_unicode(e.orig_tb)
-        except:
+        except Exception:
             import traceback
+
             self.error = force_unicode(traceback.format_exc())
 
-    def run_fork(self):
+    def run_fork(self) -> None:
         with TemporaryDirectory('_single_metadata_download') as tdir:
             self.keep_going = True
             t = Thread(target=self.monitor_tdir, args=(tdir,))
@@ -576,36 +695,40 @@ class CoverWorker(Thread):  # {{{
             t.start()
 
             try:
-                res = fork_job('calibre.ebooks.metadata.sources.worker',
+                res = fork_job(
+                    'calibre.ebooks.metadata.sources.worker',
                     'single_covers',
-                    (self.title, self.authors, self.identifiers, self.caches,
-                        tdir),
-                    no_output=True, abort=self.abort)
-                self.log.append_dump(res['result'])
+                    (self.title, self.authors, self.identifiers, self.caches, tdir),
+                    no_output=True,
+                    abort=self.abort,
+                    env=metadata_job_env(),
+                )
+                if res['result'] is not None:  # None when the download was aborted
+                    self.log.append_dump(res['result'])
             finally:
                 self.keep_going = False
                 t.join()
 
-    def scan_once(self, tdir, seen):
+    def scan_once(self, tdir, seen) -> None:
         for x in list(os.listdir(tdir)):
             if x in seen:
                 continue
-            if x.endswith('.cover') and os.path.exists(os.path.join(tdir,
-                    x+'.done')):
+            if x.endswith('.cover') and os.path.exists(os.path.join(tdir, x + '.done')):
                 name = x.rpartition('.')[0]
                 try:
                     plugin_name, width, height, fmt = name.split(',,')
                     width, height = int(width), int(height)
                     with open(os.path.join(tdir, x), 'rb') as f:
                         data = f.read()
-                except:
+                except Exception:
                     import traceback
+
                     traceback.print_exc()
                 else:
                     seen.add(x)
                     self.rq.put((plugin_name, width, height, fmt, data))
 
-    def monitor_tdir(self, tdir):
+    def monitor_tdir(self, tdir) -> None:
         seen = set()
         while self.keep_going:
             time.sleep(1)
@@ -613,53 +736,56 @@ class CoverWorker(Thread):  # {{{
         # One last scan after the download process has ended
         self.scan_once(tdir, seen)
 
+
 # }}}
 
 
 class CoversModel(QAbstractListModel):  # {{{
-
-    def __init__(self, current_cover, parent=None):
+    def __init__(self, current_cover, parent=None) -> None:
         QAbstractListModel.__init__(self, parent)
 
         if current_cover is None:
-            current_cover = QPixmap(I('default_cover.png'))
-        current_cover.setDevicePixelRatio(QApplication.instance().devicePixelRatio())
+            ic = QIcon.ic('default_cover.png')
+            current_cover = ic.pixmap(ic.availableSizes()[0])
+        current_cover.setDevicePixelRatio(qapplication_or_fail().devicePixelRatio())
 
-        self.blank = QIcon(I('blank.png')).pixmap(*CoverDelegate.ICON_SIZE)
+        self.blank = QIcon.ic('blank.png').pixmap(*CoverDelegate.ICON_SIZE)
         self.cc = current_cover
         self.reset_covers(do_reset=False)
 
-    def reset_covers(self, do_reset=True):
+    def reset_covers(self, do_reset=True) -> None:
         self.covers = [self.get_item(_('Current cover'), self.cc)]
         self.plugin_map = {}
         for i, plugin in enumerate(metadata_plugins(['cover'])):
-            self.covers.append((plugin.name+'\n'+_('Searching...'),
-                (self.blank), None, True))
-            self.plugin_map[plugin] = [i+1]
+            self.covers.append((plugin.name + '\n' + _('Searching...'), (self.blank), None, True))
+            self.plugin_map[plugin] = [i + 1]
 
         if do_reset:
             self.beginResetModel(), self.endResetModel()
 
     def get_item(self, src, pmap, waiting=False):
-        sz = '%dx%d'%(pmap.width(), pmap.height())
-        text = (src + '\n' + sz)
+        sz = f'{pmap.width()}x{pmap.height()}'
+        text = src + '\n' + sz
         scaled = pmap.scaled(
-            int(CoverDelegate.ICON_SIZE[0] * pmap.devicePixelRatio()), int(CoverDelegate.ICON_SIZE[1] * pmap.devicePixelRatio()),
-            Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            int(CoverDelegate.ICON_SIZE[0] * pmap.devicePixelRatio()),
+            int(CoverDelegate.ICON_SIZE[1] * pmap.devicePixelRatio()),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
         scaled.setDevicePixelRatio(pmap.devicePixelRatio())
         return (text, (scaled), pmap, waiting)
 
     def rowCount(self, parent=None):
         return len(self.covers)
 
-    def data(self, index, role):
+    def data(self, index, role=...):
         try:
             text, pmap, cover, waiting = self.covers[index.row()]
-        except:
+        except Exception:
             return None
         if role == Qt.ItemDataRole.DecorationRole:
             return pmap
-        if role == Qt.ItemDataRole.DisplayRole or role == Qt.ItemDataRole.ToolTipRole:
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole):
             return text
         if role == Qt.ItemDataRole.UserRole:
             return waiting
@@ -667,11 +793,11 @@ class CoversModel(QAbstractListModel):  # {{{
 
     def plugin_for_index(self, index):
         row = index.row() if hasattr(index, 'row') else index
-        for k, v in iteritems(self.plugin_map):
+        for k, v in self.plugin_map.items():
             if row in v:
                 return k
 
-    def clear_failed(self):
+    def clear_failed(self) -> None:
         # Remove entries that are still waiting
         good = []
         pmap = {}
@@ -680,9 +806,10 @@ class CoversModel(QAbstractListModel):  # {{{
             pmap = x[2]
             if pmap is None:
                 return 1
-            return pmap.width()*pmap.height()
+            return pmap.width() * pmap.height()
+
         dcovers = sorted(self.covers[1:], key=keygen, reverse=True)
-        cmap = {i:self.plugin_for_index(i) for i in range(len(self.covers))}
+        cmap = {i: self.plugin_for_index(i) for i in range(len(self.covers))}
         for i, x in enumerate(self.covers[0:1] + dcovers):
             if not x[-1]:
                 good.append(x)
@@ -691,7 +818,7 @@ class CoversModel(QAbstractListModel):  # {{{
                     try:
                         pmap[plugin].append(len(good) - 1)
                     except KeyError:
-                        pmap[plugin] = [len(good)-1]
+                        pmap[plugin] = [len(good) - 1]
         self.covers = good
         self.plugin_map = pmap
         self.beginResetModel(), self.endResetModel()
@@ -712,10 +839,10 @@ class CoversModel(QAbstractListModel):  # {{{
     def load_pixmap(self, data):
         pmap = QPixmap()
         pmap.loadFromData(data)
-        pmap.setDevicePixelRatio(QApplication.instance().devicePixelRatio())
+        pmap.setDevicePixelRatio(qapplication_or_fail().devicePixelRatio())
         return pmap
 
-    def update_result(self, plugin_name, width, height, data):
+    def update_result(self, plugin_name, width, height, data) -> None:
         if plugin_name.endswith('}'):
             # multi cover plugin
             plugin_name = plugin_name.partition('{')[0]
@@ -728,7 +855,7 @@ class CoversModel(QAbstractListModel):  # {{{
             if pmap.isNull():
                 return
             self.beginInsertRows(QModelIndex(), last_row, last_row)
-            for rows in itervalues(self.plugin_map):
+            for rows in self.plugin_map.values():
                 for i in range(len(rows)):
                     if rows[i] >= last_row:
                         rows[i] += 1
@@ -738,7 +865,7 @@ class CoversModel(QAbstractListModel):  # {{{
         else:
             # single cover plugin
             idx = None
-            for plugin, rows in iteritems(self.plugin_map):
+            for plugin, rows in self.plugin_map.items():
                 if plugin.name == plugin_name:
                     idx = rows[0]
                     break
@@ -757,15 +884,16 @@ class CoversModel(QAbstractListModel):  # {{{
             if pmap is not None and not pmap.isNull():
                 return pmap
 
+
 # }}}
 
 
 class CoversView(QListView):  # {{{
-
     chosen = pyqtSignal()
 
-    def __init__(self, current_cover, parent=None):
+    def __init__(self, current_cover, parent=None) -> None:
         QListView.__init__(self, parent)
+        self.book_id = getattr(parent, 'book_id', 0)
         self.m = CoversModel(current_cover, self)
         self.setModel(self.m)
 
@@ -779,36 +907,39 @@ class CoversView(QListView):  # {{{
 
         self.delegate = CoverDelegate(self)
         self.setItemDelegate(self.delegate)
-        self.delegate.needs_redraw.connect(self.redraw_spinners,
-                type=Qt.ConnectionType.QueuedConnection)
+        self.delegate.needs_redraw.connect(self.redraw_spinners, type=Qt.ConnectionType.QueuedConnection)
 
         self.doubleClicked.connect(self.chosen, type=Qt.ConnectionType.QueuedConnection)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
 
-    def redraw_spinners(self):
+    def redraw_spinners(self) -> None:
         m = self.model()
+        assert m is not None
         for r in range(m.rowCount()):
-            idx = m.index(r)
+            idx = m.index(r, 0)
             if bool(m.data(idx, Qt.ItemDataRole.UserRole)):
                 m.dataChanged.emit(idx, idx)
 
-    def select(self, num):
-        current = self.model().index(num)
+    def select(self, num) -> None:
+        model = self.model()
+        assert model is not None
+        current = model.index(num, 0)
         sm = self.selectionModel()
+        assert sm is not None
         sm.select(current, QItemSelectionModel.SelectionFlag.SelectCurrent)
 
-    def start(self):
+    def start(self) -> None:
         self.select(0)
         self.delegate.start_animation()
 
-    def stop(self):
+    def stop(self) -> None:
         self.delegate.stop_animation()
 
-    def reset_covers(self):
+    def reset_covers(self) -> None:
         self.m.reset_covers()
 
-    def clear_failed(self):
+    def clear_failed(self) -> None:
         pointer = self.m.pointer_from_index(self.currentIndex())
         self.m.clear_failed()
         if pointer is None:
@@ -816,48 +947,100 @@ class CoversView(QListView):  # {{{
         else:
             self.select(self.m.index_from_pointer(pointer).row())
 
-    def show_context_menu(self, point):
+    def show_context_menu(self, point) -> None:
         idx = self.currentIndex()
         if idx and idx.isValid() and not idx.data(Qt.ItemDataRole.UserRole):
             m = QMenu(self)
-            m.addAction(QIcon(I('view.png')), _('View this cover at full size'), self.show_cover)
-            m.addAction(QIcon(I('edit-copy.png')), _('Copy this cover to clipboard'), self.copy_cover)
-            m.exec_(QCursor.pos())
+            m.addAction(QIcon.ic('view.png'), _('View this cover at full size'), self.show_cover)
+            m.addAction(QIcon.ic('edit-copy.png'), _('Copy this cover to clipboard'), self.copy_cover)
+            m.addAction(QIcon.ic('save.png'), _('Save this cover to disk'), self.save_to_disk)
+            if self.book_id:
+                m.addAction(QIcon.ic('save.png'), _('Save this cover in the book extra files'), self.save_alternate_cover)
+            m.exec(self.mapToGlobal(point))
 
-    def show_cover(self):
+    @property
+    def current_pixmap(self):
         idx = self.currentIndex()
-        pmap = self.model().cover_pixmap(idx)
+        m = self.m
+        pmap = m.cover_pixmap(idx)
         if pmap is None and idx.row() == 0:
-            pmap = self.model().cc
+            pmap = m.cc
+        return pmap
+
+    def show_cover(self) -> None:
+        pmap = self.current_pixmap
         if pmap is not None:
             from calibre.gui2.image_popup import ImageView
-            d = ImageView(self, pmap, unicode_type(idx.data(Qt.ItemDataRole.DisplayRole) or ''), geom_name='metadata_download_cover_popup_geom')
+
+            d = ImageView(
+                self,
+                pmap,
+                str(self.currentIndex().data(Qt.ItemDataRole.DisplayRole) or ''),
+                geom_name='metadata_download_cover_popup_geom',
+            )
             d(use_exec=True)
 
-    def copy_cover(self):
-        idx = self.currentIndex()
-        pmap = self.model().cover_pixmap(idx)
-        if pmap is None and idx.row() == 0:
-            pmap = self.model().cc
+    def copy_cover(self) -> None:
+        pmap = self.current_pixmap
         if pmap is not None:
-            QApplication.clipboard().setPixmap(pmap)
+            clipboard = QApplication.clipboard()
+            assert clipboard is not None
+            clipboard.setPixmap(pmap)
 
-    def keyPressEvent(self, ev):
-        if ev.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
+    def save_to_disk(self) -> None:
+        pmap = self.current_pixmap
+        if pmap:
+            path = choose_save_file(
+                self,
+                'save-downloaded-cover-to-disk',
+                _('Save cover image'),
+                filters=[(_('Images'), ['jpg', 'jpeg', 'png', 'webp'])],
+                all_files=False,
+                initial_filename=COVER_FILE_NAME,
+            )
+            if path:
+                save_image(pmap.toImage(), path)
+
+    def save_alternate_cover(self) -> None:
+        pmap = self.current_pixmap
+        if pmap:
+            from calibre.gui2.ui import get_gui
+
+            db = get_gui(fail_if_absent=True).current_db.new_api
+            existing = {x[0] for x in db.list_extra_files(self.book_id)}
+            h, ext = os.path.splitext(COVER_FILE_NAME)
+            template = f'{DATA_DIR_NAME}/{h}-{{:03d}}{ext}'
+            for i in range(1, 1000):
+                q = template.format(i)
+                if q not in existing:
+                    cdata = image_to_data(pmap.toImage())
+                    db.add_extra_files(self.book_id, {q: BytesIO(cdata)}, replace=False, auto_rename=True)
+                    break
+            else:
+                error_dialog(
+                    self,
+                    _('Too many covers'),
+                    _('Could not save cover as there are too many existing covers'),
+                    show=True,
+                )
+                return
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
             self.chosen.emit()
-            ev.accept()
+            e.accept()
             return
-        return QListView.keyPressEvent(self, ev)
+        return QListView.keyPressEvent(self, e)
+
 
 # }}}
 
 
 class CoversWidget(QWidget):  # {{{
-
     chosen = pyqtSignal()
     finished = pyqtSignal()
 
-    def __init__(self, log, current_cover, parent=None):
+    def __init__(self, log, current_cover, parent=None) -> None:
         QWidget.__init__(self, parent)
         self.log = log
         self.abort = Event()
@@ -867,6 +1050,7 @@ class CoversWidget(QWidget):  # {{{
 
         self.msg = QLabel()
         self.msg.setWordWrap(True)
+        self.book_id = getattr(parent, 'book_id', 0)
         l.addWidget(self.msg, 0, 0)
 
         self.covers_view = CoversView(current_cover, self)
@@ -874,27 +1058,25 @@ class CoversWidget(QWidget):  # {{{
         l.addWidget(self.covers_view, 1, 0)
         self.continue_processing = True
 
-    def reset_covers(self):
+    def reset_covers(self) -> None:
         self.covers_view.reset_covers()
 
-    def start(self, book, current_cover, title, authors, caches):
+    def start(self, book, current_cover, title, authors, caches) -> None:
         self.continue_processing = True
         self.abort.clear()
         self.book, self.current_cover = book, current_cover
         self.title, self.authors = title, authors
         self.log('Starting cover download for:', book.title)
         self.log('Query:', title, authors, self.book.identifiers)
-        self.msg.setText('<p>'+
-            _('Downloading covers for <b>%s</b>, please wait...')%book.title)
+        self.msg.setText('<p>' + _('Downloading covers for <b>%s</b>, please wait...') % book.title)
         self.covers_view.start()
 
-        self.worker = CoverWorker(self.log, self.abort, self.title,
-                self.authors, book.identifiers, caches)
+        self.worker = CoverWorker(self.log, self.abort, self.title, self.authors, book.identifiers, caches)
         self.worker.start()
         QTimer.singleShot(50, self.check)
         self.covers_view.setFocus(Qt.FocusReason.OtherFocusReason)
 
-    def check(self):
+    def check(self) -> None:
         if self.worker.is_alive() and not self.abort.is_set():
             QTimer.singleShot(50, self.check)
             try:
@@ -904,7 +1086,7 @@ class CoversWidget(QWidget):  # {{{
         else:
             self.process_results()
 
-    def process_results(self):
+    def process_results(self) -> None:
         while self.continue_processing:
             try:
                 self.process_result(self.worker.rq.get_nowait())
@@ -915,58 +1097,65 @@ class CoversWidget(QWidget):  # {{{
             self.covers_view.clear_failed()
 
         if self.worker.error and self.worker.error.strip():
-            error_dialog(self, _('Download failed'),
-                    _('Failed to download any covers, click'
-                        ' "Show details" for details.'),
-                    det_msg=self.worker.error, show=True)
+            error_dialog(
+                self,
+                _('Download failed'),
+                _('Failed to download any covers, click "Show details" for details.'),
+                det_msg=self.worker.error,
+                show=True,
+            )
 
-        num = self.covers_view.model().rowCount()
+        covers_model = self.covers_view.model()
+        assert covers_model is not None
+        num = covers_model.rowCount()
         if num < 2:
-            txt = _('Could not find any covers for <b>%s</b>')%self.book.title
+            txt = _('Could not find any covers for <b>%s</b>') % self.book.title
+        elif num == 2:
+            txt = _('Found a cover for {title}').format(title=self.title)
         else:
-            if num == 2:
-                txt = _('Found a cover for {title}').format(title=self.title)
-            else:
-                txt = _(
-                    'Found <b>{num}</b> covers for {title}. When the download completes,'
-                    ' the covers will be sorted by size.').format(
-                            title=self.title, num=num-1)
+            txt = _('Found <b>{num}</b> covers for {title}. When the download completes, the covers will be sorted by size.').format(
+                title=self.title, num=num - 1
+            )
         self.msg.setText(txt)
         self.msg.setWordWrap(True)
         self.covers_view.stop()
 
         self.finished.emit()
 
-    def process_result(self, result):
+    def process_result(self, result) -> None:
         if not self.continue_processing:
             return
         plugin_name, width, height, fmt, data = result
-        self.covers_view.model().update_result(plugin_name, width, height, data)
+        cv_model = self.covers_view.m
+        cv_model.update_result(plugin_name, width, height, data)
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         self.covers_view.delegate.stop_animation()
         self.continue_processing = False
 
-    def cancel(self):
+    def cancel(self) -> None:
         self.cleanup()
         self.abort.set()
 
     def cover_pixmap(self):
         idx = None
-        for i in self.covers_view.selectionModel().selectedIndexes():
+        sel_model = self.covers_view.selectionModel()
+        assert sel_model is not None
+        for i in sel_model.selectedIndexes():
             if i.isValid():
                 idx = i
                 break
         if idx is None:
             idx = self.covers_view.currentIndex()
-        return self.covers_view.model().cover_pixmap(idx)
+        cv_model = self.covers_view.m
+        return cv_model.cover_pixmap(idx)
+
 
 # }}}
 
 
 class LogViewer(QDialog):  # {{{
-
-    def __init__(self, log, parent=None):
+    def __init__(self, log, parent=None) -> None:
         QDialog.__init__(self, parent)
         self.log = log
         self.l = l = QVBoxLayout()
@@ -977,15 +1166,16 @@ class LogViewer(QDialog):  # {{{
 
         self.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         l.addWidget(self.bb)
-        self.copy_button = self.bb.addButton(_('Copy to clipboard'),
-                QDialogButtonBox.ButtonRole.ActionRole)
-        self.copy_button.clicked.connect(self.copy_to_clipboard)
-        self.copy_button.setIcon(QIcon(I('edit-copy.png')))
+        copy_button = self.bb.addButton(_('Copy to clipboard'), QDialogButtonBox.ButtonRole.ActionRole)
+        assert copy_button is not None
+        self.copy_button = copy_button
+        copy_button.clicked.connect(self.copy_to_clipboard)
+        copy_button.setIcon(QIcon.ic('edit-copy.png'))
         self.bb.rejected.connect(self.reject)
         self.bb.accepted.connect(self.accept)
 
         self.setWindowTitle(_('Download log'))
-        self.setWindowIcon(QIcon(I('debug.png')))
+        self.setWindowIcon(QIcon.ic('debug.png'))
         self.resize(QSize(800, 400))
 
         self.keep_updating = True
@@ -995,54 +1185,62 @@ class LogViewer(QDialog):  # {{{
 
         self.show()
 
-    def copy_to_clipboard(self):
-        QApplication.clipboard().setText(''.join(self.log.plain_text))
+    def copy_to_clipboard(self) -> None:
+        clipboard = QApplication.clipboard()
+        assert clipboard is not None
+        clipboard.setText(''.join(self.log.plain_text))
 
-    def stop(self, *args):
+    def stop(self, *args) -> None:
         self.keep_updating = False
 
-    def update_log(self):
+    def update_log(self) -> None:
         if not self.keep_updating:
             return
         html = self.log.html
         if html != self.last_html:
             self.last_html = html
-            self.tb.setHtml('<pre style="font-family:monospace">%s</pre>'%html)
+            self.tb.setHtml(f'<pre style="font-family:monospace">{html}</pre>')
         QTimer.singleShot(1000, self.update_log)
+
 
 # }}}
 
 
 class FullFetch(QDialog):  # {{{
-
-    def __init__(self, current_cover=None, parent=None):
+    def __init__(self, current_cover=None, parent=None) -> None:
         QDialog.__init__(self, parent)
+        watch_for_browser_failures()
         self.current_cover = current_cover
+        self.book_id = getattr(parent, 'book_id', 0)
         self.log = Log()
         self.book = self.cover_pixmap = None
 
         self.setWindowTitle(_('Downloading metadata...'))
-        self.setWindowIcon(QIcon(I('download-metadata.png')))
+        self.setWindowIcon(QIcon.ic('download-metadata.png'))
 
         self.stack = QStackedWidget()
         self.l = l = QVBoxLayout()
         self.setLayout(l)
         l.addWidget(self.stack)
 
-        self.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel|QDialogButtonBox.StandardButton.Ok)
+        self.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
         self.h = h = QHBoxLayout()
         l.addLayout(h)
         self.bb.rejected.connect(self.reject)
         self.bb.accepted.connect(self.accept)
-        self.ok_button = self.bb.button(QDialogButtonBox.StandardButton.Ok)
-        self.ok_button.setEnabled(False)
-        self.ok_button.clicked.connect(self.ok_clicked)
-        self.prev_button = pb = QPushButton(QIcon(I('back.png')), _('&Back'), self)
+        ok_button = self.bb.button(QDialogButtonBox.StandardButton.Ok)
+        assert ok_button is not None
+        self.ok_button = ok_button
+        ok_button.setEnabled(False)
+        ok_button.clicked.connect(self.ok_clicked)
+        self.prev_button = pb = QPushButton(QIcon.ic('back.png'), _('&Back'), self)
         pb.clicked.connect(self.back_clicked)
         pb.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.log_button = self.bb.addButton(_('&View log'), QDialogButtonBox.ButtonRole.ActionRole)
-        self.log_button.clicked.connect(self.view_log)
-        self.log_button.setIcon(QIcon(I('debug.png')))
+        log_button = self.bb.addButton(_('&View log'), QDialogButtonBox.ButtonRole.ActionRole)
+        assert log_button is not None
+        self.log_button = log_button
+        log_button.clicked.connect(self.view_log)
+        log_button.setIcon(QIcon.ic('debug.png'))
         self.prev_button.setVisible(False)
         h.addWidget(self.prev_button), h.addWidget(self.bb)
 
@@ -1056,26 +1254,24 @@ class FullFetch(QDialog):  # {{{
         self.covers_widget.chosen.connect(self.ok_clicked)
         self.stack.addWidget(self.covers_widget)
 
-        self.resize(850, 600)
-        geom = gprefs.get('metadata_single_gui_geom', None)
-        if geom is not None and geom:
-            QApplication.instance().safe_restore_geometry(self, geom)
-
+        if not self.restore_geometry(gprefs, 'metadata_single_gui_geom'):
+            self.resize(850, 600)
         self.finished.connect(self.cleanup)
 
-    def view_log(self):
+    def view_log(self) -> None:
         self._lv = LogViewer(self.log, self)
 
-    def book_selected(self, book, caches):
+    def book_selected(self, book, caches) -> None:
         self.prev_button.setVisible(True)
         self.book = book
         self.stack.setCurrentIndex(1)
         self.log('\n\n')
-        self.covers_widget.start(book, self.current_cover,
-                self.title, self.authors, caches)
-        self.ok_button.setFocus()
+        self.covers_widget.start(book, self.current_cover, self.title, self.authors, caches)
+        ok_button = self.ok_button
+        assert ok_button is not None
+        ok_button.setFocus()
 
-    def back_clicked(self):
+    def back_clicked(self) -> None:
         self.prev_button.setVisible(False)
         self.stack.setCurrentIndex(0)
         self.covers_widget.cancel()
@@ -1083,32 +1279,33 @@ class FullFetch(QDialog):  # {{{
 
     def accept(self):
         # Prevent the usual dialog accept mechanisms from working
-        gprefs['metadata_single_gui_geom'] = bytearray(self.saveGeometry())
+        self.save_geometry(gprefs, 'metadata_single_gui_geom')
         self.identify_widget.save_state()
         if DEBUG_DIALOG:
             if self.stack.currentIndex() == 2:
                 return QDialog.accept(self)
-        else:
-            if self.stack.currentIndex() == 1:
-                return QDialog.accept(self)
+        elif self.stack.currentIndex() == 1:
+            return QDialog.accept(self)
 
     def reject(self):
-        gprefs['metadata_single_gui_geom'] = bytearray(self.saveGeometry())
+        self.save_geometry(gprefs, 'metadata_single_gui_geom')
         self.identify_widget.cancel()
         self.covers_widget.cancel()
         return QDialog.reject(self)
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         self.covers_widget.cleanup()
 
-    def identify_results_found(self):
-        self.ok_button.setEnabled(True)
+    def identify_results_found(self) -> None:
+        ok_button = self.ok_button
+        assert ok_button is not None
+        ok_button.setEnabled(True)
 
-    def next_clicked(self, *args):
-        gprefs['metadata_single_gui_geom'] = bytearray(self.saveGeometry())
+    def next_clicked(self, *args) -> None:
+        self.save_geometry(gprefs, 'metadata_single_gui_geom')
         self.identify_widget.get_result()
 
-    def ok_clicked(self, *args):
+    def ok_clicked(self, *args) -> None:
         self.cover_pixmap = self.covers_widget.cover_pixmap()
         if self.stack.currentIndex() == 0:
             self.next_clicked()
@@ -1122,24 +1319,28 @@ class FullFetch(QDialog):  # {{{
         else:
             QDialog.accept(self)
 
-    def start(self, title=None, authors=None, identifiers={}):
+    def start(self, title=None, authors=None, identifiers=None):
+        if identifiers is None:
+            identifiers = {}
         self.title, self.authors = title, authors
-        self.identify_widget.start(title=title, authors=authors,
-                identifiers=identifiers)
-        return self.exec_()
+        self.identify_widget.start(title=title, authors=authors, identifiers=identifiers)
+        return self.exec()
+
+
 # }}}
 
 
 class CoverFetch(QDialog):  # {{{
-
-    def __init__(self, current_cover=None, parent=None):
+    def __init__(self, current_cover=None, parent=None) -> None:
         QDialog.__init__(self, parent)
+        watch_for_browser_failures()
         self.current_cover = current_cover
+        self.book_id = getattr(parent, 'book_id', 0)
         self.log = Log()
         self.cover_pixmap = None
 
         self.setWindowTitle(_('Downloading cover...'))
-        self.setWindowIcon(QIcon(I('default_cover.png')))
+        self.setWindowIcon(QIcon.ic('default_cover.png'))
 
         self.l = l = QVBoxLayout()
         self.setLayout(l)
@@ -1152,46 +1353,45 @@ class CoverFetch(QDialog):  # {{{
 
         self.finished.connect(self.cleanup)
 
-        self.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel|QDialogButtonBox.StandardButton.Ok)
+        self.bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
         l.addWidget(self.bb)
-        self.log_button = self.bb.addButton(_('&View log'), QDialogButtonBox.ButtonRole.ActionRole)
-        self.log_button.clicked.connect(self.view_log)
-        self.log_button.setIcon(QIcon(I('debug.png')))
+        log_button = self.bb.addButton(_('&View log'), QDialogButtonBox.ButtonRole.ActionRole)
+        assert log_button is not None
+        self.log_button = log_button
+        log_button.clicked.connect(self.view_log)
+        log_button.setIcon(QIcon.ic('debug.png'))
         self.bb.rejected.connect(self.reject)
         self.bb.accepted.connect(self.accept)
+        self.restore_geometry(gprefs, 'single-cover-fetch-dialog-geometry')
 
-        geom = gprefs.get('single-cover-fetch-dialog-geometry', None)
-        if geom is not None:
-            QApplication.instance().safe_restore_geometry(self, geom)
-
-    def cleanup(self):
+    def cleanup(self) -> None:
         self.covers_widget.cleanup()
 
     def reject(self):
-        gprefs.set('single-cover-fetch-dialog-geometry', bytearray(self.saveGeometry()))
+        self.save_geometry(gprefs, 'single-cover-fetch-dialog-geometry')
         self.covers_widget.cancel()
         return QDialog.reject(self)
 
-    def accept(self, *args):
-        gprefs.set('single-cover-fetch-dialog-geometry', bytearray(self.saveGeometry()))
+    def accept(self, *args) -> None:
+        self.save_geometry(gprefs, 'single-cover-fetch-dialog-geometry')
         self.cover_pixmap = self.covers_widget.cover_pixmap()
         QDialog.accept(self)
 
     def start(self, title, authors, identifiers):
         book = Metadata(title, authors)
         book.identifiers = identifiers
-        self.covers_widget.start(book, self.current_cover,
-                title, authors, {})
-        return self.exec_()
+        self.covers_widget.start(book, self.current_cover, title, authors, {})
+        return self.exec()
 
-    def view_log(self):
+    def view_log(self) -> None:
         self._lv = LogViewer(self.log, self)
+
 
 # }}}
 
-
 if __name__ == '__main__':
     from calibre.gui2 import Application
+
     DEBUG_DIALOG = True
     app = Application([])
     d = FullFetch()

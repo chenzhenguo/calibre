@@ -1,41 +1,42 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
 import re
-from collections import namedtuple
 from functools import partial
-from PyQt5.Qt import QFont, QTextBlockUserData, QTextCharFormat
+from typing import NamedTuple
+
+from qt.core import QFont, QTextBlockUserData, QTextCharFormat, QVariant
 
 from calibre.ebooks.oeb.polish.spell import html_spell_tags, patterns, xml_spell_tags
 from calibre.gui2.tweak_book import dictionaries, tprefs, verify_link
 from calibre.gui2.tweak_book.editor import (
-    CLASS_ATTRIBUTE_PROPERTY, LINK_PROPERTY, SPELL_LOCALE_PROPERTY, SPELL_PROPERTY,
-    TAG_NAME_PROPERTY, store_locale, syntax_text_char_format
+    CLASS_ATTRIBUTE_PROPERTY,
+    LINK_PROPERTY,
+    SPELL_LOCALE_PROPERTY,
+    SPELL_PROPERTY,
+    TAG_NAME_PROPERTY,
+    store_locale,
+    syntax_text_char_format,
 )
 from calibre.gui2.tweak_book.editor.syntax.base import SyntaxHighlighter, run_loop
-from calibre.gui2.tweak_book.editor.syntax.css import (
-    CSSState, CSSUserData, create_formats as create_css_formats,
-    state_map as css_state_map
-)
+from calibre.gui2.tweak_book.editor.syntax.css import CSSState, CSSUserData
+from calibre.gui2.tweak_book.editor.syntax.css import create_formats as create_css_formats
+from calibre.gui2.tweak_book.editor.syntax.css import state_map as css_state_map
 from calibre.spell.break_iterator import split_into_words_and_positions
 from calibre.spell.dictionary import parse_lang_code
+from calibre.utils.localization import _
 from calibre_extensions import html_syntax_highlighter as _speedup
-from polyglot.builtins import iteritems
 
 cdata_tags = frozenset(['title', 'textarea', 'style', 'script', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript'])
 normal_pat = re.compile(r'[^<>&]+')
 entity_pat = re.compile(r'&#{0,1}[a-zA-Z0-9]{1,8};')
 tag_name_pat = re.compile(r'/{0,1}[a-zA-Z0-9:-]+')
 space_chars = ' \t\r\n\u000c'
-attribute_name_pat = re.compile(r'''[^%s"'/><=]+''' % space_chars)
+attribute_name_pat = re.compile(rf'''[^{space_chars}"'/><=]+''')
 self_closing_pat = re.compile(r'/\s*>')
-unquoted_val_pat = re.compile(r'''[^%s'"=<>`]+''' % space_chars)
-cdata_close_pats = {x:re.compile(r'</%s' % x, flags=re.I) for x in cdata_tags}
-nbsp_pat = re.compile('[\xa0\u2000-\u200A\u202F\u205F\u3000\u2011-\u2015\uFE58\uFE63\uFF0D]+')  # special spaces and hyphens
+unquoted_val_pat = re.compile(rf'''[^{space_chars}'"=<>`]+''')
+cdata_close_pats = {x: re.compile(rf'</{x}', flags=re.I) for x in cdata_tags}
+nbsp_pat = re.compile(r'[\xa0\u2000-\u200A\u202F\u205F\u3000\u2011-\u2015\uFE58\uFE63\uFF0D]+')  # special spaces and hyphens
 
 NORMAL = 0
 IN_OPENING_TAG = 1
@@ -50,17 +51,39 @@ DQ_VAL = 9
 CDATA = 10
 CSS = 11
 
-TagStart = namedtuple('TagStart', 'offset prefix name closing is_start')
-TagEnd = namedtuple('TagEnd', 'offset self_closing is_start')
-NonTagBoundary = namedtuple('NonTagBoundary', 'offset is_start type')
-Attr = namedtuple('Attr', 'offset type data')
+
+class TagStart(NamedTuple):
+    offset: int
+    prefix: str
+    name: str
+    closing: bool
+    is_start: bool
+
+
+class TagEnd(NamedTuple):
+    offset: int
+    self_closing: bool
+    is_start: bool
+
+
+class NonTagBoundary(NamedTuple):
+    offset: int
+    is_start: bool
+    type: int
+
+
+class Attr(NamedTuple):
+    offset: int
+    type: object
+    data: str | object
+
 
 LINK_ATTRS = frozenset(('href', 'src', 'poster', 'xlink:href'))
 
 do_spell_check = False
 
 
-def refresh_spell_check_status():
+def refresh_spell_check_status() -> None:
     global do_spell_check
     do_spell_check = tprefs['inline_spell_check'] and hasattr(dictionaries, 'active_user_dictionaries')
 
@@ -72,7 +95,7 @@ State = _speedup.State
 
 def spell_property(sfmt, locale):
     s = QTextCharFormat(sfmt)
-    s.setProperty(SPELL_LOCALE_PROPERTY, locale)
+    s.setProperty(SPELL_LOCALE_PROPERTY, QVariant(locale))
     return s
 
 
@@ -92,7 +115,7 @@ del spell_property
 check_spelling = _speedup.check_spelling
 
 
-def finish_opening_tag(state, cdata_tags):
+def finish_opening_tag(state, cdata_tags) -> None:
     state.parse = NORMAL
     if state.tag_being_defined is None:
         return
@@ -106,7 +129,7 @@ def finish_opening_tag(state, cdata_tags):
         state.sub_parser_state = None
 
 
-def close_tag(state, name):
+def close_tag(state, name) -> None:
     removed_tags = []
     for tag in reversed(state.tags):
         removed_tags.append(tag)
@@ -115,7 +138,7 @@ def close_tag(state, name):
     else:
         return  # No matching open tag found, ignore the closing tag
     # Remove all tags up to the matching open tag
-    state.tags = state.tags[:-len(removed_tags)]
+    state.tags = state.tags[: -len(removed_tags)]
     state.sub_parser_state = None
     # Check if we should still be bold or italic
     if state.is_bold:
@@ -139,8 +162,7 @@ def close_tag(state, name):
 
 
 class HTMLUserData(QTextBlockUserData):
-
-    def __init__(self):
+    def __init__(self) -> None:
         QTextBlockUserData.__init__(self)
         self.tags = []
         self.attributes = []
@@ -149,7 +171,7 @@ class HTMLUserData(QTextBlockUserData):
         self.css_user_data = None
         self.doc_name = None
 
-    def clear(self, state=None, doc_name=None):
+    def clear(self, state=None, doc_name=None) -> None:
         self.tags, self.attributes, self.non_tag_structures = [], [], []
         self.state = State() if state is None else state
         self.doc_name = doc_name
@@ -160,31 +182,30 @@ class HTMLUserData(QTextBlockUserData):
 
 
 class XMLUserData(HTMLUserData):
-
     @classmethod
     def tag_ok_for_spell(cls, name):
         return name in xml_spell_tags
 
 
-def add_tag_data(user_data, tag):
+def add_tag_data(user_data, tag) -> None:
     user_data.tags.append(tag)
 
 
 ATTR_NAME, ATTR_VALUE, ATTR_START, ATTR_END = object(), object(), object(), object()
 
 
-def add_attr_data(user_data, data_type, data, offset):
+def add_attr_data(user_data, data_type, data, offset) -> None:
     user_data.attributes.append(Attr(offset, data_type, data))
 
 
 def css(state, text, i, formats, user_data):
-    ' Inside a <style> tag '
+    "Inside a <style> tag"
     pat = cdata_close_pats['style']
     m = pat.search(text, i)
     if m is None:
         css_text = text[i:]
     else:
-        css_text = text[i:m.start()]
+        css_text = text[i : m.start()]
     ans = []
     css_user_data = user_data.css_user_data = user_data.css_user_data or CSSUserData()
     state.sub_parser_state = css_user_data.state = state.sub_parser_state or CSSState()
@@ -199,7 +220,7 @@ def css(state, text, i, formats, user_data):
 
 
 def cdata(state, text, i, formats, user_data):
-    'CDATA inside tags like <title> or <style>'
+    "CDATA inside tags like <title> or <style>"
     name = state.tags[-1].name
     pat = cdata_close_pats[name]
     m = pat.search(text, i)
@@ -242,7 +263,7 @@ def process_text(state, text, nbsp_format, spell_format, user_data):
             if fmt is nbsp_format:
                 split_ans.append((tlen, fmt))
             else:
-                split_ans.extend(check_spelling(text[tpos:tpos+tlen], tlen, fmt, locale, sfmt, store_locale.enabled))
+                split_ans.extend(check_spelling(text[tpos : tpos + tlen], tlen, fmt, locale, sfmt, store_locale.enabled))
 
             tpos += tlen
         ans = split_ans
@@ -251,20 +272,20 @@ def process_text(state, text, nbsp_format, spell_format, user_data):
 
 
 def normal(state, text, i, formats, user_data):
-    ' The normal state in between tags '
+    "The normal state in between tags"
     ch = text[i]
     if ch == '<':
-        if text[i:i+4] == '<!--':
+        if text[i : i + 4] == '<!--':
             state.parse, fmt = IN_COMMENT, formats['comment']
             user_data.non_tag_structures.append(NonTagBoundary(i, True, IN_COMMENT))
             return [(4, fmt)]
 
-        if text[i:i+2] == '<?':
+        if text[i : i + 2] == '<?':
             state.parse, fmt = IN_PI, formats['preproc']
             user_data.non_tag_structures.append(NonTagBoundary(i, True, IN_PI))
             return [(2, fmt)]
 
-        if text[i:i+2] == '<!' and text[i+2:].lstrip().lower().startswith('doctype'):
+        if text[i : i + 2] == '<!' and text[i + 2 :].lstrip().lower().startswith('doctype'):
             state.parse, fmt = IN_DOCTYPE, formats['preproc']
             user_data.non_tag_structures.append(NonTagBoundary(i, True, IN_DOCTYPE))
             return [(2, fmt)]
@@ -285,7 +306,7 @@ def normal(state, text, i, formats, user_data):
             return [(len(m.group()) + 1, formats['only-prefix'])]
         ans = [(2 if closing else 1, formats['end_tag' if closing else 'tag'])]
         if prefix:
-            ans.append((len(prefix)+1, formats['nsprefix']))
+            ans.append((len(prefix) + 1, formats['nsprefix']))
         ans.append((len(name), formats['tag_name']))
         state.parse = IN_CLOSING_TAG if closing else IN_OPENING_TAG
         add_tag_data(user_data, TagStart(i, prefix, name, closing, True))
@@ -304,12 +325,14 @@ def normal(state, text, i, formats, user_data):
     if ch == '>':
         return [(1, formats['>'])]
 
-    t = normal_pat.search(text, i).group()
+    nm = normal_pat.search(text, i)
+    assert nm is not None
+    t = nm.group()
     return process_text(state, t, formats['nbsp'], formats['spell'], user_data)
 
 
 def opening_tag(cdata_tags, state, text, i, formats, user_data):
-    'An opening tag, like <a>'
+    "An opening tag, like <a>"
     ch = text[i]
     if ch in space_chars:
         return [(1, None)]
@@ -340,7 +363,7 @@ def opening_tag(cdata_tags, state, text, i, formats, user_data):
 
 
 def attribute_name(state, text, i, formats, user_data):
-    ' After attribute name '
+    "After attribute name"
     ch = text[i]
     if ch in space_chars:
         return [(1, None)]
@@ -354,7 +377,7 @@ def attribute_name(state, text, i, formats, user_data):
 
 
 def attribute_value(state, text, i, formats, user_data):
-    ' After attribute = '
+    "After attribute ="
     ch = text[i]
     if ch in space_chars:
         return [(1, None)]
@@ -370,7 +393,7 @@ def attribute_value(state, text, i, formats, user_data):
 
 
 def quoted_val(state, text, i, formats, user_data):
-    ' A quoted attribute value '
+    "A quoted attribute value"
     quote = '"' if state.parse is DQ_VAL else "'"
     add_attr_data(user_data, ATTR_VALUE, ATTR_START, i)
     pos = text.find(quote, i)
@@ -390,7 +413,7 @@ def quoted_val(state, text, i, formats, user_data):
         is_class = not is_link and state.attribute_name == 'class'
 
     if is_link:
-        if verify_link(text[i:i+num - 1], user_data.doc_name) is False:
+        if verify_link(text[i : i + num - 1], user_data.doc_name) is False:
             return [(num - 1, formats['bad_link']), (1, formats['string'])]
         return [(num - 1, formats['link']), (1, formats['string'])]
     elif is_class:
@@ -399,7 +422,7 @@ def quoted_val(state, text, i, formats, user_data):
 
 
 def closing_tag(state, text, i, formats, user_data):
-    ' A closing tag like </a> '
+    "A closing tag like </a>"
     ch = text[i]
     if ch in space_chars:
         return [(1, None)]
@@ -416,8 +439,8 @@ def closing_tag(state, text, i, formats, user_data):
 
 
 def in_comment(state, text, i, formats, user_data):
-    ' Comment, processing instruction or doctype '
-    end = {IN_COMMENT:'-->', IN_PI:'?>'}.get(state.parse, '>')
+    "Comment, processing instruction or doctype"
+    end = {IN_COMMENT: '-->', IN_PI: '?>'}.get(state.parse, '>')
     pos = text.find(end, i)
     fmt = formats['comment' if state.parse is IN_COMMENT else 'preproc']
     if pos == -1:
@@ -430,7 +453,7 @@ def in_comment(state, text, i, formats, user_data):
 
 
 state_map = {
-    NORMAL:normal,
+    NORMAL: normal,
     IN_OPENING_TAG: partial(opening_tag, cdata_tags),
     IN_CLOSING_TAG: closing_tag,
     ATTRIBUTE_NAME: attribute_name,
@@ -465,16 +488,16 @@ def create_formats(highlighter, add_css=True):
         'nbsp': t['SpecialCharacter'],
         'spell': t['SpellError'],
     }
-    for name, msg in iteritems({
-            '<': _('An unescaped < is not allowed. Replace it with &lt;'),
-            '&': _('An unescaped ampersand is not allowed. Replace it with &amp;'),
-            '>': _('An unescaped > is not allowed. Replace it with &gt;'),
-            '/': _('/ not allowed except at the end of the tag'),
-            '?': _('Unknown character'),
-            'bad-closing': _('A closing tag must contain only the tag name and nothing else'),
-            'no-attr-value': _('Expecting an attribute value'),
-            'only-prefix': _('A tag name cannot end with a colon'),
-    }):
+    for name, msg in {
+        '<': _('An unescaped < is not allowed. Replace it with &lt;'),
+        '&': _('An unescaped ampersand is not allowed. Replace it with &amp;'),
+        '>': _('An unescaped > is not allowed. Replace it with &gt;'),
+        '/': _('/ not allowed except at the end of the tag'),
+        '?': _('Unknown character'),
+        'bad-closing': _('A closing tag must contain only the tag name and nothing else'),
+        'no-attr-value': _('Expecting an attribute value'),
+        'only-prefix': _('A tag name cannot end with a colon'),
+    }.items():
         f = formats[name] = syntax_text_char_format(formats['error'])
         f.setToolTip(msg)
     f = formats['title'] = syntax_text_char_format()
@@ -484,6 +507,7 @@ def create_formats(highlighter, add_css=True):
     formats['spell'].setProperty(SPELL_PROPERTY, True)
     formats['class_attr'] = syntax_text_char_format(t['Special'])
     formats['class_attr'].setProperty(CLASS_ATTRIBUTE_PROPERTY, True)
+    formats['class_attr'].setToolTip(_('Hold down the Ctrl key and click to open the first matching CSS style rule'))
     formats['link'] = syntax_text_char_format(t['Link'])
     formats['link'].setProperty(LINK_PROPERTY, True)
     formats['link'].setToolTip(_('Hold down the Ctrl key and click to open this link'))
@@ -496,36 +520,37 @@ def create_formats(highlighter, add_css=True):
 
 
 class Highlighter(SyntaxHighlighter):
-
     state_map = state_map
     create_formats_func = create_formats
     spell_attributes = ('alt', 'title')
     user_data_factory = HTMLUserData
 
-    def tag_ok_for_spell(self, name):
+    def tag_ok_for_spell(x, name=None):
         return HTMLUserData.tag_ok_for_spell(name)
 
 
 class XMLHighlighter(Highlighter):
-
     state_map = xml_state_map
     spell_attributes = ('opf:file-as',)
     user_data_factory = XMLUserData
 
-    def create_formats_func(self):
+    def create_formats_func(highlighter, add_css=True):
+        self = highlighter
         return create_formats(self, add_css=False)
 
-    def tag_ok_for_spell(self, name):
+    def tag_ok_for_spell(x, name=None):
         return XMLUserData.tag_ok_for_spell(name)
 
 
-def profile():
+def profile() -> None:
     import sys
-    from PyQt5.Qt import QTextDocument
+
+    from qt.core import QTextDocument
 
     from calibre.gui2 import Application
     from calibre.gui2.tweak_book import set_book_locale
     from calibre.gui2.tweak_book.editor.themes import get_theme
+
     app = Application([])
     set_book_locale('en')
     with open(sys.argv[-2], 'rb') as f:
@@ -538,9 +563,10 @@ def profile():
     h.set_document(doc)
     h.join()
     import cProfile
+
     print('Running profile on', sys.argv[-2])
     h.rehighlight()
-    cProfile.runctx('h.join()', {}, {'h':h}, sys.argv[-1])
+    cProfile.runctx('h.join()', {}, {'h': h}, sys.argv[-1])
     print('Stats saved to:', sys.argv[-1])
     del h
     del doc
@@ -549,7 +575,9 @@ def profile():
 
 if __name__ == '__main__':
     from calibre.gui2.tweak_book.editor.widget import launch_editor
-    launch_editor('''\
+
+    launch_editor(
+        '''\
 <!DOCTYPE html>
 <html xml:lang="en" lang="en">
 <!--
@@ -578,4 +606,6 @@ if __name__ == '__main__':
         <p>Some non-BMP unicode text:\U0001f431\U0001f431\U0001f431</p>
     </body>
 </html>
-''', path_is_raw=True)
+''',
+        path_is_raw=True,
+    )

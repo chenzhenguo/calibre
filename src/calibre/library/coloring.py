@@ -1,32 +1,38 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
 # License: GPLv3 Copyright: 2011, Kovid Goyal <kovid at kovidgoyal.net>
-
 
 import json
 import re
 from textwrap import dedent
+from typing import TYPE_CHECKING
 
+from calibre.utils.localization import _
 from polyglot.binary import as_hex_unicode, from_hex_bytes
-from polyglot.builtins import map
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from calibre.library.field_metadata import FieldMetadata
+
+    #: A condition is (column, action, value)
+    type Condition = tuple[str, str, str]
 
 color_row_key = '*row'
 
 
-class Rule(object):  # {{{
-
+class Rule:  # {{{
     SIGNATURE = '# BasicColorRule():'
 
     INVALID_CONDITION = _('INVALID CONDITION')
 
-    def __init__(self, fm, color=None):
+    def __init__(self, fm: FieldMetadata, color: str | None = None) -> None:
         self.color = color
         self.fm = fm
-        self.conditions = []
+        self.conditions: list[Condition] = []
 
-    def add_condition(self, col, action, val):
+    def add_condition(self, col: str, action: str, val: str) -> None:
         if col not in self.fm:
-            raise ValueError('%r is not a valid column name'%col)
+            raise ValueError(f'{col!r} is not a valid column name')
         v = self.validate_condition(col, action, val)
         if v:
             raise ValueError(v)
@@ -34,34 +40,33 @@ class Rule(object):  # {{{
             action = self.INVALID_CONDITION
         self.conditions.append((col, action, val))
 
-    def validate_condition(self, col, action, val):
+    def validate_condition(self, col: str, action: str, val: str) -> str | None:
         m = self.fm[col]
         dt = m['datatype']
-        if (dt in ('int', 'float', 'rating') and action in ('lt', 'eq', 'gt')):
+        if dt in ('int', 'float', 'rating') and action in ('lt', 'eq', 'gt'):
             try:
                 int(val) if dt == 'int' else float(val)
-            except:
-                return '%r is not a valid numerical value'%val
+            except Exception:
+                return f'{val!r} is not a valid numerical value'
 
-        if (dt in ('comments', 'series', 'text', 'enumeration') and 'pattern'
-                in action):
+        if dt in ('comments', 'series', 'text', 'enumeration') and 'pattern' in action:
             try:
                 re.compile(val)
-            except:
-                return '%r is not a valid regular expression'%val
+            except Exception:
+                return f'{val!r} is not a valid regular expression'
 
     @property
-    def signature(self):
+    def signature(self) -> str:
         args = (self.color, self.conditions)
         sig = json.dumps(args, ensure_ascii=False)
         return self.SIGNATURE + as_hex_unicode(sig)
 
     @property
-    def template(self):
+    def template(self) -> str | None:
         if not self.color or not self.conditions:
             return None
         conditions = [x for x in map(self.apply_condition, self.conditions) if x is not None]
-        conditions = (',\n' + ' '*9).join(conditions)
+        conditions = (',\n' + ' ' * 9).join(conditions)
         if len(self.conditions) > 1:
             return dedent('''\
                     program:
@@ -69,17 +74,15 @@ class Rule(object):  # {{{
                     test(and(
                              {conditions}
                         ), '{color}', '');
-                    ''').format(sig=self.signature, conditions=conditions,
-                            color=self.color)
+                    ''').format(sig=self.signature, conditions=conditions, color=self.color)
         else:
             return dedent('''\
                     program:
                     {sig}
                     test({conditions}, '{color}', '');
-                    ''').format(sig=self.signature, conditions=conditions,
-                            color=self.color)
+                    ''').format(sig=self.signature, conditions=conditions, color=self.color)
 
-    def apply_condition(self, condition):
+    def apply_condition(self, condition: Condition) -> str | None:
         col, action, val = condition
         m = self.fm[col]
         dt = m['datatype']
@@ -108,134 +111,134 @@ class Rule(object):  # {{{
                 return self.multiple_condition(col, action, val, ism['ui_to_list'])
             return self.text_condition(col, action, val)
 
-    def identifiers_condition(self, col, action, val):
+    def identifiers_condition(self, col: str, action: str, val: str) -> str:
         if action == 'has id':
-            return "identifier_in_list(field('identifiers'), '%s', '1', '')"%val
-        return "identifier_in_list(field('identifiers'), '%s', '', '1')"%val
+            return f"identifier_in_list(field('identifiers'), '{val}', '1', '')"
+        return f"identifier_in_list(field('identifiers'), '{val}', '', '1')"
 
-    def ondevice_condition(self, col, action, val):
+    def ondevice_condition(self, col: str, action: str, val: str) -> str | None:
         if action == 'is set':
-            return "test(ondevice(), '1', '')"
+            return 'ondevice()'
         if action == 'is not set':
-            return "test(ondevice(), '', '1')"
+            return '!ondevice()'
 
-    def bool_condition(self, col, action, val):
-        test = {'is true':      '0, 0, 1',
-                'is not true':  '1, 1, 0',
-                'is false':     '0, 1, 0',
-                'is not false': '1, 0, 1',
-                'is undefined': '1, 0, 0',
-                'is defined':   '0, 1, 1'}[action]
-        return "check_yes_no('%s', %s)"%(col, test)
-
-    def number_condition(self, col, action, val):
-        if action == 'is set':
-            return "test(field('%s'), '1', '')"%col
-        if action == 'is not set':
-            return "test(field('%s'), '', '1')"%col
-        lt, eq, gt = {
-                'eq': ('', '1', ''),
-                'lt': ('1', '', ''),
-                'gt': ('', '', '1')
+    def bool_condition(self, col: str, action: str, val: str) -> str:
+        test = {
+            'is true': '0, 0, 1',
+            'is not true': '1, 1, 0',
+            'is false': '0, 1, 0',
+            'is not false': '1, 0, 1',
+            'is undefined': '1, 0, 0',
+            'is defined': '0, 1, 1',
         }[action]
+        return f"check_yes_no('{col}', {test})"
+
+    def number_condition(self, col: str, action: str, val: str) -> str:
+        if action == 'is set':
+            return f'${col}'
+        if action == 'is not set':
+            return f'!${col}'
+        lt, eq, gt = {'eq': ('', '1', ''), 'lt': ('1', '', ''), 'gt': ('', '', '1')}[action]
         if col == 'size':
-            return "cmp(booksize(), %s, '%s', '%s', '%s')" % (val, lt, eq, gt)
+            return f"cmp(booksize(), {val}, '{lt}', '{eq}', '{gt}')"
         else:
-            return "cmp(raw_field('%s'), %s, '%s', '%s', '%s')" % (col, val, lt, eq, gt)
+            return f"cmp(raw_field('{col}', 0), {val}, '{lt}', '{eq}', '{gt}')"
 
-    def rating_condition(self, col, action, val):
-        lt, eq, gt = {
-                'eq': ('', '1', ''),
-                'lt': ('1', '', ''),
-                'gt': ('', '', '1')
-        }[action]
-        return "cmp(field('%s'), %s, '%s', '%s', '%s')" % (col, val, lt, eq, gt)
-
-    def date_condition(self, col, action, val):
-        if action == 'count_days':
-            return (("test(field('%s'), cmp(%s, "
-                            "days_between(format_date(today(), 'yyyy-MM-dd'),"
-                            "format_date(raw_field('%s'), 'yyyy-MM-dd')), '', '1', '1'), '')")
-                     %(col, val, col))
-        if action == 'older count days':
-            return (("test(field('%s'), cmp(%s, "
-                            "days_between(format_date(today(), 'yyyy-MM-dd'),"
-                            "format_date(raw_field('%s'), 'yyyy-MM-dd')), '1', '', ''), '')")
-                     %(col, val, col))
-        if action == 'older future days':
-            return (("test(field('%s'), cmp(%s, "
-                            "days_between(format_date(raw_field('%s'), 'yyyy-MM-dd'), "
-                            "format_date(today(), 'yyyy-MM-dd')), '', '1', '1'), '')")
-                     %(col, val, col))
-        if action == 'newer future days':
-            return (("test(field('%s'), cmp(%s, "
-                            "days_between(format_date(raw_field('%s'), 'yyyy-MM-dd'), "
-                            "format_date(today(), 'yyyy-MM-dd')), '1', '', ''), '')")
-                     %(col, val, col))
+    def rating_condition(self, col: str, action: str, val: str) -> str:
         if action == 'is set':
-            return (("test(field('%s'), '1', '')"%(col)))
+            return f'${col}'
         if action == 'is not set':
-            return (("test(field('%s'), '', '1')"%(col)))
-        lt, eq, gt = {
-                'eq': ('', '1', ''),
-                'lt': ('1', '', ''),
-                'gt': ('', '', '1')
-        }[action]
-        return ("strcmp(format_date(raw_field('%s'), 'yyyy-MM-dd'), '%s', '%s', '%s', '%s')" %
-            (col, val, lt, eq, gt))
+            return f'!${col}'
+        lt, eq, gt = {'eq': ('', '1', ''), 'lt': ('1', '', ''), 'gt': ('', '', '1')}[action]
+        return f"cmp(field('{col}'), {val}, '{lt}', '{eq}', '{gt}')"
 
-    def multiple_condition(self, col, action, val, sep):
+    def date_condition(self, col: str, action: str, val: str) -> str:
+        if action == 'count_days':
+            return (
+                f"test(field('{col}'), cmp({val}, "
+                "days_between(format_date(today(), 'yyyy-MM-dd'),"
+                f"format_date(raw_field('{col}'), 'yyyy-MM-dd')), '', '1', '1'), '')"
+            )
+        if action == 'older count days':
+            return (
+                f"test(field('{col}'), cmp({val}, "
+                "days_between(format_date(today(), 'yyyy-MM-dd'),"
+                f"format_date(raw_field('{col}'), 'yyyy-MM-dd')), '1', '', ''), '')"
+            )
+        if action == 'older future days':
+            return (
+                f"test(field('{col}'), cmp({val}, "
+                f"days_between(format_date(raw_field('{col}'), 'yyyy-MM-dd'), "
+                "format_date(today(), 'yyyy-MM-dd')), '', '1', '1'), '')"
+            )
+        if action == 'newer future days':
+            return (
+                f"test(field('{col}'), cmp({val}, "
+                f"days_between(format_date(raw_field('{col}'), 'yyyy-MM-dd'), "
+                "format_date(today(), 'yyyy-MM-dd')), '1', '', ''), '')"
+            )
+        if action == 'is set':
+            return f'${col}'
+        if action == 'is not set':
+            return f'!${col}'
+        if action == 'is today':
+            return f"substr(format_date(raw_field('{col}'), 'iso'), 0, 10) == substr(today(), 0, 10)"
+        lt, eq, gt = {'eq': ('', '1', ''), 'lt': ('1', '', ''), 'gt': ('', '', '1')}[action]
+        return f"strcmp(format_date(raw_field('{col}'), 'yyyy-MM-dd'), '{val}', '{lt}', '{eq}', '{gt}')"
+
+    def multiple_condition(self, col: str, action: str, val: str, sep: str | None) -> str | None:
         if not sep or sep == '|':
             sep = ','
         if action == 'is set':
-            return "test(field('%s'), '1', '')"%col
+            return f'${col}'
         if action == 'is not set':
-            return "test(field('%s'), '', '1')"%col
+            return f'!${col}'
         if action == 'has':
-            return "str_in_list(field('%s'), '%s', \"%s\", '1', '')"%(col, sep, val)
+            return f"str_in_list(field('{col}'), '{sep}', \"{val}\", '1', '')"
         if action == 'does not have':
-            return "str_in_list(field('%s'), '%s', \"%s\", '', '1')"%(col, sep, val)
+            return f"str_in_list(field('{col}'), '{sep}', \"{val}\", '', '1')"
         if action == 'has pattern':
-            return "in_list(field('%s'), '%s', \"%s\", '1', '')"%(col, sep, val)
+            return f"in_list(field('{col}'), '{sep}', \"{val}\", '1', '')"
         if action == 'does not have pattern':
-            return "in_list(field('%s'), '%s', \"%s\", '', '1')"%(col, sep, val)
+            return f"in_list(field('{col}'), '{sep}', \"{val}\", '', '1')"
 
-    def text_condition(self, col, action, val):
+    def text_condition(self, col: str, action: str, val: str) -> str | None:
         if action == 'is set':
-            return "test(field('%s'), '1', '')"%col
+            return f'${col}'
         if action == 'is not set':
-            return "test(field('%s'), '', '1')"%col
+            return f'!${col}'
         if action == 'is':
-            return "strcmp(field('%s'), \"%s\", '', '1', '')"%(col, val)
+            return f"strcmp(field('{col}'), \"{val}\", '', '1', '')"
         if action == 'is not':
-            return "strcmp(field('%s'), \"%s\", '1', '', '1')"%(col, val)
+            return f"strcmp(field('{col}'), \"{val}\", '1', '', '1')"
         if action == 'matches pattern':
-            return "contains(field('%s'), \"%s\", '1', '')"%(col, val)
+            return f"contains(field('{col}'), \"{val}\", '1', '')"
         if action == 'does not match pattern':
-            return "contains(field('%s'), \"%s\", '', '1')"%(col, val)
+            return f"contains(field('{col}'), \"{val}\", '', '1')"
         if action == 'contains':
-            return "contains(field('%s'), \"%s\", '1', '')"%(col, re.escape(val))
+            return f"contains(field('{col}'), \"{re.escape(val)}\", '1', '')"
         if action == 'does not contain':
-            return "contains(field('%s'), \"%s\", '', '1')"%(col, re.escape(val))
+            return f"contains(field('{col}'), \"{re.escape(val)}\", '', '1')"
+
 
 # }}}
 
 
-def rule_from_template(fm, template):
+def rule_from_template(fm: FieldMetadata, template: str) -> Rule | str:
     ok_lines = []
     for line in template.splitlines():
         if line.startswith(Rule.SIGNATURE):
-            raw = line[len(Rule.SIGNATURE):].strip()
+            raw = line[len(Rule.SIGNATURE) :].strip()
             try:
                 color, conditions = json.loads(from_hex_bytes(raw))
-            except:
+            except Exception:
                 continue
             r = Rule(fm)
             r.color = color
             for c in conditions:
                 try:
                     r.add_condition(*c)
-                except:
+                except Exception:
                     continue
             if r.color and r.conditions:
                 return r
@@ -244,27 +247,41 @@ def rule_from_template(fm, template):
     return '\n'.join(ok_lines)
 
 
-def conditionable_columns(fm):
+def conditionable_columns(fm: FieldMetadata) -> Iterator[str]:
     for key in fm:
         m = fm[key]
         dt = m['datatype']
-        if m.get('name', False) and dt in ('bool', 'int', 'float', 'rating', 'series',
-                'comments', 'text', 'enumeration', 'datetime', 'composite'):
+        if m.get('name', False) and dt in (
+            'bool',
+            'int',
+            'float',
+            'rating',
+            'series',
+            'comments',
+            'text',
+            'enumeration',
+            'datetime',
+            'composite',
+        ):
             if key == 'sort':
                 yield 'title_sort'
             else:
                 yield key
 
 
-def displayable_columns(fm):
+def displayable_columns(fm: FieldMetadata) -> Iterator[str]:
     yield color_row_key
     for key in fm.displayable_field_keys():
-        if key not in ('sort', 'author_sort', 'comments', 'formats',
-                'identifiers', 'path'):
+        if key not in (
+            'sort',
+            'author_sort',
+            'comments',
+            'identifiers',
+        ):
             yield key
 
 
-def migrate_old_rule(fm, template):
+def migrate_old_rule(fm: FieldMetadata, template: str) -> list[str | None]:
     if template.startswith('program:\n#tag wizard'):
         rules = []
         for line in template.splitlines():

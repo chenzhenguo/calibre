@@ -1,63 +1,110 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
-
 
 import importlib
 import os
 import re
-import regex
 import textwrap
 import unicodedata
-from PyQt5.Qt import (
-    QColor, QColorDialog, QFont, QFontDatabase, QKeySequence, QPainter, QPalette,
-    QPlainTextEdit, QRect, QSize, Qt, QTextCursor, QTextEdit, QTextFormat, QTimer,
-    QToolTip, QWidget, pyqtSignal
+from base64 import standard_b64encode
+from contextlib import suppress
+from typing import TYPE_CHECKING
+
+import regex
+from qt.core import (
+    QColor,
+    QColorDialog,
+    QFont,
+    QFontDatabase,
+    QFontMetrics,
+    QImage,
+    QKeySequence,
+    QPainter,
+    QPalette,
+    QPlainTextEdit,
+    QPoint,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTextCursor,
+    QTextEdit,
+    QTextFormat,
+    QTextLayout,
+    QTextLine,
+    QTimer,
+    QToolTip,
+    QWidget,
+    pyqtSignal,
 )
 
 from calibre import prepare_string_for_xml
 from calibre.ebooks.oeb.base import OEB_DOCS, OEB_STYLES, css_text
 from calibre.ebooks.oeb.polish.replace import get_recommended_folders
 from calibre.ebooks.oeb.polish.utils import guess_type
-from calibre.gui2.tweak_book import (
-    CONTAINER_DND_MIMETYPE, TOP, current_container, tprefs
-)
+from calibre.gui2.tweak_book import CONTAINER_DND_MIMETYPE, TOP, current_container, tprefs
 from calibre.gui2.tweak_book.completion.popup import CompletionPopup
 from calibre.gui2.tweak_book.editor import (
-    LINK_PROPERTY, SPELL_LOCALE_PROPERTY, SPELL_PROPERTY, SYNTAX_PROPERTY,
-    store_locale
+    CLASS_ATTRIBUTE_PROPERTY,
+    COLOR_PROPERTY,
+    LINK_PROPERTY,
+    SPELL_LOCALE_PROPERTY,
+    SPELL_PROPERTY,
+    SYNTAX_PROPERTY,
+    store_locale,
 )
 from calibre.gui2.tweak_book.editor.smarts import NullSmarts
 from calibre.gui2.tweak_book.editor.snippets import SnippetManager
 from calibre.gui2.tweak_book.editor.syntax.base import SyntaxHighlighter
-from calibre.gui2.tweak_book.editor.themes import (
-    get_theme, theme_color, theme_format
-)
+from calibre.gui2.tweak_book.editor.themes import get_theme, theme_color, theme_format
 from calibre.gui2.tweak_book.widgets import PARAGRAPH_SEPARATOR, PlainTextEdit
 from calibre.spell.break_iterator import index_of
-from calibre.utils.icu import (
-    capitalize, lower, safe_chr, string_length, swapcase, upper
-)
+from calibre.utils.icu import capitalize, lower, safe_chr, string_length, swapcase, upper, utf16_length
 from calibre.utils.img import image_to_data
+from calibre.utils.localization import _
 from calibre.utils.titlecase import titlecase
-from polyglot.builtins import as_unicode, map, range, unicode_type
+from polyglot.builtins import as_unicode
+
+if TYPE_CHECKING:
+    from calibre.gui2.tweak_book.grammar import InlineGrammarChecker
+
+
+def adjust_for_non_bmp_chars(raw: str, start: int, end: int) -> tuple[int, int]:
+    adjusted_start = utf16_length(raw[:start])
+    end = adjusted_start + utf16_length(raw[start:end])
+    start = adjusted_start
+    return start, end
+
+
+def css_color_text(color: QColor, original: str) -> str:
+    """Serialize color as CSS, using the same notation as original where possible"""
+    r, g, b, a = color.red(), color.green(), color.blue(), color.alpha()
+    original = original.strip().lower()
+    if original.startswith('#') or (original[:1].isalpha() and '(' not in original):
+        # Hex or named color, use hex
+        return color.name(QColor.NameFormat.HexRgb) + ('' if a == 255 else f'{a:02x}')
+    alpha = f'{color.alphaF():.3g}'
+    if original.startswith('hsl'):
+        h, sl, li = max(0, color.hslHue()), round(color.hslSaturationF() * 100), round(color.lightnessF() * 100)
+        return f'hsl({h}, {sl}%, {li}%)' if a == 255 else f'hsla({h}, {sl}%, {li}%, {alpha})'
+    return f'rgb({r}, {g}, {b})' if a == 255 else f'rgba({r}, {g}, {b}, {alpha})'
 
 
 def get_highlighter(syntax):
     if syntax:
         try:
             return importlib.import_module('calibre.gui2.tweak_book.editor.syntax.' + syntax).Highlighter
-        except (ImportError, AttributeError):
+        except ImportError, AttributeError:
             pass
     return SyntaxHighlighter
 
 
 def get_smarts(syntax):
     if syntax:
-        smartsname = {'xml':'html'}.get(syntax, syntax)
+        smartsname = {'xml': 'html'}.get(syntax, syntax)
         try:
             return importlib.import_module('calibre.gui2.tweak_book.editor.smarts.' + smartsname).Smarts
-        except (ImportError, AttributeError):
+        except ImportError, AttributeError:
             pass
 
 
@@ -67,7 +114,7 @@ _dff = None
 def default_font_family():
     global _dff
     if _dff is None:
-        families = set(map(unicode_type, QFontDatabase().families()))
+        families = set(map(str, QFontDatabase.families()))
         for x in ('Ubuntu Mono', 'Consolas', 'Liberation Mono'):
             if x in families:
                 _dff = x
@@ -78,24 +125,25 @@ def default_font_family():
 
 
 class LineNumbers(QWidget):  # {{{
-
-    def __init__(self, parent):
+    def __init__(self, parent) -> None:
         QWidget.__init__(self, parent)
 
     def sizeHint(self):
-        return QSize(self.parent().line_number_area_width(), 0)
+        return QSize(self.parent().line_number_area_width(), 0)  # type: ignore
 
-    def paintEvent(self, ev):
-        self.parent().paint_line_numbers(ev)
+    def paintEvent(self, a0) -> None:
+        self.parent().paint_line_numbers(a0)  # type: ignore
+
+
 # }}}
 
 
 class TextEdit(PlainTextEdit):
-
     link_clicked = pyqtSignal(object)
+    class_clicked = pyqtSignal(object)
     smart_highlighting_updated = pyqtSignal()
 
-    def __init__(self, parent=None, expected_geometry=(100, 50)):
+    def __init__(self, parent=None, expected_geometry=(100, 50)) -> None:
         PlainTextEdit.__init__(self, parent)
         self.snippet_manager = SnippetManager(self)
         self.completion_popup = CompletionPopup(self)
@@ -112,6 +160,9 @@ class TextEdit(PlainTextEdit):
         self.smarts = NullSmarts(self)
         self.current_cursor_line = None
         self.current_search_mark = None
+        # Set for editors of HTML files, see calibre.gui2.tweak_book.grammar
+        self.grammar_checker: InlineGrammarChecker | None = None
+        self.grammar_selections: list[QTextEdit.ExtraSelection] = []
         self.smarts_highlight_timer = t = QTimer()
         t.setInterval(750), t.setSingleShot(True), t.timeout.connect(self.update_extra_selections)
         self.highlighter = SyntaxHighlighter()
@@ -125,9 +176,7 @@ class TextEdit(PlainTextEdit):
     def get_droppable_files(self, md):
 
         def is_mt_ok(mt):
-            return self.syntax == 'html' and (
-                mt in OEB_DOCS or mt in OEB_STYLES or mt.startswith('image/')
-            )
+            return self.syntax == 'html' and (mt in OEB_DOCS or mt in OEB_STYLES or mt.startswith('image/'))
 
         if md.hasFormat(CONTAINER_DND_MIMETYPE):
             for line in as_unicode(bytes(md.data(CONTAINER_DND_MIMETYPE))).splitlines():
@@ -142,15 +191,15 @@ class TextEdit(PlainTextEdit):
                 if is_mt_ok(mt):
                     yield path, mt, False
 
-    def canInsertFromMimeData(self, md):
-        if md.hasText() or (md.hasHtml() and self.syntax == 'html') or md.hasImage():
+    def canInsertFromMimeData(self, source) -> bool:
+        if source.hasText() or (source.hasHtml() and self.syntax == 'html') or source.hasImage():
             return True
-        elif tuple(self.get_droppable_files(md)):
+        elif tuple(self.get_droppable_files(source)):
             return True
         return False
 
-    def insertFromMimeData(self, md):
-        files = tuple(self.get_droppable_files(md))
+    def insertFromMimeData(self, source):
+        files = tuple(self.get_droppable_files(source))
         base = self.highlighter.doc_name or None
 
         def get_name(name):
@@ -162,14 +211,21 @@ class TextEdit(PlainTextEdit):
         def get_href(name):
             return current_container().name_to_href(name, base)
 
-        def insert_text(text):
+        def insert_text(text) -> None:
             c = self.textCursor()
-            c.insertText(text)
+            c.insertText(unicodedata.normalize('NFC', text))
             self.setTextCursor(c)
+            text = self.toPlainText()
+            if (ntext := unicodedata.normalize('NFC', text)) != text:
+                pos = c.position()
+                self.setPlainText(ntext)
+                c.setPosition(pos)
+                self.setTextCursor(c)
             self.ensureCursorVisible()
 
         def add_file(name, data, mt=None):
             from calibre.gui2.tweak_book.boss import get_boss
+
             name = current_container().add_file(name, data, media_type=mt, modify_name_if_needed=True)
             get_boss().refresh_file_list()
             return name
@@ -180,58 +236,66 @@ class TextEdit(PlainTextEdit):
                     name = path
                 else:
                     name = get_name(os.path.basename(path))
-                    with lopen(path, 'rb') as f:
+                    with open(path, 'rb') as f:
                         name = add_file(name, f.read(), mt)
                 href = get_href(name)
                 if mt.startswith('image/'):
                     self.insert_image(href)
                 elif mt in OEB_STYLES:
-                    insert_text('<link href="{}" rel="stylesheet" type="text/css"/>'.format(href))
+                    insert_text(f'<link href="{href}" rel="stylesheet" type="text/css"/>')
                 elif mt in OEB_DOCS:
                     self.insert_hyperlink(href, name)
             self.ensureCursorVisible()
             return
-        if md.hasImage():
-            img = md.imageData()
+        if source.hasImage():
+            img = source.imageData()
             if img is not None and not img.isNull():
                 data = image_to_data(img, fmt='PNG')
                 name = add_file(get_name('dropped_image.png'), data)
                 self.insert_image(get_href(name))
                 self.ensureCursorVisible()
                 return
-        if md.hasText():
-            return insert_text(md.text())
-        if md.hasHtml():
-            insert_text(md.html())
+        if source.hasText():
+            return insert_text(source.text())
+        if source.hasHtml():
+            insert_text(source.html())
             return
 
     @property
     def is_modified(self):
-        ''' True if the document has been modified since it was loaded or since
-        the last time is_modified was set to False. '''
-        return self.document().isModified()
+        """True if the document has been modified since it was loaded or since
+        the last time is_modified was set to False."""
+        if (d := self.document()) is None:
+            return False
+        return d.isModified()
 
     @is_modified.setter
-    def is_modified(self, val):
-        self.document().setModified(bool(val))
+    def is_modified(self, val) -> None:
+        if (d := self.document()) is not None:
+            d.setModified(bool(val))
 
     def sizeHint(self):
         return self.size_hint
 
-    def apply_settings(self, prefs=None, dictionaries_changed=False):  # {{{
+    def apply_line_wrap_mode(self, yes: bool = True) -> None:
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth if yes else QPlainTextEdit.LineWrapMode.NoWrap)
+
+    def apply_settings(self, prefs=None, dictionaries_changed=False) -> None:  # {{{
         prefs = prefs or tprefs
         self.setAcceptDrops(prefs.get('editor_accepts_drops', True))
-        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth if prefs['editor_line_wrap'] else QPlainTextEdit.LineWrapMode.NoWrap)
+        self.apply_line_wrap_mode(prefs['editor_line_wrap'])
+        with suppress(Exception):
+            self.setCursorWidth(int(prefs.get('editor_cursor_width', 1)))
         theme = get_theme(prefs['editor_theme'])
         self.apply_theme(theme)
-        w = self.fontMetrics()
-        self.space_width = w.width(' ')
+        fm = self.fontMetrics()
+        self.space_width = fm.horizontalAdvance(' ')
         self.tw = self.smarts.override_tab_stop_width if self.smarts.override_tab_stop_width is not None else prefs['editor_tab_stop_width']
-        self.setTabStopWidth(self.tw * self.space_width)
+        self.setTabStopDistance(self.tw * self.space_width)
         if dictionaries_changed:
             self.highlighter.rehighlight()
 
-    def apply_theme(self, theme):
+    def apply_theme(self, theme) -> None:
         self.theme = theme
         pal = self.palette()
         pal.setColor(QPalette.ColorRole.Base, theme_color(theme, 'Normal', 'bg'))
@@ -240,6 +304,11 @@ class TextEdit(PlainTextEdit):
         pal.setColor(QPalette.ColorRole.Highlight, theme_color(theme, 'Visual', 'bg'))
         pal.setColor(QPalette.ColorRole.HighlightedText, theme_color(theme, 'Visual', 'fg'))
         self.setPalette(pal)
+        vp = self.viewport()
+        assert vp is not None
+        vpal = vp.palette()
+        vpal.setColor(QPalette.ColorRole.Base, pal.color(QPalette.ColorRole.Base))
+        vp.setPalette(vpal)
         self.tooltip_palette = pal = QPalette()
         pal.setColor(QPalette.ColorRole.ToolTipBase, theme_color(theme, 'Tooltip', 'bg'))
         pal.setColor(QPalette.ColorRole.ToolTipText, theme_color(theme, 'Tooltip', 'fg'))
@@ -253,20 +322,23 @@ class TextEdit(PlainTextEdit):
         if ff is None:
             ff = default_font_family()
         font.setFamily(ff)
-        font.setPointSize(tprefs['editor_font_size'])
+        font.setPointSizeF(tprefs['editor_font_size'])
         self.tooltip_font = QFont(font)
-        self.tooltip_font.setPointSize(font.pointSize() - 1)
+        self.tooltip_font.setPointSizeF(font.pointSizeF() - 1.0)
         self.setFont(font)
         self.highlighter.apply_theme(theme)
-        w = self.fontMetrics()
-        self.number_width = max(map(lambda x:w.width(unicode_type(x)), range(10)))
-        self.size_hint = QSize(self.expected_geometry[0] * w.averageCharWidth(), self.expected_geometry[1] * w.height())
+        fm = self.fontMetrics()
+        self.number_width = max(fm.horizontalAdvance(str(x)) for x in range(10))
+        self.size_hint = QSize(self.expected_geometry[0] * fm.averageCharWidth(), self.expected_geometry[1] * fm.height())
         self.highlight_color = theme_color(theme, 'HighlightRegion', 'bg')
         self.highlight_cursor_line()
         self.completion_popup.clear_caches(), self.completion_popup.update()
+        if self.grammar_checker is not None:
+            self.grammar_checker.update_selections()
+
     # }}}
 
-    def load_text(self, text, syntax='html', process_template=False, doc_name=None):
+    def load_text(self, text, syntax='html', process_template=False, doc_name=None) -> None:
         self.syntax = syntax
         self.highlighter = get_highlighter(syntax)()
         self.highlighter.apply_theme(self.theme)
@@ -276,17 +348,19 @@ class TextEdit(PlainTextEdit):
             self.smarts = sclass(self)
             if self.smarts.override_tab_stop_width is not None:
                 self.tw = self.smarts.override_tab_stop_width
-                self.setTabStopWidth(self.tw * self.space_width)
-        self.setPlainText(unicodedata.normalize('NFC', unicode_type(text)))
+                self.setTabStopDistance(self.tw * self.space_width)
+        if isinstance(text, bytes):
+            text = text.decode('utf-8', 'replace')
+        self.setPlainText(unicodedata.normalize('NFC', str(text)))
         if process_template and QPlainTextEdit.find(self, '%CURSOR%'):
             c = self.textCursor()
             c.insertText('')
 
-    def change_document_name(self, newname):
+    def change_document_name(self, newname) -> None:
         self.highlighter.doc_name = newname
         self.highlighter.rehighlight()  # Ensure links are checked w.r.t. the new name correctly
 
-    def replace_text(self, text):
+    def replace_text(self, text) -> None:
         c = self.textCursor()
         pos = c.position()
         c.beginEditBlock()
@@ -298,12 +372,12 @@ class TextEdit(PlainTextEdit):
         self.setTextCursor(c)
         self.ensureCursorVisible()
 
-    def simple_replace(self, text, cursor=None):
+    def simple_replace(self, text, cursor=None) -> None:
         c = cursor or self.textCursor()
         c.insertText(unicodedata.normalize('NFC', text))
         self.setTextCursor(c)
 
-    def go_to_line(self, lnum, col=None):
+    def go_to_line(self, lnum, col=None) -> None:
         lnum = max(1, min(self.blockCount(), lnum))
         c = self.textCursor()
         c.clearSelection()
@@ -311,7 +385,7 @@ class TextEdit(PlainTextEdit):
         c.movePosition(QTextCursor.MoveOperation.NextBlock, n=lnum - 1)
         c.movePosition(QTextCursor.MoveOperation.StartOfLine)
         c.movePosition(QTextCursor.MoveOperation.EndOfLine, QTextCursor.MoveMode.KeepAnchor)
-        text = unicode_type(c.selectedText()).rstrip('\0')
+        text = str(c.selectedText()).rstrip('\0')
         if col is None:
             c.movePosition(QTextCursor.MoveOperation.StartOfLine)
             lt = text.lstrip()
@@ -326,10 +400,11 @@ class TextEdit(PlainTextEdit):
         self.setTextCursor(c)
         self.ensureCursorVisible()
 
-    def update_extra_selections(self, instant=True):
+    def update_extra_selections(self, instant=True) -> None:
         sel = []
         if self.current_cursor_line is not None:
-            sel.append(self.current_cursor_line)
+            sel.extend(self.current_cursor_line)
+        sel.extend(self.grammar_selections)
         if self.current_search_mark is not None:
             sel.append(self.current_search_mark)
         if instant and not self.highlighter.has_requests and self.smarts is not None:
@@ -340,7 +415,7 @@ class TextEdit(PlainTextEdit):
         self.setExtraSelections(sel)
 
     # Search and replace {{{
-    def mark_selected_text(self):
+    def mark_selected_text(self) -> None:
         sel = QTextEdit.ExtraSelection()
         sel.format.setBackground(self.highlight_color)
         sel.cursor = self.textCursor()
@@ -353,7 +428,7 @@ class TextEdit(PlainTextEdit):
             self.current_search_mark = None
         self.update_extra_selections()
 
-    def find_in_marked(self, pat, wrap=False, save_match=None):
+    def find_in_marked(self, pat, wrap=False, save_match=None) -> bool:
         if self.current_search_mark is None:
             return False
         csm = self.current_search_mark.cursor
@@ -370,24 +445,24 @@ class TextEdit(PlainTextEdit):
         if wrap:
             pos = m_end if reverse else m_start
         c.setPosition(pos, QTextCursor.MoveMode.KeepAnchor)
-        raw = unicode_type(c.selectedText()).replace(PARAGRAPH_SEPARATOR, '\n').rstrip('\0')
+        raw = str(c.selectedText()).replace(PARAGRAPH_SEPARATOR, '\n').rstrip('\0')
         m = pat.search(raw)
         if m is None:
             return False
         start, end = m.span()
         if start == end:
             return False
+        start, end = adjust_for_non_bmp_chars(raw, start, end)
         if wrap:
             if reverse:
                 textpos = c.anchor()
                 start, end = textpos + end, textpos + start
             else:
                 start, end = m_start + start, m_start + end
+        elif reverse:
+            start, end = m_start + end, m_start + start
         else:
-            if reverse:
-                start, end = m_start + end, m_start + start
-            else:
-                start, end = c.anchor() + start, c.anchor() + end
+            start, end = c.anchor() + start, c.anchor() + end
 
         c.clearSelection()
         c.setPosition(start)
@@ -403,21 +478,23 @@ class TextEdit(PlainTextEdit):
         if self.current_search_mark is None:
             return 0
         c = self.current_search_mark.cursor
-        raw = unicode_type(c.selectedText()).replace(PARAGRAPH_SEPARATOR, '\n').rstrip('\0')
+        raw = str(c.selectedText()).replace(PARAGRAPH_SEPARATOR, '\n').rstrip('\0')
         if template is None:
             count = len(pat.findall(raw))
         else:
             from calibre.gui2.tweak_book.function_replace import Function
+
             repl_is_func = isinstance(template, Function)
             if repl_is_func:
                 template.init_env()
             raw, count = pat.subn(template, raw)
             if repl_is_func:
                 from calibre.gui2.tweak_book.search import show_function_debug_output
+
                 if getattr(template.func, 'append_final_output_to_marked', False):
                     retval = template.end()
                     if retval:
-                        raw += unicode_type(retval)
+                        raw += str(retval)
                 else:
                     template.end()
                 show_function_debug_output(template)
@@ -429,29 +506,39 @@ class TextEdit(PlainTextEdit):
                 self.update_extra_selections()
         return count
 
-    def smart_comment(self):
+    def smart_comment(self) -> None:
         from calibre.gui2.tweak_book.editor.comments import smart_comment
+
         smart_comment(self, self.syntax)
 
-    def sort_css(self):
+    def sort_css(self) -> None:
         from calibre.gui2.dialogs.confirm_delete import confirm
-        if confirm(_('Sorting CSS rules can in rare cases change the effective styles applied to the book.'
-                     ' Are you sure you want to proceed?'), 'edit-book-confirm-sort-css', parent=self, config_set=tprefs):
+
+        if confirm(
+            _('Sorting CSS rules can in rare cases change the effective styles applied to the book. Are you sure you want to proceed?'),
+            'edit-book-confirm-sort-css',
+            parent=self,
+            config_set=tprefs,
+        ):
             c = self.textCursor()
             c.beginEditBlock()
-            c.movePosition(QTextCursor.MoveOperation.Start), c.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
-            text = unicode_type(c.selectedText()).replace(PARAGRAPH_SEPARATOR, '\n').rstrip('\0')
+            (
+                c.movePosition(QTextCursor.MoveOperation.Start),
+                c.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor),
+            )
+            text = str(c.selectedText()).replace(PARAGRAPH_SEPARATOR, '\n').rstrip('\0')
             from calibre.ebooks.oeb.polish.css import sort_sheet
+
             text = css_text(sort_sheet(current_container(), text))
             c.insertText(text)
             c.movePosition(QTextCursor.MoveOperation.Start)
             c.endEditBlock()
             self.setTextCursor(c)
 
-    def find(self, pat, wrap=False, marked=False, complete=False, save_match=None):
+    def find(self, exp, wrap=False, marked=False, complete=False, save_match=None):  # ty: ignore[lost-keyword-for-regular-parameter]
         if marked:
-            return self.find_in_marked(pat, wrap=wrap, save_match=save_match)
-        reverse = pat.flags & regex.REVERSE
+            return self.find_in_marked(exp, wrap=wrap, save_match=save_match)
+        reverse = exp.flags & regex.REVERSE
         c = self.textCursor()
         c.clearSelection()
         if complete:
@@ -461,24 +548,24 @@ class TextEdit(PlainTextEdit):
         if wrap and not complete:
             pos = QTextCursor.MoveOperation.End if reverse else QTextCursor.MoveOperation.Start
         c.movePosition(pos, QTextCursor.MoveMode.KeepAnchor)
-        raw = unicode_type(c.selectedText()).replace(PARAGRAPH_SEPARATOR, '\n').rstrip('\0')
-        m = pat.search(raw)
+        raw = str(c.selectedText()).replace(PARAGRAPH_SEPARATOR, '\n').rstrip('\0')
+        m = exp.search(raw)
         if m is None:
             return False
         start, end = m.span()
         if start == end:
             return False
+        start, end = adjust_for_non_bmp_chars(raw, start, end)
         if wrap and not complete:
             if reverse:
                 textpos = c.anchor()
                 start, end = textpos + end, textpos + start
+        elif reverse:
+            # Put the cursor at the start of the match
+            start, end = end, start
         else:
-            if reverse:
-                # Put the cursor at the start of the match
-                start, end = end, start
-            else:
-                textpos = c.anchor()
-                start, end = textpos + start, textpos + end
+            textpos = c.anchor()
+            start, end = textpos + start, textpos + end
         c.clearSelection()
         c.setPosition(start)
         c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
@@ -486,10 +573,10 @@ class TextEdit(PlainTextEdit):
         # Center search result on screen
         self.centerCursor()
         if save_match is not None:
-            self.saved_matches[save_match] = (pat, m)
+            self.saved_matches[save_match] = (exp, m)
         return True
 
-    def find_text(self, pat, wrap=False, complete=False):
+    def find_text(self, pat, wrap=False, complete=False) -> bool:
         reverse = pat.flags & regex.REVERSE
         c = self.textCursor()
         c.clearSelection()
@@ -502,17 +589,18 @@ class TextEdit(PlainTextEdit):
         c.movePosition(pos, QTextCursor.MoveMode.KeepAnchor)
         if hasattr(self.smarts, 'find_text'):
             self.highlighter.join()
-            found, start, end = self.smarts.find_text(pat, c, reverse)
+            found, start, end = self.smarts.find_text(pat, c, reverse)  # type: ignore
             if not found:
                 return False
         else:
-            raw = unicode_type(c.selectedText()).replace(PARAGRAPH_SEPARATOR, '\n').rstrip('\0')
+            raw = str(c.selectedText()).replace(PARAGRAPH_SEPARATOR, '\n').rstrip('\0')
             m = pat.search(raw)
             if m is None:
                 return False
             start, end = m.span()
             if start == end:
                 return False
+            start, end = adjust_for_non_bmp_chars(raw, start, end)
         if reverse:
             start, end = end, start
         c.clearSelection()
@@ -523,7 +611,7 @@ class TextEdit(PlainTextEdit):
         self.centerCursor()
         return True
 
-    def find_spell_word(self, original_words, lang, from_cursor=True, center_on_cursor=True):
+    def find_spell_word(self, original_words, lang, from_cursor=True, center_on_cursor=True) -> bool | None:
         c = self.textCursor()
         c.setPosition(c.position())
         if not from_cursor:
@@ -539,7 +627,7 @@ class TextEdit(PlainTextEdit):
             return match_pos, match_word
 
         while True:
-            text = unicode_type(c.selectedText()).rstrip('\0')
+            text = str(c.selectedText()).rstrip('\0')
             idx, word = find_first_word(text)
             if idx == -1:
                 return False
@@ -556,15 +644,15 @@ class TextEdit(PlainTextEdit):
             c.setPosition(c.position())
             c.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
 
-        return False
-
-    def find_next_spell_error(self, from_cursor=True):
+    def find_next_spell_error(self, from_cursor=True) -> bool:
         c = self.textCursor()
         if not from_cursor:
             c.movePosition(QTextCursor.MoveOperation.Start)
         block = c.block()
         while block.isValid():
-            for r in block.layout().additionalFormats():
+            bl = block.layout()
+            assert bl is not None
+            for r in bl.formats():
                 if r.format.property(SPELL_PROPERTY):
                     if not from_cursor or block.position() + r.start + r.length > c.position():
                         c.setPosition(block.position() + r.start)
@@ -574,9 +662,9 @@ class TextEdit(PlainTextEdit):
             block = block.next()
         return False
 
-    def replace(self, pat, template, saved_match='gui'):
+    def replace(self, pat, template, saved_match='gui') -> bool:
         c = self.textCursor()
-        raw = unicode_type(c.selectedText()).replace(PARAGRAPH_SEPARATOR, '\n').rstrip('\0')
+        raw = str(c.selectedText()).replace(PARAGRAPH_SEPARATOR, '\n').rstrip('\0')
         m = pat.fullmatch(raw)
         if m is None:
             # This can happen if either the user changed the selected text or
@@ -596,14 +684,14 @@ class TextEdit(PlainTextEdit):
         c.insertText(text)
         return True
 
-    def go_to_anchor(self, anchor):
+    def go_to_anchor(self, anchor) -> bool:
         if anchor is TOP:
             c = self.textCursor()
             c.movePosition(QTextCursor.MoveOperation.Start)
             self.setTextCursor(c)
             return True
-        base = r'''%%s\s*=\s*['"]{0,1}%s''' % regex.escape(anchor)
-        raw = unicode_type(self.toPlainText())
+        base = rf'''%s\s*=\s*['"]{{0,1}}{regex.escape(anchor)}'''
+        raw = str(self.toPlainText())
         m = regex.search(base % 'id', raw)
         if m is None:
             m = regex.search(base % 'name', raw)
@@ -617,13 +705,37 @@ class TextEdit(PlainTextEdit):
     # }}}
 
     # Line numbers and cursor line {{{
-    def highlight_cursor_line(self):
+    def highlight_cursor_line(self) -> None:
+        self._highlight_cursor_line()
+
+    def _highlight_cursor_line(self, highlight_now=True) -> None:
+        if self.highlighter.is_working:
+            QTimer.singleShot(10, self.highlight_cursor_line)
+            if not highlight_now:
+                return
         sel = QTextEdit.ExtraSelection()
         sel.format.setBackground(self.palette().alternateBase())
         sel.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
         sel.cursor = self.textCursor()
         sel.cursor.clearSelection()
-        self.current_cursor_line = sel
+        self.current_cursor_line = [sel]
+
+        # apply any formats that have a background over the cursor line format
+        # to ensure they are visible
+        c = self.textCursor()
+        block = c.block()
+        c.clearSelection()
+        c.select(QTextCursor.SelectionType.LineUnderCursor)
+        start = min(c.anchor(), c.position())
+        length = max(c.anchor(), c.position()) - start
+        for f in self.highlighter.formats_for_line(block, start, length):
+            sel = QTextEdit.ExtraSelection()
+            c = self.textCursor()
+            c.setPosition(f.start + block.position())
+            c.setPosition(c.position() + f.length, QTextCursor.MoveMode.KeepAnchor)
+            sel.cursor, sel.format = c, f.format
+            self.current_cursor_line.append(sel)
+
         self.update_extra_selections(instant=False)
         # Update the cursor line's line number in the line number area
         try:
@@ -635,7 +747,7 @@ class TextEdit(PlainTextEdit):
         height = int(self.blockBoundingRect(block).height())
         self.line_number_area.update(0, top, self.line_number_area.width(), height)
 
-    def update_line_number_area_width(self, block_count=0):
+    def update_line_number_area_width(self, block_count=0) -> None:
         self.gutter_width = self.line_number_area_width()
         self.setViewportMargins(self.gutter_width, 0, 0, 0)
 
@@ -648,20 +760,22 @@ class TextEdit(PlainTextEdit):
 
         return 8 + self.number_width * digits
 
-    def update_line_number_area(self, rect, dy):
+    def update_line_number_area(self, rect, dy) -> None:
         if dy:
             self.line_number_area.scroll(0, dy)
         else:
             self.line_number_area.update(0, rect.y(), self.line_number_area.width(), rect.height())
-        if rect.contains(self.viewport().rect()):
+        vp = self.viewport()
+        assert vp is not None
+        if rect.contains(vp.rect()):
             self.update_line_number_area_width()
 
-    def resizeEvent(self, ev):
-        QPlainTextEdit.resizeEvent(self, ev)
+    def resizeEvent(self, e) -> None:
+        QPlainTextEdit.resizeEvent(self, e)
         cr = self.contentsRect()
         self.line_number_area.setGeometry(QRect(cr.left(), cr.top(), self.line_number_area_width(), cr.height()))
 
-    def paint_line_numbers(self, ev):
+    def paint_line_numbers(self, ev) -> None:
         painter = QPainter(self.line_number_area)
         painter.fillRect(ev.rect(), self.line_number_palette.color(QPalette.ColorRole.Base))
 
@@ -681,14 +795,21 @@ class TextEdit(PlainTextEdit):
                     f.setBold(True)
                     painter.setFont(f)
                     self.last_current_lnum = (top, bottom - top)
-                painter.drawText(0, top, self.line_number_area.width() - 5, self.fontMetrics().height(),
-                              Qt.AlignmentFlag.AlignRight, unicode_type(num + 1))
+                painter.drawText(
+                    0,
+                    top,
+                    self.line_number_area.width() - 5,
+                    self.fontMetrics().height(),
+                    Qt.AlignmentFlag.AlignRight,
+                    str(num + 1),
+                )
                 if current == num:
                     painter.restore()
             block = block.next()
             top = bottom
             bottom = top + int(self.blockBoundingRect(block).height())
             num += 1
+
     # }}}
 
     def override_shortcut(self, ev):
@@ -697,8 +818,11 @@ class TextEdit(PlainTextEdit):
         # instead of the one from Qt (which makes copy() work), and allows proper customization
         # of the shortcuts
         if ev in (
-            QKeySequence.StandardKey.Copy, QKeySequence.StandardKey.Cut, QKeySequence.StandardKey.Paste,
-            QKeySequence.StandardKey.Undo, QKeySequence.StandardKey.Redo
+            QKeySequence.StandardKey.Copy,
+            QKeySequence.StandardKey.Cut,
+            QKeySequence.StandardKey.Paste,
+            QKeySequence.StandardKey.Undo,
+            QKeySequence.StandardKey.Redo,
         ):
             ev.ignore()
             return True
@@ -713,7 +837,7 @@ class TextEdit(PlainTextEdit):
         c = self.textCursor()
         c.setPosition(block.position() + r.start)
         c.setPosition(c.position() + r.length, QTextCursor.MoveMode.KeepAnchor)
-        return unicode_type(c.selectedText())
+        return self.selected_text_from_cursor(c)
 
     def spellcheck_locale_for_cursor(self, c):
         with store_locale:
@@ -723,12 +847,14 @@ class TextEdit(PlainTextEdit):
             if r.start <= pos <= r.start + r.length and r.format.property(SPELL_PROPERTY):
                 return r.format.property(SPELL_LOCALE_PROPERTY)
 
-    def recheck_word(self, word, locale):
+    def recheck_word(self, word, locale) -> None:
         c = self.textCursor()
         c.movePosition(QTextCursor.MoveOperation.Start)
         block = c.block()
         while block.isValid():
-            for r in block.layout().additionalFormats():
+            bl = block.layout()
+            assert bl is not None
+            for r in bl.formats():
                 if r.format.property(SPELL_PROPERTY) and self.text_for_range(block, r) == word:
                     self.highlighter.reformat_block(block)
                     break
@@ -739,51 +865,209 @@ class TextEdit(PlainTextEdit):
         if cursor.isNull():
             return
         pos = cursor.positionInBlock()
-        for r in cursor.block().layout().additionalFormats():
+        for r in cursor.block().layout().formats():
             if r.start <= pos <= r.start + r.length and r.format.property(SYNTAX_PROPERTY):
                 return r
 
-    def show_tooltip(self, ev):
-        c = self.cursorForPosition(ev.pos())
-        fmt_range = self.syntax_range_for_cursor(c)
+    def syntax_range_for_point(self, pos: QPoint) -> QTextLayout.FormatRange | None:
+        # Return the syntax range containing the character under pos, which is
+        # in viewport co-ordinates. Unlike cursorForPosition() this does not
+        # snap to the nearest character boundary, which would match the range
+        # of the preceding character when pos is in the left half of a character.
+        block = self.cursorForPosition(pos).block()
+        if not block.isValid():
+            return None
+        layout = block.layout()
+        assert layout is not None
+        top_left = self.blockBoundingGeometry(block).translated(self.contentOffset()).topLeft()
+        y = pos.y() - top_left.y()
+        for i in range(layout.lineCount()):
+            line = layout.lineAt(i)
+            if line.y() <= y < line.y() + line.height():
+                idx = line.xToCursor(pos.x() - top_left.x(), QTextLine.CursorPosition.CursorOnCharacter)
+                for r in layout.formats():
+                    if r.start <= idx < r.start + r.length and r.format.property(SYNTAX_PROPERTY):
+                        return r
+                break
+        return None
+
+    def show_tooltip(self, ev) -> None:
+        # ToolTip events are propagated from the viewport to the editor, so
+        # ev.pos() is in editor co-ordinates
+        vp = self.viewport()
+        assert vp is not None
+        vpos = vp.mapFrom(self, ev.pos())
+        if self.grammar_checker is not None and (tt := self.grammar_checker.tooltip(self.cursorForPosition(vpos).position())):
+            QToolTip.setFont(self.tooltip_font)
+            QToolTip.setPalette(self.tooltip_palette)
+            QToolTip.showText(ev.globalPos(), tt, self)
+            return
+        fmt_range = self.syntax_range_for_point(vpos)
         fmt = getattr(fmt_range, 'format', None)
         if fmt is not None:
-            tt = unicode_type(fmt.toolTip())
+            color = fmt.property(COLOR_PROPERTY)
+            tt = self.color_tooltip(color) if isinstance(color, QColor) else textwrap.fill(str(fmt.toolTip()))
             if tt:
                 QToolTip.setFont(self.tooltip_font)
                 QToolTip.setPalette(self.tooltip_palette)
-                QToolTip.showText(ev.globalPos(), textwrap.fill(tt))
+                QToolTip.showText(ev.globalPos(), tt, self)
                 return
         QToolTip.hideText()
         ev.ignore()
+
+    def color_tooltip(self, color: QColor) -> str:
+        fm = QFontMetrics(self.tooltip_font)
+        sz = 3 * fm.height()
+        dpr = self.devicePixelRatioF()
+        img = QImage(int(sz * dpr), int(sz * dpr), QImage.Format.Format_ARGB32_Premultiplied)
+        img.setDevicePixelRatio(dpr)
+        swatch = QRectF(0, 0, sz, sz)
+        p = QPainter(img)
+        if color.alpha() < 255:
+            # Checkerboard so that the transparency of the color is visible
+            p.fillRect(swatch, QColor(255, 255, 255))
+            cell = sz / 4
+            for row in range(4):
+                for col in range(row % 2, 4, 2):
+                    p.fillRect(QRectF(col * cell, row * cell, cell, cell), QColor(204, 204, 204))
+        p.fillRect(swatch, color)
+        p.setPen(self.tooltip_palette.color(QPalette.ColorRole.ToolTipText))
+        p.drawRect(swatch.adjusted(0, 0, -1 / dpr, -1 / dpr))
+        p.end()
+        data = standard_b64encode(image_to_data(img, fmt='PNG')).decode('ascii')
+        r, g, b, a = color.red(), color.green(), color.blue(), color.alphaF()
+        h, sl, li = max(0, color.hslHue()), round(color.hslSaturationF() * 100), round(color.lightnessF() * 100)
+        if a < 1:
+            alpha = f'{a:.3g}'
+            lines = (f'#{r:02x}{g:02x}{b:02x}{color.alpha():02x}', f'rgba({r}, {g}, {b}, {alpha})', f'hsla({h}, {sl}%, {li}%, {alpha})')
+        else:
+            lines = (color.name(QColor.NameFormat.HexRgb), f'rgb({r}, {g}, {b})', f'hsl({h}, {sl}%, {li}%)')
+        return (
+            f'<table cellspacing="0" cellpadding="0"><tr><td><img width="{sz}" height="{sz}" src="data:image/png;base64,{data}"></td>'
+            f'<td style="padding-left: 1ex; white-space: pre">{"<br>".join(lines)}</td></tr></table>'
+            f'<p>{prepare_string_for_xml(_("Hold down the Ctrl key and click to change this color"))}</p>'
+        )
+
     # }}}
 
     def link_for_position(self, pos):
-        c = self.cursorForPosition(pos)
-        r = self.syntax_range_for_cursor(c)
+        r = self.syntax_range_for_point(pos)
         if r is not None and r.format.property(LINK_PROPERTY):
-            return self.text_for_range(c.block(), r)
+            return self.text_for_range(self.cursorForPosition(pos).block(), r)
 
-    def mousePressEvent(self, ev):
-        if self.completion_popup.isVisible() and not self.completion_popup.rect().contains(ev.pos()):
+    def color_range_for_position(self, pos: QPoint) -> tuple[int, int, QColor] | None:
+        # Return the absolute start and end positions and the color of the
+        # color value under pos. Color functions such as rgb() are made up of
+        # several adjacent ranges, so they are merged.
+        r = self.syntax_range_for_point(pos)
+        if r is None:
+            return None
+        color = r.format.property(COLOR_PROPERTY)
+        if not isinstance(color, QColor):
+            return None
+        block = self.cursorForPosition(pos).block()
+        layout = block.layout()
+        assert layout is not None
+        color_ranges = sorted((x.start, x.start + x.length) for x in layout.formats() if x.length > 0 and x.format.property(COLOR_PROPERTY) == color)
+        start, end = r.start, r.start + r.length
+        for s, e in reversed(color_ranges):
+            if s < start <= e:
+                start = s
+        for s, e in color_ranges:
+            if s <= end < e:
+                end = e
+        return block.position() + start, block.position() + end, color
+
+    def change_color(self, start: int, end: int, color: QColor, original: str) -> None:
+        c = self.textCursor()
+        c.setPosition(start)
+        c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        if self.selected_text_from_cursor(c) != original:
+            return  # text was changed in the meantime
+        ncolor = QColorDialog.getColor(color, self, _('Choose color'), QColorDialog.ColorDialogOption.ShowAlphaChannel)
+        if not ncolor.isValid() or ncolor.rgba() == color.rgba():
+            return
+        c.setPosition(start)
+        c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        if self.selected_text_from_cursor(c) != original:
+            return
+        c.insertText(css_color_text(ncolor, original))
+        self.setTextCursor(c)
+
+    def select_class_name_at_cursor(self, cursor):
+        valid = re.compile(r'^[\w_-]+$', flags=re.UNICODE)
+
+        def keep_going():
+            q = cursor.selectedText()
+            return valid.match(q) is not None
+
+        def run_loop(forward=True):
+            cursor.setPosition(pos)
+            n, p = QTextCursor.MoveOperation.NextCharacter, QTextCursor.MoveOperation.PreviousCharacter
+            if not forward:
+                n, p = p, n
+            while True:
+                if not cursor.movePosition(n, QTextCursor.MoveMode.KeepAnchor):
+                    break
+                if not keep_going():
+                    cursor.movePosition(p, QTextCursor.MoveMode.KeepAnchor)
+                    break
+            ans = cursor.position()
+            cursor.setPosition(pos)
+            return ans
+
+        pos = cursor.position()
+        forwards_limit = run_loop()
+        backwards_limit = run_loop(forward=False)
+        cursor.setPosition(backwards_limit)
+        cursor.setPosition(forwards_limit, QTextCursor.MoveMode.KeepAnchor)
+        return self.selected_text_from_cursor(cursor)
+
+    def class_for_position(self, pos):
+        r = self.syntax_range_for_point(pos)
+        if r is not None and r.format.property(CLASS_ATTRIBUTE_PROPERTY):
+            c = self.cursorForPosition(pos)
+            class_name = self.select_class_name_at_cursor(c)
+            if class_name:
+                tags = self.current_tag(for_position_sync=False, cursor=c)
+                return {'class': class_name, 'sourceline_address': tags}
+
+    def mousePressEvent(self, e):
+        if self.completion_popup.isVisible() and not self.completion_popup.rect().contains(e.pos()):
             # For some reason using eventFilter for this does not work, so we
             # implement it here
             self.completion_popup.abort()
-        if ev.modifiers() & Qt.Modifier.CTRL:
-            url = self.link_for_position(ev.pos())
+        if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            url = self.link_for_position(e.pos())
             if url is not None:
-                ev.accept()
+                e.accept()
                 self.link_clicked.emit(url)
                 return
-        return PlainTextEdit.mousePressEvent(self, ev)
+            class_data = self.class_for_position(e.pos())
+            if class_data is not None:
+                e.accept()
+                self.class_clicked.emit(class_data)
+                return
+            color_data = self.color_range_for_position(e.pos())
+            if color_data is not None:
+                e.accept()
+                start, end, color = color_data
+                c = self.textCursor()
+                c.setPosition(start)
+                c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+                original = self.selected_text_from_cursor(c)
+                # Show the dialog after the mouse press has been fully processed
+                QTimer.singleShot(0, lambda: self.change_color(start, end, color, original))
+                return
+        return PlainTextEdit.mousePressEvent(self, e)
 
     def get_range_inside_tag(self):
         c = self.textCursor()
         left = min(c.anchor(), c.position())
         right = max(c.anchor(), c.position())
-        # For speed we use QPlainTextEdit's toPlainText as we dont care about
+        # For speed we use QPlainTextEdit's toPlainText as we don't care about
         # spaces in this context
-        raw = unicode_type(QPlainTextEdit.toPlainText(self))
+        raw = str(QPlainTextEdit.toPlainText(self))
         # Make sure the left edge is not within a <>
         gtpos = raw.find('>', left)
         ltpos = raw.find('<', left)
@@ -794,7 +1078,7 @@ class TextEdit(PlainTextEdit):
             gtpos = raw.find('>', right)
             ltpos = raw.find('<', right)
             if ltpos > gtpos:
-                ltpos = raw.rfind('<', left, right+1)
+                ltpos = raw.rfind('<', left, right + 1)
                 right = max(ltpos, left)
         return left, right
 
@@ -807,39 +1091,30 @@ class TextEdit(PlainTextEdit):
         if formatting in {'color', 'background-color'}:
             color = QColorDialog.getColor(
                 QColor(Qt.GlobalColor.black if formatting == 'color' else Qt.GlobalColor.white),
-                self, _('Choose color'), QColorDialog.ColorDialogOption.ShowAlphaChannel)
+                self,
+                _('Choose color'),
+                QColorDialog.ColorDialogOption.ShowAlphaChannel,
+            )
             if not color.isValid():
                 return
             r, g, b, a = color.getRgb()
-            if a == 255:
-                color = 'rgb(%d, %d, %d)' % (r, g, b)
+            if a == 255 or a is None:
+                color = f'rgb({r}, {g}, {b})'
             else:
-                color = 'rgba(%d, %d, %d, %.2g)' % (r, g, b, a/255)
+                color = f'rgba({r}, {g}, {b}, {a / 255:.2g})'
         prefix, suffix = {
             'bold': ('<b>', '</b>'),
             'italic': ('<i>', '</i>'),
             'underline': ('<u>', '</u>'),
-            'strikethrough': ('<strike>', '</strike>'),
+            'strikethrough': ('<span style="text-decoration: line-through">', '</span>'),
             'superscript': ('<sup>', '</sup>'),
             'subscript': ('<sub>', '</sub>'),
-            'color': ('<span style="color: %s">' % color, '</span>'),
-            'background-color': ('<span style="background-color: %s">' % color, '</span>'),
+            'color': (f'<span style="color: {color}">', '</span>'),
+            'background-color': (f'<span style="background-color: {color}">', '</span>'),
         }[formatting]
-        left, right = self.get_range_inside_tag()
-        c = self.textCursor()
-        c.setPosition(left)
-        c.setPosition(right, QTextCursor.MoveMode.KeepAnchor)
-        prev_text = unicode_type(c.selectedText()).rstrip('\0')
-        c.insertText(prefix + prev_text + suffix)
-        if prev_text:
-            right = c.position()
-            c.setPosition(left)
-            c.setPosition(right, QTextCursor.MoveMode.KeepAnchor)
-        else:
-            c.setPosition(c.position() - len(suffix))
-        self.setTextCursor(c)
+        self.smarts.surround_with_custom_tag(self, prefix, suffix)
 
-    def insert_image(self, href, fullpage=False, preserve_aspect_ratio=False, width=-1, height=-1):
+    def insert_image(self, href, fullpage=False, preserve_aspect_ratio=False, width=-1, height=-1) -> None:
         if width <= 0:
             width = 1200
         if height <= 0:
@@ -853,7 +1128,7 @@ class TextEdit(PlainTextEdit):
             c.setPosition(right, QTextCursor.MoveMode.KeepAnchor)
             href = prepare_string_for_xml(href, True)
             if fullpage:
-                template =  '''\
+                template = '''\
 <div style="page-break-before:always; page-break-after:always; page-break-inside:avoid">\
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" \
 version="1.1" width="100%%" height="100%%" viewBox="0 0 {w} {h}" preserveAspectRatio="{a}">\
@@ -861,7 +1136,7 @@ version="1.1" width="100%%" height="100%%" viewBox="0 0 {w} {h}" preserveAspectR
 </svg></div>'''.format(w=width, h=height, a='xMidYMid meet' if preserve_aspect_ratio else 'none')
             else:
                 alt = _('Image')
-                template = '<img alt="{0}" src="%s" />'.format(alt)
+                template = f'<img alt="{alt}" src="%s" />'
         text = template % href
         c.insertText(text)
         if self.syntax == 'html' and not fullpage:
@@ -872,44 +1147,54 @@ version="1.1" width="100%%" height="100%%" viewBox="0 0 {w} {h}" preserveAspectR
             c.setPosition(left + len(text), QTextCursor.MoveMode.KeepAnchor)
         self.setTextCursor(c)
 
-    def insert_hyperlink(self, target, text, template=None):
-        if hasattr(self.smarts, 'insert_hyperlink'):
-            self.smarts.insert_hyperlink(self, target, text, template=template)
+    def insert_hyperlink(self, target, text, template=None) -> None:
+        self.smarts.insert_hyperlink(self, target, text, template=template)
 
-    def insert_tag(self, tag):
-        if hasattr(self.smarts, 'insert_tag'):
-            self.smarts.insert_tag(self, tag)
+    def insert_tag(self, tag) -> None:
+        self.smarts.insert_tag(self, tag)
 
-    def remove_tag(self):
-        if hasattr(self.smarts, 'remove_tag'):
-            self.smarts.remove_tag(self)
+    def remove_tag(self) -> None:
+        self.smarts.remove_tag(self)
 
-    def keyPressEvent(self, ev):
-        if ev.key() == Qt.Key.Key_X and ev.modifiers() == Qt.KeyboardModifier.AltModifier:
+    def split_tag(self) -> None:
+        self.smarts.split_tag(self)
+
+    def keyPressEvent(self, e) -> None:
+        if e.key() == Qt.Key.Key_X and e.modifiers() == Qt.KeyboardModifier.AltModifier:
             if self.replace_possible_unicode_sequence():
-                ev.accept()
+                e.accept()
                 return
-        if ev.key() == Qt.Key.Key_Insert:
+        if e.key() == Qt.Key.Key_Insert:
             self.setOverwriteMode(self.overwriteMode() ^ True)
-            ev.accept()
+            e.accept()
             return
-        if self.snippet_manager.handle_key_press(ev):
+        if self.snippet_manager.handle_key_press(e):
             self.completion_popup.hide()
             return
-        if self.smarts.handle_key_press(ev, self):
-            self.handle_keypress_completion(ev)
+        if self.smarts.handle_key_press(e, self):
+            self.handle_keypress_completion(e)
             return
-        QPlainTextEdit.keyPressEvent(self, ev)
-        self.handle_keypress_completion(ev)
+        QPlainTextEdit.keyPressEvent(self, e)
+        self.handle_keypress_completion(e)
 
-    def handle_keypress_completion(self, ev):
+    def handle_keypress_completion(self, ev) -> None:
         if self.request_completion is None:
             return
         code = ev.key()
         if code in (
-            0, Qt.Key.Key_unknown, Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Alt,
-            Qt.Key.Key_Meta, Qt.Key.Key_AltGr, Qt.Key.Key_CapsLock, Qt.Key.Key_NumLock,
-            Qt.Key.Key_ScrollLock, Qt.Key.Key_Up, Qt.Key.Key_Down):
+            0,
+            Qt.Key.Key_unknown,
+            Qt.Key.Key_Shift,
+            Qt.Key.Key_Control,
+            Qt.Key.Key_Alt,
+            Qt.Key.Key_Meta,
+            Qt.Key.Key_AltGr,
+            Qt.Key.Key_CapsLock,
+            Qt.Key.Key_NumLock,
+            Qt.Key.Key_ScrollLock,
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+        ):
             # We ignore up/down arrow so as to not break scrolling through the
             # text with the arrow keys
             return
@@ -920,22 +1205,22 @@ version="1.1" width="100%%" height="100%%" viewBox="0 0 {w} {h}" preserveAspectR
             self.last_completion_request = self.request_completion(*result)
         self.completion_popup.mark_completion(self, None if result is None else result[-1])
 
-    def handle_completion_result(self, result):
+    def handle_completion_result(self, result) -> None:
         if result.request_id[0] >= self.last_completion_request:
             self.completion_popup.handle_result(result)
 
-    def clear_completion_cache(self):
+    def clear_completion_cache(self) -> None:
         if self.request_completion is not None and self.completion_doc_name:
             self.request_completion(None, 'file:' + self.completion_doc_name)
 
-    def replace_possible_unicode_sequence(self):
+    def replace_possible_unicode_sequence(self) -> bool:
         c = self.textCursor()
         has_selection = c.hasSelection()
         if has_selection:
-            text = unicode_type(c.selectedText()).rstrip('\0')
+            text = str(c.selectedText()).rstrip('\0')
         else:
             c.setPosition(c.position() - min(c.positionInBlock(), 6), QTextCursor.MoveMode.KeepAnchor)
-            text = unicode_type(c.selectedText()).rstrip('\0')
+            text = str(c.selectedText()).rstrip('\0')
         m = re.search(r'[a-fA-F0-9]{2,6}$', text)
         if m is None:
             return False
@@ -944,26 +1229,30 @@ version="1.1" width="100%%" height="100%%" viewBox="0 0 {w} {h}" preserveAspectR
             num = int(text, 16)
         except ValueError:
             return False
-        if num > 0x10ffff or num < 1:
+        if num > 0x10FFFF or num < 1:
             return False
         end_pos = max(c.anchor(), c.position())
         c.setPosition(end_pos - len(text)), c.setPosition(end_pos, QTextCursor.MoveMode.KeepAnchor)
         c.insertText(safe_chr(num))
         return True
 
-    def select_all(self):
+    def select_all(self) -> None:
         c = self.textCursor()
         c.clearSelection()
         c.setPosition(0)
         c.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
         self.setTextCursor(c)
 
-    def rename_block_tag(self, new_name):
+    def rename_block_tag(self, new_name) -> None:
         if hasattr(self.smarts, 'rename_block_tag'):
             self.smarts.rename_block_tag(self, new_name)
 
-    def current_tag(self, for_position_sync=True):
-        return self.smarts.cursor_position_with_sourceline(self.textCursor(), for_position_sync=for_position_sync)
+    def current_tag(self, for_position_sync=True, cursor=None):
+        use_matched_tag = False
+        if cursor is None:
+            use_matched_tag = True
+            cursor = self.textCursor()
+        return self.smarts.cursor_position_with_sourceline(cursor, for_position_sync=for_position_sync, use_matched_tag=use_matched_tag)
 
     def goto_sourceline(self, sourceline, tags, attribute=None):
         return self.smarts.goto_sourceline(self, sourceline, tags, attribute=attribute)
@@ -973,14 +1262,18 @@ version="1.1" width="100%%" height="100%%" viewBox="0 0 {w} {h}" preserveAspectR
         if c is not None:
             return self.selected_text_from_cursor(c)
 
-    def goto_css_rule(self, rule_address, sourceline_address=None):
+    def goto_css_rule(self, rule_address, sourceline_address=None) -> None:
         from calibre.gui2.tweak_book.editor.smarts.css import find_rule
+
         block = None
+        d = self.document()
+        if d is None:
+            return
         if self.syntax == 'css':
-            raw = unicode_type(self.toPlainText())
+            raw = str(self.toPlainText())
             line, col = find_rule(raw, rule_address)
             if line is not None:
-                block = self.document().findBlockByNumber(line - 1)
+                block = d.findBlockByNumber(line - 1)
         elif sourceline_address is not None:
             sourceline, tags = sourceline_address
             if self.goto_sourceline(sourceline, tags):
@@ -990,16 +1283,16 @@ version="1.1" width="100%%" height="100%%" viewBox="0 0 {w} {h}" preserveAspectR
                 raw = self.get_tag_contents()
                 line, col = find_rule(raw, rule_address)
                 if line is not None:
-                    block = self.document().findBlockByNumber(c.blockNumber() + line - 1)
+                    block = d.findBlockByNumber(c.blockNumber() + line - 1)
 
         if block is not None and block.isValid():
             c = self.textCursor()
             c.setPosition(block.position() + col)
             self.setTextCursor(c)
 
-    def change_case(self, action, cursor=None):
+    def change_case(self, action, cursor=None) -> None:
         cursor = cursor or self.textCursor()
         text = self.selected_text_from_cursor(cursor)
-        text = {'lower':lower, 'upper':upper, 'capitalize':capitalize, 'title':titlecase, 'swap':swapcase}[action](text)
+        text = {'lower': lower, 'upper': upper, 'capitalize': capitalize, 'title': titlecase, 'swap': swapcase}[action](text)
         cursor.insertText(text)
         self.setTextCursor(cursor)

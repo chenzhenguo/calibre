@@ -1,97 +1,133 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-import re, os, traceback, shutil, time
-from threading import Thread
+import os
+import re
+import shutil
+import sys
+import time
+import traceback
+from contextlib import closing, suppress
 from operator import itemgetter
+from threading import Thread
+from typing import TYPE_CHECKING, Any
 
-from calibre.ptempfile import TemporaryDirectory
-from calibre.ebooks.metadata.opf2 import OPF
+from calibre import force_unicode
+from calibre.constants import filesystem_encoding, iswindows
 from calibre.db.backend import DB, DBPrefs
 from calibre.db.cache import Cache
-from calibre.constants import filesystem_encoding
+from calibre.db.constants import METADATA_FILE_NAME, NOTES_DB_NAME, NOTES_DIR_NAME, TRASH_DIR_NAME
+from calibre.ebooks.metadata.opf2 import OPF
+from calibre.ptempfile import TemporaryDirectory
 from calibre.utils.date import utcfromtimestamp
-from calibre import isbytestring, force_unicode
-from polyglot.builtins import iteritems, filter
+from calibre.utils.localization import _
 
-NON_EBOOK_EXTENSIONS = frozenset((
-    'jpg', 'jpeg', 'gif', 'png', 'bmp',
-    'opf', 'swp', 'swo'
-))
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from datetime import datetime
+    from typing import TypedDict
+
+    from calibre.ebooks.metadata.book.base import Metadata
+
+    class RestoreBook(TypedDict):
+        mi: Metadata
+        timestamp: float
+        formats: list[tuple[str, int, str]]
+        id: int
+        dirpath: str
+        path: str
+        annotations: tuple[dict, ...]
+
+
+NON_EBOOK_EXTENSIONS = frozenset(('jpg', 'jpeg', 'gif', 'png', 'bmp', 'opf', 'swp', 'swo'))
+
+
+def read_opf(dirpath: str, read_annotations: bool = True) -> tuple[Metadata, float, tuple[dict, ...]]:
+    opf = os.path.join(dirpath, METADATA_FILE_NAME)
+    parsed_opf = OPF(opf, basedir=dirpath)
+    mi = parsed_opf.to_book_metadata()
+    annotations = tuple(parsed_opf.read_annotations()) if read_annotations else ()
+    timestamp = os.path.getmtime(opf)
+    return mi, timestamp, annotations
+
+
+def is_ebook_file(filename: str) -> bool:
+    ext = os.path.splitext(filename)[1]
+    if not ext:
+        return False
+    ext = ext[1:].lower()
+    bad_ext_pat = re.compile(r'[^a-z0-9_]+')
+    if ext in NON_EBOOK_EXTENSIONS or bad_ext_pat.search(ext) is not None:
+        return False
+    return True
 
 
 class Restorer(Cache):
-
-    def __init__(self, library_path, default_prefs=None, restore_all_prefs=False, progress_callback=lambda x, y:True):
-        backend = DB(library_path, default_prefs=default_prefs, restore_all_prefs=restore_all_prefs, progress_callback=progress_callback)
+    def __init__(
+        self,
+        library_path: str,
+        default_prefs: dict[str, object] | None = None,
+        restore_all_prefs: bool = False,
+        progress_callback: Callable[[str | None, int], object] = lambda x, y: True,
+    ) -> None:
+        backend = DB(
+            library_path,
+            default_prefs=default_prefs,
+            restore_all_prefs=restore_all_prefs,
+            progress_callback=progress_callback,
+        )
         Cache.__init__(self, backend)
         for x in ('update_path', 'mark_as_dirty'):
             setattr(self, x, self.no_op)
             setattr(self, '_' + x, self.no_op)
         self.init()
 
-    def no_op(self, *args, **kwargs):
+    def no_op(self, *args: object, **kwargs: object) -> None:
         pass
 
 
 class Restore(Thread):
-
-    def __init__(self, library_path, progress_callback=None):
-        super(Restore, self).__init__()
-        if isbytestring(library_path):
+    def __init__(self, library_path: str | bytes, progress_callback: Callable[..., Any] | None = None) -> None:
+        super().__init__()
+        if isinstance(library_path, bytes):
             library_path = library_path.decode(filesystem_encoding)
         self.src_library_path = os.path.abspath(library_path)
-        self.progress_callback = progress_callback
         self.db_id_regexp = re.compile(r'^.* \((\d+)\)$')
-        self.bad_ext_pat = re.compile(r'[^a-z0-9_]+')
-        if not callable(self.progress_callback):
-            self.progress_callback = lambda x, y: x
-        self.dirs = []
-        self.ignored_dirs = []
-        self.failed_dirs = []
-        self.books = []
+        self.progress_callback: Callable[..., Any] = progress_callback if callable(progress_callback) else (lambda x, y: x)
+        self.dirs: list[tuple[str, list[str], list[str], str]] = []
+        self.failed_dirs: list[tuple[str, str]] = []
+        self.books: list[RestoreBook] = []
         self.conflicting_custom_cols = {}
-        self.failed_restores = []
-        self.mismatched_dirs = []
+        self.failed_restores: list[tuple[RestoreBook, str]] = []
+        self.mismatched_dirs: list[str] = []
+        self.notes_errors: list[str] = []
         self.successes = 0
-        self.tb = None
-        self.authors_links = {}
+        self.tb: str | None = None
+        self.link_maps: dict[str, dict[str, tuple[str, datetime | None]]] = {}
 
     @property
-    def errors_occurred(self):
-        return (self.failed_dirs or self.mismatched_dirs or
-                self.conflicting_custom_cols or self.failed_restores)
+    def errors_occurred(self) -> list[tuple[str, str]] | list[str] | dict[str, list[list[object]]] | list[tuple[RestoreBook, str]]:
+        return self.failed_dirs or self.mismatched_dirs or self.conflicting_custom_cols or self.failed_restores or self.notes_errors
 
     @property
-    def report(self):
+    def report(self) -> str:
         ans = ''
-        failures = list(self.failed_dirs) + [(x['dirpath'], tb) for x, tb in
-                self.failed_restores]
+        failures = list(self.failed_dirs) + [(x['dirpath'], tb) for x, tb in self.failed_restores]
         if failures:
             ans += 'Failed to restore the books in the following folders:\n'
             for dirpath, tb in failures:
                 ans += '\t' + force_unicode(dirpath, filesystem_encoding) + ' with error:\n'
-                ans += '\n'.join('\t\t'+force_unicode(x, filesystem_encoding) for x in tb.splitlines())
+                ans += '\n'.join('\t\t' + force_unicode(x, filesystem_encoding) for x in tb.splitlines())
                 ans += '\n\n'
 
         if self.conflicting_custom_cols:
             ans += '\n\n'
-            ans += 'The following custom columns have conflicting definitions ' \
-                    'and were not fully restored:\n'
+            ans += 'The following custom columns have conflicting definitions and were not fully restored:\n'
             for x in self.conflicting_custom_cols:
-                ans += '\t#'+x+'\n'
-                ans += '\tused:\t%s, %s, %s, %s\n'%(self.custom_columns[x][1],
-                                                    self.custom_columns[x][2],
-                                                    self.custom_columns[x][3],
-                                                    self.custom_columns[x][5])
+                ans += '\t#' + x + '\n'
+                ans += f'\tused:\t{self.custom_columns[x][1]}, {self.custom_columns[x][2]}, {self.custom_columns[x][3]}, {self.custom_columns[x][5]}\n'
                 for coldef in self.conflicting_custom_cols[x]:
-                    ans += '\tother:\t%s, %s, %s, %s\n'%(coldef[1], coldef[2],
-                                                         coldef[3], coldef[5])
+                    ans += f'\tother:\t{coldef[1]}, {coldef[2]}, {coldef[3]}, {coldef[5]}\n'
 
         if self.mismatched_dirs:
             ans += '\n\n'
@@ -99,16 +135,21 @@ class Restore(Thread):
             for x in self.mismatched_dirs:
                 ans += '\t' + force_unicode(x, filesystem_encoding) + '\n'
 
+        if self.notes_errors:
+            ans += '\n\n'
+            ans += 'Failed to restore notes for the following items:\n'
+            for x in self.notes_errors:
+                ans += '\t' + x
         return ans
 
-    def run(self):
+    def run(self) -> None:
         try:
             basedir = os.path.dirname(self.src_library_path)
             try:
                 tdir = TemporaryDirectory('_rlib', dir=basedir)
                 tdir.__enter__()
-            except EnvironmentError:
-                # Incase we dont have permissions to create directories in the
+            except OSError:
+                # In case we don't have permissions to create directories in the
                 # parent folder of the src library
                 tdir = TemporaryDirectory('_rlib')
 
@@ -127,10 +168,14 @@ class Restore(Thread):
                 if self.successes == 0 and len(self.dirs) > 0:
                     raise Exception('Something bad happened')
                 self.replace_db()
-        except:
+        except Exception:
             self.tb = traceback.format_exc()
+            for dirpath, tb in self.failed_dirs:
+                self.tb += f'\n\n-------------\nFailed to restore: {dirpath}\n{tb}'
+            for book, tb in self.failed_restores:
+                self.tb += f'\n\n-------------\nFailed to restore: {book["path"]}\n{tb}'
 
-    def load_preferences(self):
+    def load_preferences(self) -> bool:
         self.progress_callback(None, 1)
         self.progress_callback(_('Starting restoring preferences and column metadata'), 0)
         prefs_path = os.path.join(self.src_library_path, 'metadata_db_prefs_backup.json')
@@ -139,9 +184,7 @@ class Restore(Thread):
             return False
         try:
             prefs = DBPrefs.read_serialized(self.src_library_path, recreate_prefs=False)
-            db = Restorer(self.library_path, default_prefs=prefs,
-                                 restore_all_prefs=True,
-                                 progress_callback=self.progress_callback)
+            db = Restorer(self.library_path, default_prefs=prefs, restore_all_prefs=True, progress_callback=self.progress_callback)
             db.close()
             self.progress_callback(None, 1)
             if 'field_metadata' in prefs:
@@ -149,54 +192,56 @@ class Restore(Thread):
                 return True
             self.progress_callback(_('Finished restoring preferences'), 1)
             return False
-        except:
+        except Exception:
             traceback.print_exc()
             self.progress_callback(None, 1)
             self.progress_callback(_('Restoring preferences and column metadata failed'), 0)
         return False
 
-    def scan_library(self):
+    def scan_library(self) -> None:
         for dirpath, dirnames, filenames in os.walk(self.src_library_path):
+            with suppress(ValueError):
+                dirnames.remove(TRASH_DIR_NAME)
             leaf = os.path.basename(dirpath)
             m = self.db_id_regexp.search(leaf)
-            if m is None or 'metadata.opf' not in filenames:
-                self.ignored_dirs.append(dirpath)
+            if m is None or METADATA_FILE_NAME not in filenames:
                 continue
-            self.dirs.append((dirpath, filenames, m.group(1)))
+            self.dirs.append((dirpath, list(dirnames), filenames, m.group(1)))
+            del dirnames[:]
 
         self.progress_callback(None, len(self.dirs))
-        for i, x in enumerate(self.dirs):
-            dirpath, filenames, book_id = x
+        for i, (dirpath, dirnames, filenames, book_id) in enumerate(self.dirs):
             try:
-                self.process_dir(dirpath, filenames, book_id)
-            except:
+                self.process_dir(dirpath, dirnames, filenames, book_id)
+            except Exception:
                 self.failed_dirs.append((dirpath, traceback.format_exc()))
-            self.progress_callback(_('Processed') + ' ' + dirpath, i+1)
+                traceback.print_exc()
+            self.progress_callback(_('Processed') + ' ' + dirpath, i + 1)
 
-    def is_ebook_file(self, filename):
-        ext = os.path.splitext(filename)[1]
-        if not ext:
-            return False
-        ext = ext[1:].lower()
-        if ext in NON_EBOOK_EXTENSIONS or \
-                self.bad_ext_pat.search(ext) is not None:
-            return False
-        return True
-
-    def process_dir(self, dirpath, filenames, book_id):
+    def process_dir(self, dirpath: str, dirnames: list[str], filenames: list[str], book_id: str | int) -> None:
         book_id = int(book_id)
-        formats = list(filter(self.is_ebook_file, filenames))
-        fmts    = [os.path.splitext(x)[1][1:].upper() for x in formats]
-        sizes   = [os.path.getsize(os.path.join(dirpath, x)) for x in formats]
-        names   = [os.path.splitext(x)[0] for x in formats]
-        opf = os.path.join(dirpath, 'metadata.opf')
-        parsed_opf = OPF(opf, basedir=dirpath)
-        mi = parsed_opf.to_book_metadata()
-        annotations = tuple(parsed_opf.read_annotations())
-        timestamp = os.path.getmtime(opf)
-        path = os.path.relpath(dirpath, self.src_library_path).replace(os.sep,
-                '/')
 
+        def safe_mtime(path: str) -> float:
+            with suppress(OSError):
+                return os.path.getmtime(path)
+            return sys.maxsize
+
+        filenames.sort(key=lambda f: safe_mtime(os.path.join(dirpath, f)))
+        fmt_map: dict[str, str] = {}
+        fmts, formats, sizes, names = [], [], [], []
+        for x in filenames:
+            if is_ebook_file(x):
+                fmt = os.path.splitext(x)[1][1:].upper()
+                if fmt and fmt_map.setdefault(fmt, x) is x:
+                    formats.append(x)
+                    sizes.append(os.path.getsize(os.path.join(dirpath, x)))
+                    names.append(os.path.splitext(x)[0])
+                    fmts.append(fmt)
+
+        mi, timestamp, annotations = read_opf(dirpath)
+        path = os.path.relpath(dirpath, self.src_library_path).replace(os.sep, '/')
+
+        assert mi.application_id is not None
         if int(mi.application_id) == book_id:
             self.books.append({
                 'mi': mi,
@@ -205,25 +250,32 @@ class Restore(Thread):
                 'id': book_id,
                 'dirpath': dirpath,
                 'path': path,
-                'annotations': annotations
+                'annotations': annotations,
             })
         else:
             self.mismatched_dirs.append(dirpath)
 
-        alm = mi.get('author_link_map', {})
-        for author, link in iteritems(alm):
-            existing_link, timestamp = self.authors_links.get(author, (None, None))
-            if existing_link is None or existing_link != link and timestamp < mi.timestamp:
-                self.authors_links[author] = (link, mi.timestamp)
+        alm = mi.link_maps
+        for field, lmap in alm.items():
+            dest = self.link_maps.setdefault(field, {})
+            for item, link in lmap.items():
+                existing_link, timestamp = dest.get(item, (None, None))
+                if existing_link is None:
+                    dest[item] = link, mi.timestamp
+                elif existing_link != link:
+                    # comparing with None raises TypeError
+                    assert timestamp is not None and mi.timestamp is not None
+                    if timestamp < mi.timestamp:
+                        dest[item] = link, mi.timestamp
 
-    def create_cc_metadata(self):
+    def create_cc_metadata(self) -> None:
         self.books.sort(key=itemgetter('timestamp'))
         self.custom_columns = {}
-        fields = ('label', 'name', 'datatype', 'is_multiple', 'is_editable',
-                    'display')
+        fields = ('label', 'name', 'datatype', 'is_multiple', 'is_editable', 'display')
         for b in self.books:
             for key in b['mi'].custom_field_keys():
                 cfm = b['mi'].metadata_for_field(key)
+                assert cfm is not None  # key is a custom field key
                 args = []
                 for x in fields:
                     if x in cfm:
@@ -245,42 +297,90 @@ class Restore(Thread):
         self.progress_callback(None, len(self.custom_columns))
         if len(self.custom_columns):
             for i, args in enumerate(self.custom_columns.values()):
-                db.create_custom_column(*args)
-                self.progress_callback(_('Creating custom column ')+args[0], i+1)
+                db.create_custom_column(*args)  # ty: ignore[invalid-argument-type]
+                self.progress_callback(_('Creating custom column ') + str(args[0]), i + 1)
         db.close()
 
-    def restore_books(self):
+    def restore_books(self) -> None:
         self.progress_callback(None, len(self.books))
         self.books.sort(key=itemgetter('id'))
 
+        notes_dest = os.path.join(self.library_path, NOTES_DIR_NAME)
+        if os.path.exists(notes_dest):  # created by load_preferences()
+            shutil.rmtree(notes_dest)
+        notes_src = os.path.join(self.src_library_path, NOTES_DIR_NAME)
+        if os.path.exists(notes_src):  # if missing, Restorer creates a fresh notes store
+            shutil.copytree(notes_src, notes_dest)
+            with suppress(FileNotFoundError):
+                os.remove(os.path.join(notes_dest, NOTES_DB_NAME))
         db = Restorer(self.library_path)
+        with closing(db), db.new_api.write_lock:
+            with db.new_api:
+                for i, book in enumerate(self.books):
+                    try:
+                        db.restore_book(
+                            book['id'],
+                            book['mi'],
+                            utcfromtimestamp(book['timestamp']),
+                            book['path'],
+                            book['formats'],
+                            book['annotations'],
+                        )
+                        self.successes += 1
+                    except Exception:
+                        self.failed_restores.append((book, traceback.format_exc()))
+                        traceback.print_exc()
+                    self.progress_callback(book['mi'].title, i + 1)
 
-        for i, book in enumerate(self.books):
-            try:
-                db.restore_book(book['id'], book['mi'], utcfromtimestamp(book['timestamp']), book['path'], book['formats'], book['annotations'])
-                self.successes += 1
-            except:
-                self.failed_restores.append((book, traceback.format_exc()))
-            self.progress_callback(book['mi'].title, i+1)
+            with db.new_api:
+                for field, lmap in self.link_maps.items():
+                    with suppress(Exception):
+                        db.set_link_map(field, {k: v[0] for k, v in lmap.items()})
+            self.notes_errors = db.backend.restore_notes(self.progress_callback)
 
-        id_map = db.get_item_ids('authors', [author for author in self.authors_links])
-        link_map = {aid:self.authors_links[name][0] for name, aid in iteritems(id_map) if aid is not None}
-        if link_map:
-            db.set_link_for_authors(link_map)
-        db.close()
-
-    def replace_db(self):
+    def replace_db(self) -> None:
         dbpath = os.path.join(self.src_library_path, 'metadata.db')
         ndbpath = os.path.join(self.library_path, 'metadata.db')
+        sleep_time = 30 if iswindows else 0
 
-        save_path = self.olddb = os.path.splitext(dbpath)[0]+'_pre_restore.db'
+        save_path = self.olddb = os.path.splitext(dbpath)[0] + '_pre_restore.db'
         if os.path.exists(save_path):
             os.remove(save_path)
         if os.path.exists(dbpath):
             try:
-                os.rename(dbpath, save_path)
-            except EnvironmentError:
-                time.sleep(30)  # Wait a little for dropbox or the antivirus or whatever to release the file
+                os.replace(dbpath, save_path)
+            except OSError:
+                if iswindows:
+                    time.sleep(sleep_time)  # Wait a little for dropbox or the antivirus or whatever to release the file
                 shutil.copyfile(dbpath, save_path)
                 os.remove(dbpath)
         shutil.copyfile(ndbpath, dbpath)
+
+        old_notes_path = os.path.join(self.src_library_path, NOTES_DIR_NAME)
+        new_notes_path = os.path.join(self.library_path, NOTES_DIR_NAME)
+        temp = old_notes_path + '-staging'
+        with suppress(OSError):
+            shutil.rmtree(temp)
+        try:
+            shutil.move(new_notes_path, temp)
+        except OSError:
+            if not iswindows:
+                raise
+            time.sleep(sleep_time)  # Wait a little for dropbox or the antivirus or whatever to release the file
+            shutil.move(new_notes_path, temp)
+        try:
+            shutil.rmtree(old_notes_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            if not iswindows:
+                raise
+            time.sleep(sleep_time)  # Wait a little for dropbox or the antivirus or whatever to release the file
+            shutil.rmtree(old_notes_path)
+        try:
+            shutil.move(temp, old_notes_path)
+        except OSError:
+            if not iswindows:
+                raise
+            time.sleep(sleep_time)  # Wait a little for dropbox or the antivirus or whatever to release the file
+            shutil.move(temp, old_notes_path)

@@ -1,58 +1,73 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid@kovidgoyal.net>
 
-from polyglot.builtins import map, unicode_type
-
-__license__   = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-import re, os
+import os
+import re
 from functools import partial
 from operator import attrgetter
-from collections import namedtuple
+from typing import TYPE_CHECKING, NamedTuple, Self
 
 from calibre import guess_type, replace_entities
 from calibre.ebooks.chardet import xml_to_unicode
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from calibre.ebooks.metadata.toc import TOC
 
 
-def character_count(html):
-    ''' Return the number of "significant" text characters in a HTML string. '''
+def character_count(html: str) -> int:
+    '''Return the number of "significant" text characters in a HTML string.'''
     count = 0
     strip_space = re.compile(r'\s+')
     for match in re.finditer(r'>[^<]+<', html):
-        count += len(strip_space.sub(' ', match.group()))-2
+        count += len(strip_space.sub(' ', match.group())) - 2
     return count
 
 
-def anchor_map(html):
-    ''' Return map of all anchor names to their offsets in the html '''
-    ans = {}
-    for match in re.finditer(
-        r'''(?:id|name)\s*=\s*['"]([^'"]+)['"]''', html):
+def anchor_map(html: str) -> dict[str, int]:
+    """Return map of all anchor names to their offsets in the html"""
+    ans: dict[str, int] = {}
+    for match in re.finditer(r'''(?:id|name)\s*=\s*['"]([^'"]+)['"]''', html):
         anchor = match.group(1)
         ans[anchor] = ans.get(anchor, match.start())
     return ans
 
 
-def all_links(html):
-    ''' Return set of all links in the file '''
-    ans = set()
-    for match in re.finditer(
-            r'''<\s*[Aa]\s+.*?[hH][Rr][Ee][Ff]\s*=\s*(['"])(.+?)\1''', html, re.MULTILINE|re.DOTALL):
+def all_links(html: str) -> set[str]:
+    """Return set of all links in the file"""
+    ans: set[str] = set()
+    for match in re.finditer(r'''<\s*[Aa]\s+.*?[hH][Rr][Ee][Ff]\s*=\s*(['"])(.+?)\1''', html, re.MULTILINE | re.DOTALL):
         ans.add(replace_entities(match.group(2)))
     return ans
 
 
-class SpineItem(unicode_type):
+class SpineItem(str):
+    encoding: str | None  # None for empty files
+    character_count: int
+    anchor_map: dict[str, int]
+    all_links: set[str]
+    verified_links: set[tuple[SpineItem, str]]
+    pages: int
+    start_page: int
+    max_page: int
+    index_entries: list[IndexElement]
+    is_single_page: bool | None
+    mime_type: str | None
 
-    def __new__(cls, path, mime_type=None, read_anchor_map=True,
-            run_char_count=True, from_epub=False, read_links=True):
+    def __new__(
+        cls,
+        path: str,
+        mime_type: str | None = None,
+        read_anchor_map: bool = True,
+        run_char_count: bool = True,
+        from_epub: bool = False,
+        read_links: bool = True,
+    ) -> Self:
         ppath = path.partition('#')[0]
         if not os.path.exists(path) and os.path.exists(ppath):
             path = ppath
-        obj = super(SpineItem, cls).__new__(cls, path)
-        with lopen(path, 'rb') as f:
+        obj = super().__new__(cls, path)
+        with open(path, 'rb') as f:
             raw = f.read()
         if from_epub:
             # According to the spec, HTML in EPUB must be encoded in utf-8 or
@@ -76,8 +91,8 @@ class SpineItem(unicode_type):
         obj.all_links = all_links(raw) if read_links else set()
         obj.verified_links = set()
         obj.start_page = -1
-        obj.pages      = -1
-        obj.max_page   = -1
+        obj.pages = -1
+        obj.max_page = -1
         obj.index_entries = []
         if mime_type is None:
             mime_type = guess_type(obj)[0]
@@ -86,21 +101,19 @@ class SpineItem(unicode_type):
         return obj
 
 
-class IndexEntry(object):
-
-    def __init__(self, spine, toc_entry, num):
+class IndexEntry:
+    def __init__(self, spine: list[SpineItem], toc_entry: TOC, num: int) -> None:
         self.num = num
         self.text = toc_entry.text or _('Unknown')
         self.key = toc_entry.abspath
         self.anchor = self.start_anchor = toc_entry.fragment or None
         try:
-            self.spine_pos = spine.index(self.key)
+            self.spine_pos = spine.index(self.key)  # ty: ignore[invalid-argument-type] SpineItem is a str subclass, a missing path raises ValueError
         except ValueError:
             self.spine_pos = -1
         self.anchor_pos = 0
         if self.spine_pos > -1:
-            self.anchor_pos = spine[self.spine_pos].anchor_map.get(self.anchor,
-                    0)
+            self.anchor_pos = spine[self.spine_pos].anchor_map.get(self.anchor, 0)
 
         self.depth = 0
         p = toc_entry.parent
@@ -111,13 +124,12 @@ class IndexEntry(object):
         self.sort_key = (self.spine_pos, self.anchor_pos)
         self.spine_count = len(spine)
 
-    def find_end(self, all_entries):
-        potential_enders = [i for i in all_entries if
-                i.depth <= self.depth and
-                (
-                    (i.spine_pos == self.spine_pos and i.anchor_pos > self.anchor_pos) or
-                    i.spine_pos > self.spine_pos
-                )]
+    def find_end(self, all_entries: list[IndexEntry]) -> None:
+        potential_enders = [
+            i
+            for i in all_entries
+            if i.depth <= self.depth and ((i.spine_pos == self.spine_pos and i.anchor_pos > self.anchor_pos) or i.spine_pos > self.spine_pos)
+        ]
         if potential_enders:
             # potential_enders is sorted by (spine_pos, anchor_pos)
             end = potential_enders[0]
@@ -128,18 +140,20 @@ class IndexEntry(object):
             self.end_anchor = None
 
 
-def create_indexing_data(spine, toc):
+class IndexElement(NamedTuple):
+    entry: IndexEntry
+    start_anchor: str | None
+    end_anchor: str | None
+
+
+def create_indexing_data(spine: list[SpineItem], toc: TOC | None) -> None:
+
     if not toc:
         return
     f = partial(IndexEntry, spine)
-    index_entries = list(map(f,
-        (t for t in toc.flat() if t is not toc),
-        (i-1 for i, t in enumerate(toc.flat()) if t is not toc)
-        ))
+    index_entries = list(map(f, (t for t in toc.flat() if t is not toc), (i - 1 for i, t in enumerate(toc.flat()) if t is not toc)))
     index_entries.sort(key=attrgetter('sort_key'))
     [i.find_end(index_entries) for i in index_entries]
-
-    ie = namedtuple('IndexEntry', 'entry start_anchor end_anchor')
 
     for spine_pos, spine_item in enumerate(spine):
         for i in index_entries:
@@ -147,4 +161,4 @@ def create_indexing_data(spine, toc):
                 continue  # Does not touch this file
             start = i.anchor if i.spine_pos == spine_pos else None
             end = i.end_anchor if i.spine_pos == spine_pos else None
-            spine_item.index_entries.append(ie(i, start, end))
+            spine_item.index_entries.append(IndexElement(i, start, end))

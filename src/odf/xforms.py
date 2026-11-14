@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (C) 2006-2007 Søren Roug, European Environment Agency
 #
 # This library is free software; you can redistribute it and/or
@@ -19,8 +18,8 @@
 #
 
 
-from .namespaces import XFORMSNS
 from .element import Element
+from .namespaces import XFORMSNS
 
 # ODF 1.0 section 11.2
 # XForms is designed to be embedded in another XML format.
@@ -28,12 +27,12 @@ from .element import Element
 
 
 def Model(**args):
-    return Element(qname=(XFORMSNS,'model'), **args)
+    return Element(qname=(XFORMSNS, 'model'), **args)
 
 
 def Instance(**args):
-    return Element(qname=(XFORMSNS,'instance'), **args)
+    return Element(qname=(XFORMSNS, 'instance'), **args)
 
 
 def Bind(**args):
-    return Element(qname=(XFORMSNS,'bind'), **args)
+    return Element(qname=(XFORMSNS, 'bind'), **args)

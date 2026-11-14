@@ -1,26 +1,20 @@
-# -*- coding: utf-8 -*-
-
-
-__license__ = 'GPL 3'
-__copyright__ = '2011, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
 
 from functools import partial
 
-from PyQt5.Qt import (Qt, QTreeView, QSize, QMenu)
+from qt.core import QMenu, QSize, Qt, QTreeView
 
 from calibre.customize.ui import store_plugins
 from calibre.gui2.metadata.single_download import RichTextDelegate
-from calibre.gui2.store.config.chooser.models import Matches, Delegate
-from polyglot.builtins import range
+from calibre.gui2.store.config.chooser.models import Delegate, Matches
+from calibre.utils.localization import _
 
 
 class ResultsView(QTreeView):
+    def __init__(self, parent=None) -> None:
+        QTreeView.__init__(self, parent)
 
-    def __init__(self, *args):
-        QTreeView.__init__(self,*args)
-
-        self._model = Matches([p for p in store_plugins()])
+        self._model = Matches(list(store_plugins()))
         self.setModel(self._model)
 
         self.setIconSize(QSize(24, 24))
@@ -35,22 +29,27 @@ class ResultsView(QTreeView):
         for i in range(self._model.columnCount()):
             self.resizeColumnToContents(i)
 
-        self.model().sort(1, Qt.SortOrder.AscendingOrder)
-        self.header().setSortIndicator(self.model().sort_col, self.model().sort_order)
+        self._model.sort(1, Qt.SortOrder.AscendingOrder)
+        _header = self.header()
+        assert _header is not None
+        _header.setSortIndicator(self._model.sort_col, self._model.sort_order)
 
-    def contextMenuEvent(self, event):
-        index = self.indexAt(event.pos())
+    def contextMenuEvent(self, a0) -> None:
+        index = self.indexAt(a0.pos())
 
         if not index.isValid():
             return
 
-        plugin = self.model().get_plugin(index)
+        _m = self.model()
+        assert isinstance(_m, Matches)
+        plugin = _m.get_plugin(index)
 
         menu = QMenu(self)
         ca = menu.addAction(_('Configure...'), partial(self.configure_plugin, plugin))
         if not plugin.is_customizable():
+            assert ca is not None
             ca.setEnabled(False)
-        menu.exec_(event.globalPos())
+        menu.exec(a0.globalPos())
 
-    def configure_plugin(self, plugin):
+    def configure_plugin(self, plugin) -> None:
         plugin.do_user_config(self)

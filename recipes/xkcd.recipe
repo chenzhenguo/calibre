@@ -13,8 +13,9 @@ Changed cover (drMerry)
 Fetch xkcd.
 '''
 
-import time
 import re
+import time
+
 from calibre.web.feeds.news import BasicNewsRecipe
 
 
@@ -32,8 +33,10 @@ class XkcdCom(BasicNewsRecipe):
     no_stylesheets = True
     # turn image bubblehelp into a paragraph, and put alt in a heading
     preprocess_regexps = [
-        (re.compile(r'(<img.*title=")([^"]+)(".alt=")([^"]+)(".*>)'),
-         lambda m: '<h1>%s</h1>%s%s%s<p>%s</p>' % (m.group(4), m.group(1), m.group(3), m.group(5), m.group(2)))
+        (
+            re.compile(r'(<img.*title=")([^"]+)(".alt=")([^"]+)(".*>)'),
+            lambda m: '<h1>%s</h1>%s%s%s<p>%s</p>' % (m.group(4), m.group(1), m.group(3), m.group(5), m.group(2)),
+        )
     ]
 
     def parse_index(self):

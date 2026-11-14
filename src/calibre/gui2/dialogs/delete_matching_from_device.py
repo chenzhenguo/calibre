@@ -1,24 +1,17 @@
 #!/usr/bin/env python
+# License: GPLv3 Copyright: 2008, Kovid Goyal kovid@kovidgoyal.net
 
-
-__copyright__ = '2008, Kovid Goyal kovid@kovidgoyal.net'
-__docformat__ = 'restructuredtext en'
-__license__   = 'GPL v3'
-
-from PyQt5.Qt import Qt, QDialog, QTableWidgetItem, QAbstractItemView
+from qt.core import QAbstractItemView, QDialog, Qt, QTableWidgetItem
 
 from calibre import strftime
-from calibre.ebooks.metadata import authors_to_string, authors_to_sort_string, \
-                                    title_sort
-from calibre.gui2.dialogs.delete_matching_from_device_ui import \
-                                            Ui_DeleteMatchingFromDeviceDialog
+from calibre.ebooks.metadata import authors_to_sort_string, authors_to_string, title_sort
+from calibre.gui2.dialogs.delete_matching_from_device_ui import Ui_DeleteMatchingFromDeviceDialog
 from calibre.utils.date import UNDEFINED_DATE
-from polyglot.builtins import unicode_type
+from calibre.utils.localization import _
 
 
 class tableItem(QTableWidgetItem):
-
-    def __init__(self, text):
+    def __init__(self, text) -> None:
         QTableWidgetItem.__init__(self, text)
         self.setFlags(Qt.ItemFlag.ItemIsEnabled)
         self.sort = text.lower()
@@ -31,22 +24,19 @@ class tableItem(QTableWidgetItem):
 
 
 class centeredTableItem(tableItem):
-
-    def __init__(self, text):
+    def __init__(self, text) -> None:
         tableItem.__init__(self, text)
         self.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
 
 class titleTableItem(tableItem):
-
-    def __init__(self, text):
+    def __init__(self, text) -> None:
         tableItem.__init__(self, text)
         self.sort = title_sort(text.lower())
 
 
 class authorTableItem(tableItem):
-
-    def __init__(self, book):
+    def __init__(self, book) -> None:
         tableItem.__init__(self, authors_to_string(book.authors))
         if book.author_sort is not None:
             self.sort = book.author_sort.lower()
@@ -55,8 +45,7 @@ class authorTableItem(tableItem):
 
 
 class dateTableItem(tableItem):
-
-    def __init__(self, date):
+    def __init__(self, date) -> None:
         if date is not None:
             tableItem.__init__(self, strftime('%x', date))
             self.sort = date
@@ -66,33 +55,36 @@ class dateTableItem(tableItem):
 
 
 class DeleteMatchingFromDeviceDialog(QDialog, Ui_DeleteMatchingFromDeviceDialog):
-
-    def __init__(self, parent, items):
+    def __init__(self, parent, items) -> None:
         QDialog.__init__(self, parent)
         Ui_DeleteMatchingFromDeviceDialog.__init__(self)
         self.setupUi(self)
 
-        self.explanation.setText('<p>'+_('All checked books will be '
-                                   '<b>permanently deleted</b> from your '
-                                   'device. Please verify the list.')+'</p>')
-        self.buttonBox.accepted.connect(self.accepted)
+        self.explanation.setText('<p>' + _('All checked books will be <b>permanently deleted</b> from your device. Please verify the list.') + '</p>')
+        self.buttonBox.accepted.connect(self.handle_accepted)
         self.buttonBox.rejected.connect(self.rejected)
         self.table.cellClicked.connect(self.cell_clicked)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(
-                                    ['', _('Location'), _('Title'), _('Author'),
-                                      _('Date'), _('Format'), _('Path')])
+        self.table.setHorizontalHeaderLabels([
+            '',
+            _('Location'),
+            _('Title'),
+            _('Author'),
+            _('Date'),
+            _('Format'),
+            _('Path'),
+        ])
         rows = 0
         for card in items:
             rows += len(items[card][1])
         self.table.setRowCount(rows)
         row = 0
         for card in items:
-            (model,books) = items[card]
-            for (id,book) in books:
+            model, books = items[card]
+            for id, book in books:
                 item = QTableWidgetItem()
-                item.setFlags(Qt.ItemFlag.ItemIsUserCheckable|Qt.ItemFlag.ItemIsEnabled)
+                item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
                 item.setCheckState(Qt.CheckState.Checked)
                 item.setData(Qt.ItemDataRole.UserRole, (model, id, book.path))
                 self.table.setItem(row, 0, item)
@@ -109,16 +101,17 @@ class DeleteMatchingFromDeviceDialog(QDialog, Ui_DeleteMatchingFromDeviceDialog)
         self.table.sortByColumn(2, Qt.SortOrder.AscendingOrder)
         self.table.setCurrentCell(0, 1)
 
-    def cell_clicked(self, row, col):
+    def cell_clicked(self, row, col) -> None:
         if col == 0:
             self.table.setCurrentCell(row, 1)
 
-    def accepted(self):
-        self.result = []
+    def handle_accepted(self) -> None:
+        self.result_val = []
         for row in range(self.table.rowCount()):
-            if self.table.item(row, 0).checkState() == Qt.CheckState.Unchecked:
+            item_0 = self.table.item(row, 0)
+            assert item_0 is not None
+            if item_0.checkState() == Qt.CheckState.Unchecked:
                 continue
-            (model, id, path) = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-            path = unicode_type(path)
-            self.result.append((model, id, path))
-        return
+            model, id, path = item_0.data(Qt.ItemDataRole.UserRole)
+            path = str(path)
+            self.result_val.append((model, id, path))

@@ -1,0 +1,470 @@
+[project]
+name = "calibre"
+description = "The one stop solution to all your e-book needs"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "GPL-3.0-only"
+dynamic = ["version"]
+dependencies = [
+	"six == 1.17.0",
+	"unrardll == 0.1.7",
+	"lxml == 6.1.1",
+	"pychm == 0.8.6",
+	"html5-parser == 0.5.0",
+	"css-parser == 1.1.1",
+	"python-dateutil == 2.9.0",
+	"jeepney == 0.9.0",
+	"dnspython == 2.9.2",
+	"mechanize == 0.4.10",
+	"feedparser-sgmllib == 2.0.1",
+	"feedparser == 6.0.14",
+	"Markdown == 3.10.0",
+	"html2text == 2025.4.15",
+	"soupsieve == 4.0",
+    "typing-extensions == 4.15.0",  # needed by beautifulsoup4
+	"beautifulsoup4 == 4.14.3",
+	"regex == 2026.11.9",
+    "kovidgoyal-langtool == 1.3.0",
+	"chardet == 5.2.0",
+	"msgpack == 1.2.3",
+	"Pygments == 2.20.0",
+	"pycryptodome == 3.23.0",
+	"apsw == 3.53.2.0",
+	"webencodings == 0.5.1",
+	"html5lib == 1.1",
+	"pillow == 13.0.0",
+	"netifaces == 0.11.0",
+	"psutil == 7.1.3",
+	"ifaddr == 0.2.0",
+	"texttable == 1.7.0",
+	"multivolumefile == 0.2.3",
+	"Brotli == 1.2.1",
+	"pyppmd == 1.3.1",
+	"pybcj == 1.0.7",
+	"inflate64 == 1.0.4",
+	"py7zr == 1.1.3",
+	"jaconv == 0.4.1",
+	"wrapt == 2.0.1",
+	"Deprecated == 1.3.1",
+	"pykakasi == 2.3.0",
+	"zeroconf == 0.149.16",
+	"fonttools == 4.61.0",
+	"lxml_html_clean == 0.4.5",
+	"PyQt6_sip == 13.10.2",
+	"PyQt6 == 6.10.0",
+	"PyQt6_WebEngine == 6.10.0",
+	"MacFSEvents == 0.8.4; sys_platform == 'darwin'",
+	"xxhash == 3.6.0",
+    "tzdata == 2026.5",
+    "tzlocal == 5.4.4",
+	"pystache == 0.6.8",
+
+    "apify_fingerprint_datapoints == 0.15.0",  # needed for browserforge
+	"click == 8.5.0",  # needed for browserforge
+	"browserforge == 1.2.4",  # needed for camoufox
+]
+
+[project.urls]
+Homepage = "https://calibre-ebook.com"
+FAQ = "https://manual.calibre-ebook.com/faq.html"
+Documentation = "https://manual.calibre-ebook.com"
+Repository = "https://github.com/kovidgoyal/calibre.git"
+Issues = "https://bugs.launchpad.net/calibre"
+Changelog = "https://github.com/kovidgoyal/calibre/blob/master/Changelog.txt"
+Community-Forum = "https://www.mobileread.com/forums/forumdisplay.php?f=166"
+
+[build-system]
+requires = [
+    "installer == 0.7.0",  # Needed for installing pure python packages at build time
+    "packaging == 25.0",   # Needed for build which is needed for setuptools
+	"pyproject_hooks == 1.2.0", # Needed for build which is needed for setuptools
+	"wheel == 0.46.2", # Needed for build which is needed for setuptools
+	"build == 1.3.0", # Needed for build which is needed for setuptools
+    "pybind11 == 3.0.1", # Needed for pillow
+	"setuptools == 84.1.0",
+    "pkgconfig == 1.5.5",  # Needed by Brotli
+	# Some packages (xxhash/py7zr/etc) erroneously declare this as a dependency even
+	# though it is needed only for sdist not building wheels
+	"setuptools_scm == 9.2.2",
+	"poetry_core == 2.2.1",  # needed for building zeroconf
+	"ply == 3.11",  # needed for sip
+	"sip == 6.14.0",
+	"PyQt_builder == 1.19.1",
+]
+[dependency-groups]
+dev = [
+    "ruff >= 0.16.0",
+    "types-lxml >= 2026.2.16",
+    "ty >= 0.0.102",
+    "rapydscript-ng >= 0.8.5",
+    "clang-format >= 22.1.8",
+]
+
+[tool.ruff]
+line-length = 160
+builtins = ['_', 'I', 'P']
+include = ['*.py', '*.pyi', '*.recipe']
+extension = { recipe = "python" }
+extend-exclude = [
+    "*_ui.py",
+    "bypy/*",
+    "setup/polib.py",
+    "setup/linux-installer.py",
+    "src/css_selectors/*",
+    "src/polyglot/*",
+    "src/tinycss/*",
+]
+preview = true
+
+[tool.ruff.format]
+quote-style = 'preserve'
+
+[tool.ruff.lint]
+explicit-preview-rules = true
+select = [
+    'E', 'W', # pycodestyle
+    'I',      # isort
+    'F',      # Pyflakes
+    'PL',     # Pylint
+    'RUF',    # Ruff
+    'YTT',    # flake8-2020
+    'ANN',    # flake8-annotations
+    'ASYNC',  # flake8-async
+    'B',      # flake8-bugbear
+    'C4',     # flake8-comprehensions
+    'DTZ',    # flake8-datetimez
+    'T1',     # flake8-debugger
+    'FA',     # flake8-future-annotations
+    'INT',    # flake8-gettext
+    'ISC',    # flake8-implicit-str-concat
+    'LOG',    # flake8-logging
+    'PIE',    # flake8-pie
+    'PYI',    # flake8-pyi
+    'Q',      # flake8-quotes
+    'TID',    # flake8-tidy-imports
+    'TC',     # flake8-type-checking
+    'FURB',   # refurb
+    'FLY',    # flynt
+    'UP',     # pyupgrade
+    'TRY',    # tryceratops
+    # from the ruff default rules set
+    'G1', 'G2', # flake8-logging-format
+    'empty-docstring',
+    'invalid-mock-access',
+    'invalid-module-name',
+    'invalid-pathlib-with-suffix',
+    'manual-list-copy',
+    'py-path',
+    'unnecessary-list-cast',
+    ## flake8-pytest-style (PT)
+    'pytest-raises-without-exception',
+    'pytest-duplicate-parametrize-test-cases',
+    'pytest-deprecated-yield-fixture',
+    'pytest-erroneous-use-fixtures-on-fixture',
+    'pytest-use-fixtures-without-parameters',
+    'pytest-warns-with-multiple-statements',
+    ## flake8-simplify
+    'double-negation',
+    'duplicate-isinstance-call',
+    'enumerate-for-loop',
+    'expr-and-false',
+    'expr-and-not-expr',
+    'expr-or-not-expr',
+    'expr-or-true',
+    'if-else-block-instead-of-dict-get',
+    'if-expr-with-false-true',
+    'if-expr-with-true-false',
+    'negate-equal-op',
+    'negate-not-equal-op',
+    'open-file-with-context-handler',
+    'reimplemented-builtin',
+    'return-in-try-except-finally',
+    'zip-dict-keys-and-values',
+    # custom rules
+    'trailing-comma-on-bare-tuple',
+    'unnecessary-return-none',
+    # preview rules
+    'if-key-in-dict-del',
+    'falsy-dict-get-fallback',
+    'unnecessary-regular-expression',
+    'unraw-re-pattern',
+    'needless-else',
+    ## blank-line standard
+    'blank-line-after-decorator',
+    'blank-lines-after-function-or-class',
+    'blank-lines-top-level',
+    'too-many-blank-lines',
+    'too-many-newlines-at-end-of-file',
+    ## code indentation
+    'indentation-with-invalid-multiple',
+    'no-indented-block',
+    'over-indented',
+    'unexpected-indentation',
+    ## comment formatting
+    'indentation-with-invalid-multiple-comment',
+    'no-indented-block-comment',
+    'no-space-after-block-comment',
+    'no-space-after-inline-comment',
+    'too-few-spaces-before-inline-comment',
+    'unexpected-indentation-comment',
+    ## various whitespace
+    'missing-whitespace-after-keyword',
+    'unexpected-spaces-around-keyword-parameter-equals',
+    'whitespace-after-open-bracket',
+    'whitespace-before-close-bracket',
+    'whitespace-before-parameters',
+    ## rules name
+    'noqa-comments',
+    'rule-codes-in-selectors',
+    'rule-codes-in-suppression-comments',
+]
+unfixable = ['ISC', 'duplicate-class-field-definition']
+ignore = [
+    'ambiguous-unicode-character-comment',
+    'ambiguous-unicode-character-docstring',
+    'ambiguous-unicode-character-string',
+    'ambiguous-variable-name',
+    'batched-without-explicit-strict',
+    'collection-literal-concatenation',
+    'docstring-in-stub',
+    'eq-without-hash',
+    'error-instead-of-exception',
+    'explicit-string-concatenation',
+    'for-loop-writes',
+    'format-literals',
+    'get-attr-with-constant',
+    'global-statement',
+    'global-variable-not-assigned',
+    'implicit-optional',
+    'import-outside-top-level',
+    'incorrectly-parenthesized-tuple-in-subscript',
+    'int-on-sliced-str',
+    'logging-too-many-args',
+    'magic-value-comparison',
+    'map-without-explicit-strict',
+    'module-import-not-at-top-of-file',
+    'mutable-class-default',
+    'no-self-use',
+    'pass-statement-stub-body',
+    'raise-vanilla-args',
+    'raise-vanilla-class',
+    'raise-within-try',
+    'raise-without-from-inside-except',
+    'redefined-argument-from-local',
+    'redefined-loop-name',
+    'redundant-numeric-union',
+    'regex-flag-alias',
+    'set-attr-with-constant',
+    'str-or-repr-defined-in-stub',
+    'stub-body-multiple-statements',
+    'subprocess-run-without-check',
+    'too-many-arguments',
+    'too-many-boolean-expressions',
+    'too-many-branches',
+    'too-many-locals',
+    'too-many-nested-blocks',
+    'too-many-positional-arguments',
+    'too-many-return-statements',
+    'too-many-statements',
+    'try-consider-else',
+    'unnecessary-call-around-sorted',
+    'unnecessary-dict-comprehension-for-iterable',
+    'unnecessary-encode-utf8',
+    'unnecessary-iterable-allocation-for-first-element',
+    'unnecessary-placeholder',
+    'unused-loop-control-variable',
+    'unused-unpacked-variable',
+    'zip-without-explicit-strict',
+]
+
+[tool.ruff.lint.per-file-ignores]
+"recipes/*" = ['ANN', 'UP', 'FLY', 'DTZ', 'slice-to-remove-prefix-or-suffix']
+"manual/plugin_examples/interface_demo/ui.py" = ['useless-expression']
+"setup/changelog.py" = ['single-line-implicit-string-concatenation']
+"setup/plugins_mirror.py" = ['DTZ']
+"setup/{file-hosting-bw,run-calibre-worker,*-ci}.py" = ['invalid-module-name']
+"src/calibre/ebooks/metadata/sources/*" = ['UP', 'slice-to-remove-prefix-or-suffix']
+"src/calibre/ebooks/{BeautifulSoup,rtf2xml/ParseRtf}.py" = ['invalid-module-name']
+"src/calibre/{rpdb,utils/ipython}.py" = ['T1']
+"src/qt/*.py" = ['I', 'blank-lines-top-level']
+"src/qt/*.pyi" = ['I']
+"src/calibre/gui2/*" = ['ANN']
+"{manual,setup,stubs}/*" = ['ANN']
+"src/{odf,qt}/*" = ['ANN']
+# These modules wrap a browser, whose operations can all block indefinitely on
+# the network, so every one of them takes an explicit timeout
+"src/calibre/web/automate/{camoufox,recipes}.py" = ['async-function-with-timeout']
+
+[tool.ruff.lint.isort]
+detect-same-package = true
+extra-standard-library = ["aes", "elementmaker", "encodings"]
+known-first-party = ["calibre_extensions", "calibre_plugins", "polyglot"]
+known-third-party = ["odf", "qt", "tinycss", "css_selectors"]
+relative-imports-order = "closest-to-furthest"
+split-on-trailing-comma = false
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "os.getcwd",
+    "calibre.ai.ImageGenerationOptions",
+    "calibre.ai.cyoa.StoryStyle",
+    "calibre.customize.conversion.DummyReporter",
+    "calibre.ebooks.conversion.preprocess.CSSPreProcessor",
+    "calibre.ebooks.oeb.polish.kepubify.Options",
+    "calibre.gui2.chat_widget.Header",
+    "calibre.gui2.momentum_scroll.MomentumSettings",
+    "calibre.utils.localization._",
+    "qt.core.QSize",
+    "qt.core.QModelIndex",
+    "qt.core.QColor",
+]
+
+[tool.ruff.lint.flake8-comprehensions]
+allow-dict-calls-with-keyword-arguments = true
+
+[tool.ruff.lint.flake8-quotes]
+avoid-escape = true
+docstring-quotes = 'double'  # PEP 257
+inline-quotes = 'single'
+multiline-quotes = 'single'
+
+[tool.codespell]
+count = false
+summary = false
+quiet-level = 3
+regex = '''\b[\w\-'’]+\b'''
+ignore-regex = '''\b[\w\-'’]*&(amp;)?[\w\-'’]*\b'''
+builtin = [
+    'clear',
+    'rare',
+    'informal',
+    'code',
+]
+exclude-file = "codespell.exclude"
+ignore-words-list = [
+    "alo",
+    "ans",
+    "clen",
+    "eto",
+    "fo",
+    "nam",
+    "nd",
+    "som",
+    "te",
+    "atLeast",
+    "Implementor",
+    "implementor",
+    "Implementors",
+    "implementors",
+    "missings",
+    "re-use",
+    "re-used",
+    "re-using",
+    "splited",
+    "succeded",
+    # code
+    "ro",
+    "ws",
+    "deque",
+    "assertIn",
+    "atEnd",
+    "errorString",
+    "FocusIn",
+    "iff",
+    "lets",
+    "lite",
+    "UINT",
+    "uInt",
+    "uint",
+    "KeyPair",
+    "Keypair",
+    "keypair",
+    "seeked",
+    "stdio",
+    "thead",
+]
+uri-ignore-words-list = '*'
+skip = [
+    "*.svg",
+    "*.rcc",
+    "*_ui.py",
+    "./src/calibre/ebooks/rtf2xml/char_set.py",
+    "./src/calibre/ebooks/unihandecode/*",
+    "./src/calibre/ebooks/html_entities.h",
+    "./src/calibre/ebooks/html_entities.py",
+    "./src/calibre/utils/icu_test.py",
+    "./src/calibre/utils/search_query_parser_test.py",
+    "./Changelog.old.txt",
+    "./COPYRIGHT",
+    "./LICENSE",
+    "./LICENSE.rtf",
+    "./session.vim",
+    "./build/*",
+    "./docs/*",
+    "./nbproject/*",
+    "./recipes/*",
+    "./translations/*",
+    "./tags/*",
+    "./manual/generated/*",
+    "./manual/locale/*",
+    "./resources/dictionaries/*",
+    "./resources/localization/*",
+    "./resources/hyphenation/*",
+    "./resources/mathjax/*",
+    "./resources/builtin_recipes.xml",
+    "./resources/changelog.json",
+    "./resources/editor.js",
+    "./resources/editor-functions.json",
+    "./resources/mime.types",
+    "./resources/piper-voices.json",
+    "./resources/stylelint-bundle.min.js",
+    "./resources/user-manual-translation-stats.json",
+    "./resources/template-functions.json",
+    "./resources/viewer.js",
+    "./resources/viewer.html",
+    "./resources/content-server/index-generated.html",
+    "./setup/installer/*",
+    "./setup/pyqt_enums/*",
+    "./setup/lc_data.py",
+    "./setup/linux-installer.py",
+    "./src/css_selectors/*",
+    "./src/polyglot/*",
+    "./src/tinycss/*",
+    "./src/unicode_names/*",
+]
+
+[tool.flynt]
+line-length = 400  # over value to catch every case
+transform-format = false  # don't transform already existing format call
+exclude = [
+    "bypy/",
+    "setup/polib.py",
+    "setup/linux-installer.py",
+    "src/calibre/ebooks/metadata/sources/",
+    "src/calibre/gui2/store/stores/",
+    "src/css_selectors/",
+    "src/polyglot/",
+    "src/tinycss/",
+]
+
+[tool.ty.environment]
+root = ['./src']
+extra-paths = ['./stubs']
+python-platform = "all"
+
+[tool.ty.src]
+exclude = [
+	'**/*_ui.py', '**/*_test.py', '**/test_*.py',
+	'setup/*.py', 'setup.py', 'manual/**/*.py', 'bypy/**/*.py',
+	'**/tests/**',
+    '.github/workflows/*.py',
+	'src/calibre/library/database.py',
+	'src/calibre/library/database2.py',
+	'src/calibre/library/sqlite.py',
+	'src/calibre/library/prefs.py',
+	'src/calibre/library/restore.py',
+	'src/calibre/library/custom_columns.py',
+	'src/calibre/library/schema_upgrades.py',
+    'src/calibre/gui2/pyqt6_compat.py',
+]

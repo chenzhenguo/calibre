@@ -1,31 +1,37 @@
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
 
-__license__   = 'GPL v3'
-__copyright__ = '2008, Kovid Goyal <kovid at kovidgoyal.net>'
-'''
+"""
 Device scanner that fetches list of devices on system ina  platform dependent
 manner.
-'''
+"""
 
-import sys, os, time
-from collections import namedtuple
+import os
+import sys
+import time
 from threading import Lock
+from typing import TYPE_CHECKING, NamedTuple, Self, cast
 
-from calibre import prints, as_unicode
-from calibre.constants import (iswindows, ismacos, islinux, isfreebsd,
-        isnetbsd)
-from polyglot.builtins import range
+from calibre import as_unicode, prints
+from calibre.constants import isfreebsd, islinux, ismacos, isnetbsd, iswindows
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Collection
+    from types import ModuleType
+
+    from calibre.devices.interface import DetectedDevice, DevicePlugin
 
 osx_scanner = linux_scanner = freebsd_scanner = netbsd_scanner = None
 
 if iswindows:
     drive_ok_lock = Lock()
 
-    def drive_is_ok(letter, max_tries=10, debug=False):
+    def drive_is_ok(letter: str, max_tries: int = 10, debug: bool = False) -> bool:
         from calibre_extensions import winutil
+
         with drive_ok_lock:
             for i in range(max_tries):
                 try:
-                    winutil.get_disk_free_space(letter+':\\')
+                    winutil.get_disk_free_space(letter + ':\\')
                     return True
                 except Exception as e:
                     if i >= max_tries - 1 and debug:
@@ -34,37 +40,47 @@ if iswindows:
                     time.sleep(0.2)
             return False
 
-_USBDevice = namedtuple('USBDevice',
-    'vendor_id product_id bcd manufacturer product serial')
+
+class _USBDevice(NamedTuple):
+    vendor_id: int
+    product_id: int
+    bcd: int
+    manufacturer: str | None
+    product: str | None
+    serial: str | None
 
 
 class USBDevice(_USBDevice):
+    busnum: int
+    devnum: int
 
-    def __new__(cls, *args, **kwargs):
-        self = super(USBDevice, cls).__new__(cls, *args)
+    def __new__(cls, *args: *tuple[int, int, int, str | None, str | None, str | None], **kwargs: object) -> Self:
+        self = super().__new__(cls, *args)
         self.busnum = self.devnum = -1
         return self
 
-    def __repr__(self):
-        return (u'USBDevice(busnum=%s, devnum=%s, '
-                'vendor_id=0x%04x, product_id=0x%04x, bcd=0x%04x, '
-                'manufacturer=%s, product=%s, serial=%s)')%(
-                self.busnum, self.devnum, self.vendor_id, self.product_id,
-                self.bcd, self.manufacturer, self.product, self.serial)
+    def __repr__(self) -> str:
+        return (
+            f'USBDevice(busnum={self.busnum}, devnum={self.devnum}, '
+            f'vendor_id=0x{self.vendor_id:04x}, product_id=0x{self.product_id:04x}, bcd=0x{self.bcd:04x}, '
+            f'manufacturer={self.manufacturer}, product={self.product}, serial={self.serial})'
+        )
 
     __str__ = __repr__
     __unicode__ = __repr__
 
 
-class LibUSBScanner(object):
+class LibUSBScanner:
+    libusb: ModuleType
 
-    def __call__(self):
+    def __call__(self) -> set[USBDevice]:
         if not hasattr(self, 'libusb'):
             from calibre_extensions import libusb
+
             self.libusb = libusb
 
-        ans = set()
-        seen = set()
+        ans: set[USBDevice] = set()
+        seen: set[tuple[int, int, int, int, int]] = set()
         for fingerprint, ids in self.libusb.get_devices():
             seen.add(fingerprint)
             man = ids.get('manufacturer', None)
@@ -79,9 +95,11 @@ class LibUSBScanner(object):
             self.libusb.cache.pop(x, None)
         return ans
 
-    def check_for_mem_leak(self):
+    def check_for_mem_leak(self) -> None:
         import gc
+
         from calibre.utils.mem import memory
+
         memory()
         for num in (1, 10, 100):
             start = memory()
@@ -93,23 +111,22 @@ class LibUSBScanner(object):
             print('after', num, 'repeats')
 
 
-class LinuxScanner(object):
-
+class LinuxScanner:
     SYSFS_PATH = os.environ.get('SYSFS_PATH', '/sys')
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.base = os.path.join(self.SYSFS_PATH, 'subsystem', 'usb', 'devices')
         if not os.path.exists(self.base):
             self.base = os.path.join(self.SYSFS_PATH, 'bus', 'usb', 'devices')
         self.ok = os.path.exists(self.base)
 
-    def __call__(self):
-        ans = set()
+    def __call__(self) -> set[USBDevice]:
+        ans: set[USBDevice] = set()
         if not self.ok:
             raise RuntimeError('DeviceScanner requires the /sys filesystem to work.')
 
-        def read(f):
-            with lopen(f, 'rb') as s:
+        def read(f: str) -> bytes:
+            with open(f, 'rb') as s:
                 return s.read().strip()
 
         for x in os.listdir(self.base):
@@ -120,7 +137,7 @@ class LinuxScanner(object):
             man = os.path.join(base, 'manufacturer')
             serial = os.path.join(base, 'serial')
             prod_string = os.path.join(base, 'product')
-            dev = []
+            dev: list[int | str] = []
             try:
                 # Ignore USB HUBs
                 if read(os.path.join(base, 'bDeviceClass')) == b'09':
@@ -128,40 +145,41 @@ class LinuxScanner(object):
             except Exception:
                 continue
             try:
-                dev.append(int(b'0x'+read(ven), 16))
+                dev.append(int(b'0x' + read(ven), 16))
             except Exception:
                 continue
             try:
-                dev.append(int(b'0x'+read(prod), 16))
+                dev.append(int(b'0x' + read(prod), 16))
             except Exception:
                 continue
             try:
-                dev.append(int(b'0x'+read(bcd), 16))
+                dev.append(int(b'0x' + read(bcd), 16))
             except Exception:
                 continue
             try:
                 dev.append(read(man).decode('utf-8'))
             except Exception:
-                dev.append(u'')
+                dev.append('')
             try:
                 dev.append(read(prod_string).decode('utf-8'))
             except Exception:
-                dev.append(u'')
+                dev.append('')
             try:
                 dev.append(read(serial).decode('utf-8'))
             except Exception:
-                dev.append(u'')
+                dev.append('')
 
-            dev = USBDevice(*dev)
+            # dev has three ints followed by three strings
+            usbdev = USBDevice(*cast('tuple[int, int, int, str, str, str]', dev))
             try:
-                dev.busnum = int(read(os.path.join(base, 'busnum')))
+                usbdev.busnum = int(read(os.path.join(base, 'busnum')))
             except Exception:
                 pass
             try:
-                dev.devnum = int(read(os.path.join(base, 'devnum')))
+                usbdev.devnum = int(read(os.path.join(base, 'devnum')))
             except Exception:
                 pass
-            ans.add(dev)
+            ans.add(usbdev)
         return ans
 
 
@@ -178,31 +196,45 @@ if isnetbsd:
     netbsd_scanner = None
 
 
-class DeviceScanner(object):
+class DeviceScanner:
+    scanner: Callable[[], Collection[DetectedDevice]] | None
+    devices: Collection[DetectedDevice]
 
-    def __init__(self, *args):
+    def __init__(self, *args: object) -> None:
         if iswindows:
             from calibre.devices.winusb import scan_usb_devices as win_scanner
-        self.scanner = (win_scanner if iswindows else osx_scanner if ismacos else
-                freebsd_scanner if isfreebsd else netbsd_scanner if isnetbsd
-                else linux_scanner if islinux else libusb_scanner)
+        self.scanner = (
+            win_scanner
+            if iswindows
+            else osx_scanner
+            if ismacos
+            else freebsd_scanner
+            if isfreebsd
+            else netbsd_scanner
+            if isnetbsd
+            else linux_scanner
+            if islinux
+            else libusb_scanner
+        )
         if self.scanner is None:
             self.scanner = libusb_scanner
         self.devices = []
 
-    def scan(self):
-        '''Fetch list of connected USB devices from operating system'''
-        self.devices = self.scanner()
+    def scan(self) -> None:
+        """Fetch list of connected USB devices from operating system"""
+        if self.scanner is not None:
+            self.devices = self.scanner()
 
-    def is_device_connected(self, device, debug=False, only_presence=False):
-        ''' If only_presence is True don't perform any expensive checks '''
-        return device.is_usb_connected(self.devices, debug=debug,
-                only_presence=only_presence)
+    def is_device_connected(self, device: DevicePlugin, debug: bool = False, only_presence: bool = False) -> tuple[bool, DetectedDevice | None]:
+        """If only_presence is True don't perform any expensive checks"""
+        return device.is_usb_connected(self.devices, debug=debug, only_presence=only_presence)
 
 
-def test_for_mem_leak():
-    from calibre.utils.mem import memory, gc_histogram, diff_hists
+def test_for_mem_leak() -> None:
     import gc
+
+    from calibre.utils.mem import diff_hists, gc_histogram, memory
+
     gc.disable()
     scanner = DeviceScanner()
     scanner.scan()
@@ -220,14 +252,13 @@ def test_for_mem_leak():
         for i in range(3):
             gc.collect()
         usedmem = memory(startmem)
-        prints('Memory used in %d repetitions of scan(): %.5f KB'%(reps,
-            1024*usedmem))
+        prints(f'Memory used in {reps} repetitions of scan(): {1024 * usedmem:.5f} KB')
         prints('Differences in python object counts:')
         diff_hists(h1, gc_histogram())
         prints()
 
 
-def main(args=sys.argv):
+def main(args: list[str] = sys.argv) -> int:
     test_for_mem_leak()
     return 0
 

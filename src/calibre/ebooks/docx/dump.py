@@ -1,22 +1,20 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
-
-import sys, os, shutil
+import os
+import shutil
+import sys
 
 from lxml import etree
 
 from calibre import walk
-from calibre.utils.zipfile import ZipFile
 from calibre.utils.xml_parse import safe_xml_fromstring
+from calibre.utils.zipfile import ZipFile
 
 
-def pretty_all_xml_in_dir(path):
+def pretty_all_xml_in_dir(path: str) -> None:
     for f in walk(path):
-        if f.endswith('.xml') or f.endswith('.rels'):
+        if f.endswith(('.xml', '.rels')):
             with open(f, 'r+b') as stream:
                 raw = stream.read()
                 if raw:
@@ -26,7 +24,7 @@ def pretty_all_xml_in_dir(path):
                     stream.write(etree.tostring(root, pretty_print=True, encoding='utf-8', xml_declaration=True))
 
 
-def do_dump(path, dest):
+def do_dump(path: str, dest: str) -> None:
     if os.path.exists(dest):
         shutil.rmtree(dest)
     with ZipFile(path) as zf:
@@ -34,7 +32,7 @@ def do_dump(path, dest):
     pretty_all_xml_in_dir(dest)
 
 
-def dump(path):
+def dump(path: str) -> None:
     dest = os.path.splitext(os.path.basename(path))[0]
     dest += '-dumped'
     do_dump(path, dest)

@@ -1,190 +1,128 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPL v3 Copyright: 2018, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-import json
-
-from PyQt5.Qt import QObject, Qt, pyqtSignal
-from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineScript, QWebEngineView, QWebEngineSettings
+from qt.core import QApplication, QEvent, QObject, QPoint, Qt, pyqtSignal
+from qt.webengine import QWebEnginePage, QWebEngineView
 
 from calibre import prints
 from calibre.utils.monotonic import monotonic
-from calibre.utils.rapydscript import special_title
-from polyglot.builtins import iteritems, unicode_type
-
-
-def secure_webengine(view_or_page_or_settings, for_viewer=False):
-    s = view_or_page_or_settings.settings() if hasattr(
-        view_or_page_or_settings, 'settings') else view_or_page_or_settings
-    a = s.setAttribute
-    a(QWebEngineSettings.WebAttribute.PluginsEnabled, False)
-    if not for_viewer:
-        a(QWebEngineSettings.WebAttribute.JavascriptEnabled, False)
-        s.setUnknownUrlSchemePolicy(QWebEngineSettings.UnknownUrlSchemePolicy.DisallowUnknownUrlSchemes)
-        if hasattr(view_or_page_or_settings, 'setAudioMuted'):
-            view_or_page_or_settings.setAudioMuted(True)
-    a(QWebEngineSettings.WebAttribute.JavascriptCanOpenWindows, False)
-    a(QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, False)
-    # ensure javascript cannot read from local files
-    a(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, False)
-    a(QWebEngineSettings.WebAttribute.AllowWindowActivationFromJavaScript, False)
-    return s
-
-
-def insert_scripts(profile, *scripts):
-    sc = profile.scripts()
-    for script in scripts:
-        for existing in sc.findScripts(script.name()):
-            sc.remove(existing)
-    for script in scripts:
-        sc.insert(script)
-
-
-def create_script(
-    name, src, world=QWebEngineScript.ScriptWorldId.ApplicationWorld,
-    injection_point=QWebEngineScript.InjectionPoint.DocumentReady,
-    on_subframes=True
-):
-    script = QWebEngineScript()
-    if isinstance(src, bytes):
-        src = src.decode('utf-8')
-    script.setSourceCode(src)
-    script.setName(name)
-    script.setWorldId(world)
-    script.setInjectionPoint(injection_point)
-    script.setRunsOnSubFrames(on_subframes)
-    return script
-
-
-from_js = pyqtSignal
-
-
-class to_js(unicode_type):
-
-    def __call__(self, *a):
-        prints('WARNING: Calling {}() before the javascript bridge is ready'.format(self.name))
-    emit = __call__
-
-
-class to_js_bound(QObject):
-
-    def __init__(self, bridge, name):
-        QObject.__init__(self, bridge)
-        self.name = name
-
-    def __call__(self, *args):
-        self.parent().page.runJavaScript('if (window.python_comm) python_comm._from_python({}, {})'.format(
-            json.dumps(self.name), json.dumps(args)), QWebEngineScript.ScriptWorldId.ApplicationWorld)
-    emit = __call__
-
-
-class Bridge(QObject):
-
-    bridge_ready = pyqtSignal()
-
-    def __init__(self, page):
-        QObject.__init__(self, page)
-        self._signals = json.dumps(tuple({k for k, v in iteritems(self.__class__.__dict__) if isinstance(v, pyqtSignal)}))
-        self._signals_registered = False
-        page.titleChanged.connect(self._title_changed)
-        for k, v in iteritems(self.__class__.__dict__):
-            if isinstance(v, to_js):
-                v.name = k
-
-    @property
-    def page(self):
-        return self.parent()
-
-    @property
-    def ready(self):
-        return self._signals_registered
-
-    def _title_changed(self, title):
-        if title.startswith(special_title):
-            self._poll_for_messages()
-
-    def _register_signals(self):
-        self._signals_registered = True
-        for k, v in iteritems(self.__class__.__dict__):
-            if isinstance(v, to_js):
-                setattr(self, k, to_js_bound(self, k))
-        self.page.runJavaScript('python_comm._register_signals(' + self._signals + ')', QWebEngineScript.ScriptWorldId.ApplicationWorld)
-        self.bridge_ready.emit()
-
-    def _poll_for_messages(self):
-        self.page.runJavaScript('python_comm._poll()', QWebEngineScript.ScriptWorldId.ApplicationWorld, self._dispatch_messages)
-
-    def _dispatch_messages(self, messages):
-        try:
-            for msg in messages:
-                if isinstance(msg, dict):
-                    mt = msg.get('type')
-                    if mt == 'signal':
-                        signal = getattr(self, msg['name'], None)
-                        if signal is None:
-                            prints('WARNING: No js-to-python signal named: ' + msg['name'])
-                        else:
-                            args = msg['args']
-                            if args:
-                                signal.emit(*args)
-                            else:
-                                signal.emit()
-                    elif mt == 'qt-ready':
-                        self._register_signals()
-        except Exception:
-            if messages:
-                import traceback
-                traceback.print_exc()
 
 
 class RestartingWebEngineView(QWebEngineView):
-
     render_process_restarted = pyqtSignal()
     render_process_failed = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QWebEngineView.__init__(self, parent)
         self._last_reload_at = None
         self.renderProcessTerminated.connect(self.render_process_terminated)
         self.render_process_restarted.connect(self.reload, type=Qt.ConnectionType.QueuedConnection)
 
-    def render_process_terminated(self, termination_type, exit_code):
+    def render_process_terminated(self, termination_type, exit_code) -> None:
         if termination_type == QWebEnginePage.RenderProcessTerminationStatus.NormalTerminationStatus:
             return
-        self.webengine_crash_message = 'The Qt WebEngine Render process crashed with termination type: {} and exit code: {}'.format(
-                termination_type, exit_code)
+        self.webengine_crash_message = f'The Qt WebEngine Render process crashed with termination type: {termination_type} and exit code: {exit_code}'
         prints(self.webengine_crash_message)
         if self._last_reload_at is not None and monotonic() - self._last_reload_at < 2:
             self.render_process_failed.emit()
             prints('The Qt WebEngine Render process crashed too often')
         else:
             self._last_reload_at = monotonic()
+            self.reload()
             self.render_process_restarted.emit()
             prints('Restarting Qt WebEngine')
 
 
-if __name__ == '__main__':
-    from calibre.gui2 import Application
-    from calibre.gui2.tweak_book.preview import WebPage
-    from PyQt5.Qt import QMainWindow
-    app = Application([])
-    view = QWebEngineView()
-    page = WebPage(view)
-    view.setPage(page)
-    w = QMainWindow()
-    w.setCentralWidget(view)
+class SelectPopupFixer(QObject):
+    """Prevent the popup shown for an HTML <select> element from swallowing
+    the click that opened it.
 
-    class Test(Bridge):
-        s1 = from_js(object)
-        j1 = to_js()
-    t = Test(view.page())
-    t.s1.connect(print)
-    w.show()
-    view.setHtml('''
-<p>hello</p>
-    ''')
-    app.exec_()
-    del t
-    del page
-    del app
+    When there is not enough room for the popup between the bottom of the
+    element and the bottom of the screen, the windowing system moves the popup
+    up, on top of the element itself. The mouse release that completes the
+    click opening the popup is then delivered to whatever item happens to lie
+    under the pointer, silently changing the value of the combobox. QComboBox
+    has the same problem and works around it by ignoring mouse releases for a
+    short while after showing a popup under the pointer, which is what we do
+    here as well."""
+
+    # Maximum time between the click on the combobox and the popup being shown
+    # for the two to be considered part of the same interaction.
+    MAX_POPUP_DELAY = 1  # seconds
+    # How far the pointer must move for the click to count as a drag onto an
+    # item rather than a click on the combobox. Same value as QComboBox uses.
+    DRAG_THRESHOLD = 9  # pixels
+
+    def __init__(self, view) -> None:
+        super().__init__(view)
+        self.view = view
+        self.press_pos = QPoint()
+        self.press_at = 0.0
+        self.popup = None
+        self.ignore_release_until = 0.0
+        view.destroyed.connect(self.view_destroyed)
+        qapp = QApplication.instance()
+        if qapp is not None:
+            # Mouse events go to the render widget (the view's focus proxy)
+            # and the popup is a separate top level window, so we have to
+            # watch events application wide.
+            qapp.installEventFilter(self)
+
+    def view_destroyed(self) -> None:
+        self.view = self.popup = None
+        self.ignore_release_until = 0.0
+        qapp = QApplication.instance()
+        if qapp is not None:
+            qapp.removeEventFilter(self)
+
+    def eventFilter(self, a0, a1):
+        etype = a1.type()
+        if etype in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
+            self.mouse_pressed(a0, a1)
+        elif etype == QEvent.Type.Show:
+            self.widget_shown(a0)
+        elif self.ignore_release_until:
+            if etype == QEvent.Type.MouseButtonRelease:
+                return self.is_click_through(a0, a1)
+            if etype == QEvent.Type.MouseMove and (a1.globalPosition().toPoint() - self.press_pos).manhattanLength() > self.DRAG_THRESHOLD:
+                # The user is dragging onto an item rather than clicking on the
+                # combobox, so the release is meaningful after all.
+                self.ignore_release_until = 0.0
+        return False
+
+    def mouse_pressed(self, obj, ev) -> None:
+        # A press while a popup of ours is open is the user actually choosing
+        # an item, so its release must be allowed through.
+        self.ignore_release_until = 0.0
+        if self.view is None or ev.button() != Qt.MouseButton.LeftButton or not obj.isWidgetType():
+            return
+        if obj is self.view or self.view.isAncestorOf(obj):
+            self.press_pos = ev.globalPosition().toPoint()
+            self.press_at = monotonic()
+
+    def widget_shown(self, obj) -> None:
+        if not self.press_at or monotonic() - self.press_at > self.MAX_POPUP_DELAY or not obj.isWidgetType():
+            return
+        if (obj.windowFlags() & Qt.WindowType.WindowType_Mask) == Qt.WindowType.Popup:
+            # The geometry of the popup is not final at this point, the
+            # windowing system can still move it to fit on screen, so whether
+            # it ends up under the pointer is tested when the release arrives.
+            self.popup = obj
+            self.ignore_release_until = monotonic() + QApplication.doubleClickInterval() / 1000
+            self.press_at = 0.0
+
+    def is_click_through(self, obj, ev):
+        if self.popup is None or monotonic() > self.ignore_release_until:
+            self.ignore_release_until = 0.0
+            return False
+        try:
+            # The popup has a mouse grab, so it gets the release even when the
+            # pointer is outside it, in which case the release is not a click
+            # through and must be allowed to close the popup.
+            if obj is not self.popup and obj is not self.popup.windowHandle():
+                return False
+            return self.popup.rect().contains(ev.position().toPoint())
+        except RuntimeError:  # popup already destroyed
+            self.popup = None
+            self.ignore_release_until = 0.0
+        return False

@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 # Copyright (C) 2006-2007 Søren Roug, European Environment Agency
 #
 # This library is free software; you can redistribute it and/or
@@ -21,12 +20,12 @@
 
 # This script lists the content of the manifest.xml file
 
-import zipfile
-from xml.sax import make_parser,handler
-from xml.sax.xmlreader import InputSource
 import io
+import zipfile
+from xml.sax import handler, make_parser
+from xml.sax.xmlreader import InputSource
 
-MANIFESTNS="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"
+MANIFESTNS = 'urn:oasis:names:tc:opendocument:xmlns:manifest:1.0'
 
 # -----------------------------------------------------------------------------
 #
@@ -36,8 +35,8 @@ MANIFESTNS="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"
 
 
 class ODFManifestHandler(handler.ContentHandler):
-    """ The ODFManifestHandler parses a manifest file and produces a list of
-        content """
+    """The ODFManifestHandler parses a manifest file and produces a list of
+    content"""
 
     def __init__(self):
         self.manifest = {}
@@ -45,28 +44,28 @@ class ODFManifestHandler(handler.ContentHandler):
         # Tags
         # FIXME: Also handle encryption data
         self.elements = {
-        (MANIFESTNS, 'file-entry'): (self.s_file_entry, self.donothing),
+            (MANIFESTNS, 'file-entry'): (self.s_file_entry, self.donothing),
         }
 
     def handle_starttag(self, tag, method, attrs):
-        method(tag,attrs)
+        method(tag, attrs)
 
     def handle_endtag(self, tag, method):
         method(tag)
 
-    def startElementNS(self, tag, qname, attrs):
-        method = self.elements.get(tag, (None, None))[0]
+    def startElementNS(self, name, qname, attrs):
+        method = self.elements.get(name, (None, None))[0]
         if method:
-            self.handle_starttag(tag, method, attrs)
+            self.handle_starttag(name, method, attrs)
         else:
-            self.unknown_starttag(tag,attrs)
+            self.unknown_starttag(name, attrs)
 
-    def endElementNS(self, tag, qname):
-        method = self.elements.get(tag, (None, None))[1]
+    def endElementNS(self, name, qname):
+        method = self.elements.get(name, (None, None))[1]
         if method:
-            self.handle_endtag(tag, method)
+            self.handle_endtag(name, method)
         else:
-            self.unknown_endtag(tag)
+            self.unknown_endtag(name)
 
     def unknown_starttag(self, tag, attrs):
         pass
@@ -78,9 +77,9 @@ class ODFManifestHandler(handler.ContentHandler):
         pass
 
     def s_file_entry(self, tag, attrs):
-        m = attrs.get((MANIFESTNS, 'media-type'),"application/octet-stream")
+        m = attrs.get((MANIFESTNS, 'media-type'), 'application/octet-stream')
         p = attrs.get((MANIFESTNS, 'full-path'))
-        self.manifest[p] = {'media-type':m, 'full-path':p}
+        self.manifest[p] = {'media-type': m, 'full-path': p}
 
 
 # -----------------------------------------------------------------------------
@@ -88,6 +87,7 @@ class ODFManifestHandler(handler.ContentHandler):
 # Reading the file
 #
 # -----------------------------------------------------------------------------
+
 
 def manifestlist(manifestxml):
     odhandler = ODFManifestHandler()
@@ -111,8 +111,9 @@ def odfmanifest(odtfile):
     return manifestlist(manifest)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     import sys
+
     result = odfmanifest(sys.argv[1])
     for file in result.values():
-        print("%-40s %-40s" % (file['media-type'], file['full-path']))
+        print('{:<40} {:<40}'.format(file['media-type'], file['full-path']))

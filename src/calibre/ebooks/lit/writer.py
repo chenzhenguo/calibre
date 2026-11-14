@@ -1,36 +1,46 @@
+# License: GPLv3 Copyright: 2008, Marshall T. Vandegrift <llasram@gmail.com>
 
-'''
+"""
 Basic support for writing LIT files.
-'''
+"""
 
-__license__   = 'GPL v3'
-__copyright__ = '2008, Marshall T. Vandegrift <llasram@gmail.com>'
-
-from struct import pack
-from itertools import count, chain
-from operator import attrgetter
+import copy
+import functools
 import io
-import time
+import numbers
 import os
 import re
-import copy
+import time
 import uuid
-import functools
-import numbers
+from itertools import chain, count
+from operator import attrgetter
+from struct import pack
+from typing import IO, TYPE_CHECKING, Concatenate
+from urllib.parse import urldefrag
+
 from lxml import etree
-from calibre.ebooks.lit.reader import DirectoryEntry
-import calibre.ebooks.lit.maps as maps
-from calibre.ebooks.oeb.base import OEB_DOCS, XHTML_MIME, OEB_STYLES, \
-    CSS_MIME, OPF_MIME, XML_NS, XML
-from calibre.ebooks.oeb.base import prefixname, \
-    urlnormalize
-from calibre.ebooks.oeb.stylizer import Stylizer
-from calibre.ebooks.lit.lzx import Compressor
+
 import calibre
+from calibre.ebooks.lit import maps, mssha1
+from calibre.ebooks.lit.lzx import Compressor
+from calibre.ebooks.lit.reader import DirectoryEntry
+from calibre.ebooks.oeb.base import CSS_MIME, OEB_DOCS, OEB_STYLES, OPF_MIME, XHTML_MIME, XML, XML_NS, prefixname, urlnormalize
+from calibre.ebooks.oeb.stylizer import Stylizer
 from calibre_extensions import msdes
-import calibre.ebooks.lit.mssha1 as mssha1
-from polyglot.builtins import codepoint_to_chr, unicode_type, string_or_bytes, range, zip, native_string_type
-from polyglot.urllib import urldefrag, unquote
+from polyglot.urllib import unquote
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+    from optparse import Values
+
+    from calibre.ebooks.lit.reader import LitMap
+    from calibre.ebooks.oeb.base import Manifest, OEBBook
+    from calibre.ebooks.oeb.stylizer import Style
+
+    # (tag name to index, per tag index list of attribute name to index maps)
+    type InvertedMap = tuple[dict[str | None, int], list[dict[str, int]]]
+    # namespace URI to prefix
+    type NSRMap = dict[str, str | None]
 
 __all__ = ['LitWriter']
 
@@ -43,14 +53,14 @@ ALL_MS_COVER_TYPES = [
     ('other.ms-thumbimage-standard', 'Standard thumbnail image'),
     ('other.ms-coverimage', 'PocketPC cover image'),
     ('other.ms-thumbimage', 'PocketPC thumbnail image'),
-    ]
+]
 
 
-def invert_tag_map(tag_map):
+def invert_tag_map(tag_map: LitMap) -> InvertedMap:
     tags, dattrs, tattrs = tag_map
-    tags = dict((tags[i], i) for i in range(len(tags)))
-    dattrs = dict((v, k) for k, v in dattrs.items())
-    tattrs = [dict((v, k) for k, v in (map or {}).items()) for map in tattrs]
+    tags = {tags[i]: i for i in range(len(tags))}
+    dattrs = {v: k for k, v in dattrs.items()}
+    tattrs = [{v: k for k, v in (map or {}).items()} for map in tattrs]
     for map in tattrs:
         if map:
             map.update(dattrs)
@@ -63,69 +73,71 @@ HTML_MAP = invert_tag_map(maps.HTML_MAP)
 
 LIT_MAGIC = b'ITOLITLS'
 
-LITFILE_GUID = "{0A9007C1-4076-11D3-8789-0000F8105754}"
-PIECE3_GUID = "{0A9007C3-4076-11D3-8789-0000F8105754}"
-PIECE4_GUID = "{0A9007C4-4076-11D3-8789-0000F8105754}"
-DESENCRYPT_GUID = "{67F6E4A2-60BF-11D3-8540-00C04F58C3CF}"
-LZXCOMPRESS_GUID = "{0A9007C6-4076-11D3-8789-0000F8105754}"
+LITFILE_GUID = '{0A9007C1-4076-11D3-8789-0000F8105754}'
+PIECE3_GUID = '{0A9007C3-4076-11D3-8789-0000F8105754}'
+PIECE4_GUID = '{0A9007C4-4076-11D3-8789-0000F8105754}'
+DESENCRYPT_GUID = '{67F6E4A2-60BF-11D3-8540-00C04F58C3CF}'
+LZXCOMPRESS_GUID = '{0A9007C6-4076-11D3-8789-0000F8105754}'
 
 
-def packguid(guid):
-    values = guid[1:9], guid[10:14], guid[15:19], \
-        guid[20:22], guid[22:24], guid[25:27], guid[27:29], \
-        guid[29:31], guid[31:33], guid[33:35], guid[35:37]
+def packguid(guid: str) -> bytes:
+    values = (
+        guid[1:9],
+        guid[10:14],
+        guid[15:19],
+        guid[20:22],
+        guid[22:24],
+        guid[25:27],
+        guid[27:29],
+        guid[29:31],
+        guid[31:33],
+        guid[33:35],
+        guid[35:37],
+    )
     values = [int(value, 16) for value in values]
-    return pack("<LHHBBBBBBBB", *values)
+    return pack('<LHHBBBBBBBB', *values)
 
 
-FLAG_OPENING = (1 << 0)
-FLAG_CLOSING = (1 << 1)
-FLAG_BLOCK = (1 << 2)
-FLAG_HEAD = (1 << 3)
-FLAG_ATOM = (1 << 4)
-FLAG_CUSTOM  = (1 << 15)
-ATTR_NUMBER  = 0xffff
+FLAG_OPENING = 1 << 0
+FLAG_CLOSING = 1 << 1
+FLAG_BLOCK = 1 << 2
+FLAG_HEAD = 1 << 3
+FLAG_ATOM = 1 << 4
+FLAG_CUSTOM = 1 << 15
+ATTR_NUMBER = 0xFFFF
 
 PIECE_SIZE = 16
 PRIMARY_SIZE = 40
 SECONDARY_SIZE = 232
 DCHUNK_SIZE = 0x2000
 CCHUNK_SIZE = 0x0200
-ULL_NEG1 = 0xffffffffffffffff
+ULL_NEG1 = 0xFFFFFFFFFFFFFFFF
 ROOT_OFFSET = 1284508585713721976
 ROOT_SIZE = 4165955342166943123
 
-BLOCK_CAOL = \
-    b"\x43\x41\x4f\x4c\x02\x00\x00\x00" \
-    b"\x50\x00\x00\x00\x37\x13\x03\x00" \
-    b"\x00\x00\x00\x00\x00\x20\x00\x00" \
-    b"\x00\x02\x00\x00\x00\x00\x10\x00" \
-    b"\x00\x00\x02\x00\x00\x00\x00\x00" \
-    b"\x00\x00\x00\x00\x00\x00\x00\x00"
-BLOCK_ITSF = \
-    b"\x49\x54\x53\x46\x04\x00\x00\x00" \
-    b"\x20\x00\x00\x00\x01\x00\x00\x00"
-
-MSDES_CONTROL = \
-    b"\x03\x00\x00\x00\x29\x17\x00\x00" \
-    b"\x01\x00\x00\x00\xa5\xa5\x00\x00"
-LZXC_CONTROL = \
-    b"\x07\x00\x00\x00\x4c\x5a\x58\x43" \
-    b"\x03\x00\x00\x00\x04\x00\x00\x00" \
-    b"\x04\x00\x00\x00\x02\x00\x00\x00" \
-    b"\x00\x00\x00\x00\x00\x00\x00\x00"
+BLOCK_CAOL = (
+    b'\x43\x41\x4f\x4c\x02\x00\x00\x00'
+    b'\x50\x00\x00\x00\x37\x13\x03\x00'
+    b'\x00\x00\x00\x00\x00\x20\x00\x00'
+    b'\x00\x02\x00\x00\x00\x00\x10\x00'
+    b'\x00\x00\x02\x00\x00\x00\x00\x00'
+    b'\x00\x00\x00\x00\x00\x00\x00\x00'
+)
+BLOCK_ITSF = b'\x49\x54\x53\x46\x04\x00\x00\x00\x20\x00\x00\x00\x01\x00\x00\x00'
+MSDES_CONTROL = b'\x03\x00\x00\x00\x29\x17\x00\x00\x01\x00\x00\x00\xa5\xa5\x00\x00'
+LZXC_CONTROL = b'\x07\x00\x00\x00\x4c\x5a\x58\x43\x03\x00\x00\x00\x04\x00\x00\x00\x04\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
 
 COLLAPSE = re.compile(r'[ \t\r\n\v]+')
 
 PAGE_BREAKS = {'always', 'left', 'right'}
 
 
-def decint(value):
+def decint(value: int) -> bytes:
     ans = bytearray()
     while True:
-        b = value & 0x7f
+        b = value & 0x7F
         value >>= 7
-        if len(ans):
+        if ans:
             b |= 0x80
         ans.append(b)
         if value == 0:
@@ -136,44 +148,47 @@ def decint(value):
 randbytes = os.urandom
 
 
-def warn(x):
+def warn(x: object) -> None:
     print(x)
 
 
-class ReBinary(object):
-    NSRMAP = {'': None, XML_NS: 'xml'}
+class ReBinary:
+    NSRMAP: NSRMap = {'': None, XML_NS: 'xml'}
 
-    def __init__(self, root, item, oeb, opts, map=HTML_MAP):
+    def __init__(self, root: etree._Element, item: Manifest.Item | None, oeb: OEBBook, opts: Values, map: InvertedMap = HTML_MAP) -> None:
         self.item = item
         self.logger = oeb.logger
         self.manifest = oeb.manifest
         self.tags, self.tattrs = map
         self.buf = io.BytesIO()
-        self.anchors = []
-        self.page_breaks = []
-        self.is_html  = is_html = map is HTML_MAP
-        self.stylizer = Stylizer(root, item.href, oeb, opts) if is_html else None
+        self.anchors: list[tuple[str, int]] = []
+        self.page_breaks: list[tuple[int, list[int]]] = []
+        self.is_html = is_html = map is HTML_MAP
+        self.stylizer = Stylizer(root, item.href, oeb, opts) if is_html else None  # ty: ignore[missing-union-attribute] HTML ReBinary objects always have an item
         self.tree_to_binary(root)
         self.content = self.buf.getvalue()
         self.ahc = self.build_ahc() if is_html else None
         self.aht = self.build_aht() if is_html else None
 
-    def write(self, *values):
+    def write(self, *values: int | str) -> None:
         for value in values:
             if isinstance(value, numbers.Integral):
                 try:
-                    value = codepoint_to_chr(value)
+                    value = chr(value)
                 except OverflowError:
-                    self.logger.warn('unicode_type overflow for integer:', value)
-                    value = u'?'
-            self.buf.write(value.encode('utf-8'))
+                    self.logger.warn('Unicode overflow for integer:', value)
+                    value = '?'
+            self.buf.write(value.encode('utf-8'))  # ty: ignore[missing-union-attribute] int is a numbers.Integral
 
-    def is_block(self, style):
+    def is_block(self, style: Style) -> bool:
         return style['display'] not in ('inline', 'inline-block')
 
-    def tree_to_binary(self, elem, nsrmap=NSRMAP, parents=[],
-                       inhead=False, preserve=False):
-        if not isinstance(elem.tag, string_or_bytes):
+    def tree_to_binary(
+        self, elem: etree._Element, nsrmap: NSRMap = NSRMAP, parents: list[int] | None = None, inhead: bool = False, preserve: bool = False
+    ) -> None:
+        if parents is None:
+            parents = []
+        if not isinstance(elem.tag, str):  # lxml tags are never bytes
             # Don't emit any comments or raw entities
             return
         nsrmap = copy.copy(nsrmap)
@@ -203,10 +218,9 @@ class ReBinary(object):
             if self.tattrs[index]:
                 tattrs = self.tattrs[index]
         else:
-            self.write(FLAG_CUSTOM, len(tag)+1, tag)
+            self.write(FLAG_CUSTOM, len(tag) + 1, tag)
         last_break = self.page_breaks[-1][0] if self.page_breaks else None
-        if style and last_break != tag_offset \
-           and style['page-break-before'] in PAGE_BREAKS:
+        if style and last_break != tag_offset and style['page-break-before'] in PAGE_BREAKS:
             self.page_breaks.append((tag_offset, list(parents)))
         for attr, value in attrib.items():
             attr = prefixname(attr, nsrmap)
@@ -215,12 +229,12 @@ class ReBinary(object):
                 path, frag = urldefrag(value)
                 if self.item:
                     path = self.item.abshref(path)
-                prefix = codepoint_to_chr(3)
+                prefix = chr(3)
                 if path in self.manifest.hrefs:
-                    prefix = codepoint_to_chr(2)
+                    prefix = chr(2)
                     value = self.manifest.hrefs[path].id
                     if frag:
-                        value = '#'.join((value, frag))
+                        value = f'{value}#{frag}'
                 value = prefix + value
             elif attr in ('id', 'name'):
                 self.anchors.append((value, tag_offset))
@@ -231,15 +245,15 @@ class ReBinary(object):
             if attr in tattrs:
                 self.write(tattrs[attr])
             else:
-                self.write(FLAG_CUSTOM, len(attr)+1, attr)
+                self.write(FLAG_CUSTOM, len(attr) + 1, attr)
             try:
-                self.write(ATTR_NUMBER, int(value)+1)
+                self.write(ATTR_NUMBER, int(value) + 1)
             except ValueError:
-                self.write(len(value)+1, value)
+                self.write(len(value) + 1, value)
         self.write(0)
         old_preserve = preserve
         if style:
-            preserve = (style['white-space'] in ('pre', 'pre-wrap'))
+            preserve = style['white-space'] in ('pre', 'pre-wrap')
         xml_space = elem.get(XML('space'))
         if xml_space == 'preserve':
             preserve = True
@@ -257,9 +271,8 @@ class ReBinary(object):
             if self.stylizer:
                 nstyle = None if next is None else self.stylizer.style(next)
             if child is not None:
-                if not preserve \
-                   and (inhead or not nstyle or self.is_block(cstyle) or self.is_block(nstyle)) \
-                   and child.tail and child.tail.isspace():
+                # cstyle is not None when nstyle is not None
+                if not preserve and (inhead or not nstyle or self.is_block(cstyle) or self.is_block(nstyle)) and child.tail and child.tail.isspace():  # ty: ignore[invalid-argument-type]
                     child.tail = None
                 self.tree_to_binary(child, nsrmap, parents, inhead, preserve)
             child, cstyle = next, nstyle
@@ -275,46 +288,45 @@ class ReBinary(object):
         if style and style['page-break-after'] not in ('avoid', 'auto'):
             self.page_breaks.append((self.buf.tell(), list(parents)))
 
-    def build_ahc(self):
+    def build_ahc(self) -> bytes:
         if len(self.anchors) > 6:
-            self.logger.warn("More than six anchors in file %r. "
-                "Some links may not work properly." % self.item.href)
+            self.logger.warn(f'More than six anchors in file {self.item.href!r}. Some links may not work properly.')  # ty: ignore[missing-union-attribute] HTML ReBinary objects always have an item
         data = io.BytesIO()
-        data.write(codepoint_to_chr(len(self.anchors)).encode('utf-8'))
+        data.write(chr(len(self.anchors)).encode('utf-8'))
         for anchor, offset in self.anchors:
-            data.write(codepoint_to_chr(len(anchor)).encode('utf-8'))
-            if isinstance(anchor, unicode_type):
+            data.write(chr(len(anchor)).encode('utf-8'))
+            if isinstance(anchor, str):
                 anchor = anchor.encode('utf-8')
             data.write(anchor)
             data.write(pack('<I', offset))
         return data.getvalue()
 
-    def build_aht(self):
+    def build_aht(self) -> bytes:
         return pack('<I', 0)
 
 
-def preserve(function):
-    def wrapper(self, *args, **kwargs):
+def preserve[**P, T](function: Callable[Concatenate[LitWriter, P], T]) -> Callable[Concatenate[LitWriter, P], T]:
+    def wrapper(self: LitWriter, *args: P.args, **kwargs: P.kwargs) -> T:
         opos = self._stream.tell()
         try:
             return function(self, *args, **kwargs)
         finally:
             self._stream.seek(opos)
+
     functools.update_wrapper(wrapper, function)
     return wrapper
 
 
-class LitWriter(object):
-
-    def __init__(self, opts):
+class LitWriter:
+    def __init__(self, opts: Values) -> None:
         self.opts = opts
 
-    def _litize_oeb(self):
+    def _litize_oeb(self) -> None:
         oeb = self._oeb
         oeb.metadata.add('calibre-version', calibre.__version__)
         cover = None
         if oeb.metadata.cover:
-            id = unicode_type(oeb.metadata.cover[0])
+            id = str(oeb.metadata.cover[0])
             cover = oeb.manifest.ids[id]
             for type, title in ALL_MS_COVER_TYPES:
                 if type not in oeb.guide:
@@ -322,35 +334,35 @@ class LitWriter(object):
         else:
             self._logger.warn('No suitable cover image found.')
 
-    def __call__(self, oeb, path):
+    def __call__(self, oeb: OEBBook, path: str | IO[bytes]) -> None:
         if hasattr(path, 'write'):
-            return self._dump_stream(oeb, path)
+            return self._dump_stream(oeb, path)  # ty: ignore[invalid-argument-type] str has no write()
         with open(path, 'w+b') as stream:
             return self._dump_stream(oeb, stream)
 
-    def _dump_stream(self, oeb, stream):
+    def _dump_stream(self, oeb: OEBBook, stream: IO[bytes]) -> None:
         self._oeb = oeb
         self._logger = oeb.logger
         self._stream = stream
         self._sections = [io.BytesIO() for i in range(4)]
-        self._directory = []
-        self._meta = None
+        self._directory: list[DirectoryEntry] = []
+        self._meta: bytes | None = None
         self._litize_oeb()
         self._write_content()
 
-    def _write(self, *data):
+    def _write(self, *data: bytes) -> None:
         for datum in data:
             self._stream.write(datum)
 
     @preserve
-    def _writeat(self, pos, *data):
+    def _writeat(self, pos: int, *data: bytes) -> None:
         self._stream.seek(pos)
         self._write(*data)
 
-    def _tell(self):
+    def _tell(self) -> int:
         return self._stream.tell()
 
-    def _write_content(self):
+    def _write_content(self) -> None:
         # Build content sections
         self._build_sections()
 
@@ -359,8 +371,7 @@ class LitWriter(object):
 
         # Write headers
         self._write(LIT_MAGIC)
-        self._write(pack('<IIII',
-            1, PRIMARY_SIZE, 5, SECONDARY_SIZE))
+        self._write(pack('<IIII', 1, PRIMARY_SIZE, 5, SECONDARY_SIZE))
         self._write(packguid(LITFILE_GUID))
         offset = self._tell()
         pieces = list(range(offset, offset + (PIECE_SIZE * 5), PIECE_SIZE))
@@ -368,10 +379,38 @@ class LitWriter(object):
         aoli1 = len(dchunks) if ichunk else ULL_NEG1
         last = len(dchunks) - 1
         ddepth = 2 if ichunk else 1
-        self._write(pack('<IIQQQQIIIIQIIQQQQIIIIQIIIIQ',
-            2, 0x98, aoli1, 0, last, 0, DCHUNK_SIZE, 2, 0, ddepth, 0,
-            len(self._directory), 0, ULL_NEG1, 0, 0, 0, CCHUNK_SIZE, 2,
-            0, 1, 0, len(dcounts), 0, 0x100000, 0x20000, 0))
+        self._write(
+            pack(
+                '<IIQQQQIIIIQIIQQQQIIIIQIIIIQ',
+                2,
+                0x98,
+                aoli1,
+                0,
+                last,
+                0,
+                DCHUNK_SIZE,
+                2,
+                0,
+                ddepth,
+                0,
+                len(self._directory),
+                0,
+                ULL_NEG1,
+                0,
+                0,
+                0,
+                CCHUNK_SIZE,
+                2,
+                0,
+                1,
+                0,
+                len(dcounts),
+                0,
+                0x100000,
+                0x20000,
+                0,
+            )
+        )
         self._write(BLOCK_CAOL)
         self._write(BLOCK_ITSF)
         conoff_offset = self._tell()
@@ -380,28 +419,24 @@ class LitWriter(object):
 
         # Piece #0
         piece0_offset = self._tell()
-        self._write(pack('<II', 0x1fe, 0))
+        self._write(pack('<II', 0x1FE, 0))
         filesz_offset = self._tell()
         self._write(pack('<QQ', 0, 0))
-        self._writeat(pieces[0], pack('<QQ',
-            piece0_offset, self._tell() - piece0_offset))
+        self._writeat(pieces[0], pack('<QQ', piece0_offset, self._tell() - piece0_offset))
 
         # Piece #1: Directory chunks
         piece1_offset = self._tell()
-        number = len(dchunks) + ((ichunk and 1) or 0)
-        self._write(b'IFCM', pack('<IIIQQ',
-            1, DCHUNK_SIZE, 0x100000, ULL_NEG1, number))
+        number = len(dchunks) + ((ichunk and 1) or 0)  # ty: ignore[unsupported-operator] ichunk is None or non-empty bytes
+        self._write(b'IFCM', pack('<IIIQQ', 1, DCHUNK_SIZE, 0x100000, ULL_NEG1, number))
         for dchunk in dchunks:
             self._write(dchunk)
         if ichunk:
             self._write(ichunk)
-        self._writeat(pieces[1], pack('<QQ',
-            piece1_offset, self._tell() - piece1_offset))
+        self._writeat(pieces[1], pack('<QQ', piece1_offset, self._tell() - piece1_offset))
 
         # Piece #2: Count chunks
         piece2_offset = self._tell()
-        self._write(b'IFCM', pack('<IIIQQ',
-            1, CCHUNK_SIZE, 0x20000, ULL_NEG1, 1))
+        self._write(b'IFCM', pack('<IIIQQ', 1, CCHUNK_SIZE, 0x20000, ULL_NEG1, 1))
         cchunk = io.BytesIO()
         last = 0
         for i, dcount in zip(count(), dcounts):
@@ -411,24 +446,20 @@ class LitWriter(object):
             last = dcount
         cchunk = cchunk.getvalue()
         rem = CCHUNK_SIZE - (len(cchunk) + 50)
-        self._write(b'AOLL', pack('<IQQQQQ',
-            rem, 0, ULL_NEG1, ULL_NEG1, 0, 1))
+        self._write(b'AOLL', pack('<IQQQQQ', rem, 0, ULL_NEG1, ULL_NEG1, 0, 1))
         filler = b'\0' * rem
         self._write(cchunk, filler, pack('<H', len(dcounts)))
-        self._writeat(pieces[2], pack('<QQ',
-            piece2_offset, self._tell() - piece2_offset))
+        self._writeat(pieces[2], pack('<QQ', piece2_offset, self._tell() - piece2_offset))
 
         # Piece #3: GUID3
         piece3_offset = self._tell()
         self._write(packguid(PIECE3_GUID))
-        self._writeat(pieces[3], pack('<QQ',
-            piece3_offset, self._tell() - piece3_offset))
+        self._writeat(pieces[3], pack('<QQ', piece3_offset, self._tell() - piece3_offset))
 
         # Piece #4: GUID4
         piece4_offset = self._tell()
         self._write(packguid(PIECE4_GUID))
-        self._writeat(pieces[4], pack('<QQ',
-            piece4_offset, self._tell() - piece4_offset))
+        self._writeat(pieces[4], pack('<QQ', piece4_offset, self._tell() - piece4_offset))
 
         # The actual section content
         content_offset = self._tell()
@@ -436,26 +467,24 @@ class LitWriter(object):
         self._write(self._sections[0].getvalue())
         self._writeat(filesz_offset, pack('<Q', self._tell()))
 
-    def _add_file(self, name, data, secnum=0):
+    def _add_file(self, name: str, data: bytes, secnum: int = 0) -> None:
         if len(data) > 0:
             section = self._sections[secnum]
             offset = section.tell()
             section.write(data)
         else:
             offset = 0
-        self._directory.append(
-            DirectoryEntry(name, secnum, offset, len(data)))
+        self._directory.append(DirectoryEntry(name, secnum, offset, len(data)))
 
-    def _add_folder(self, name, offset=0, size=0):
+    def _add_folder(self, name: str, offset: int = 0, size: int = 0) -> None:
         if not name.endswith('/'):
             name += '/'
-        self._directory.append(
-            DirectoryEntry(name, 0, offset, size))
+        self._directory.append(DirectoryEntry(name, 0, offset, size))
 
-    def _djoin(self, *names):
+    def _djoin(self, *names: str) -> str:
         return '/'.join(names)
 
-    def _build_sections(self):
+    def _build_sections(self) -> None:
         self._add_folder('/', ROOT_OFFSET, ROOT_SIZE)
         self._build_data()
         self._build_manifest()
@@ -467,12 +496,11 @@ class LitWriter(object):
         self._build_storage()
         self._build_transforms()
 
-    def _build_data(self):
+    def _build_data(self) -> None:
         self._add_folder('/data')
         for item in self._oeb.manifest.values():
             if item.media_type not in LIT_MIMES:
-                self._logger.warn("File %r of unknown media-type %r "
-                    "excluded from output." % (item.href, item.media_type))
+                self._logger.warn(f'File {item.href!r} of unknown media-type {item.media_type!r} excluded from output.')
                 continue
             name = '/data/' + item.id
             data = item.data
@@ -480,22 +508,24 @@ class LitWriter(object):
             if isinstance(data, etree._Element):
                 self._add_folder(name)
                 rebin = ReBinary(data, item, self._oeb, self.opts, map=HTML_MAP)
+                assert rebin.ahc is not None and rebin.aht is not None  # they are always built for HTML_MAP
                 self._add_file(name + '/ahc', rebin.ahc, 0)
                 self._add_file(name + '/aht', rebin.aht, 0)
-                item.page_breaks = rebin.page_breaks
+                item.page_breaks = rebin.page_breaks  # ty: ignore[missing-attribute] attribute used only by LitWriter
                 data = rebin.content
                 name = name + '/content'
                 secnum = 1
-            elif isinstance(data, unicode_type):
+            elif isinstance(data, str):
                 data = data.encode('utf-8')
             elif hasattr(data, 'cssText'):
                 data = item.bytes_representation
+            assert data is not None  # len(None) in _add_file() would fail anyway
             self._add_file(name, data, secnum)
-            item.size = len(data)
+            item.size = len(data)  # ty: ignore[missing-attribute] attribute used only by LitWriter
 
-    def _build_manifest(self):
+    def _build_manifest(self) -> None:
         states = ['linear', 'nonlinear', 'css', 'images']
-        manifest = dict((state, []) for state in states)
+        manifest = {state: [] for state in states}
         for item in self._oeb.manifest.values():
             if item.spine_position is not None:
                 key = 'linear' if item.linear else 'nonlinear'
@@ -518,19 +548,16 @@ class LitWriter(object):
                 elif media_type in OEB_STYLES:
                     media_type = CSS_MIME
                 href = unquote(item.href)
-                item.offset = offset \
-                    if state in ('linear', 'nonlinear') else 0
+                item.offset = offset if state in ('linear', 'nonlinear') else 0
                 data.write(pack('<I', item.offset))
-                entry = [codepoint_to_chr(len(id)), unicode_type(id),
-                         codepoint_to_chr(len(href)), unicode_type(href),
-                         codepoint_to_chr(len(media_type)), unicode_type(media_type)]
+                entry = [chr(len(id)), str(id), chr(len(href)), str(href), chr(len(media_type)), str(media_type)]
                 for value in entry:
                     data.write(value.encode('utf-8'))
                 data.write(b'\0')
                 offset += item.size
         self._add_file('/manifest', data.getvalue())
 
-    def _build_page_breaks(self):
+    def _build_page_breaks(self) -> None:
         pb1 = io.BytesIO()
         pb2 = io.BytesIO()
         pb3 = io.BytesIO()
@@ -560,49 +587,51 @@ class LitWriter(object):
                 for parent in parents:
                     pb2.write(pack('<I', parent))
         if bits != 0:
-            pb3cur <<= (8 - bits)
+            pb3cur <<= 8 - bits
             pb3.write(pack('<B', pb3cur))
         self._add_file('/pb1', pb1.getvalue(), 0)
         self._add_file('/pb2', pb2.getvalue(), 0)
         self._add_file('/pb3', pb3.getvalue(), 0)
 
-    def _build_meta(self):
+    def _build_meta(self) -> None:
         _, meta = self._oeb.to_opf1()[OPF_MIME]
         meta.attrib['ms--minimum_level'] = '0'
         meta.attrib['ms--attr5'] = '1'
-        meta.attrib['ms--guid'] = '{%s}' % native_string_type(uuid.uuid4()).upper()
+        meta.attrib['ms--guid'] = f'{{{str(uuid.uuid4()).upper()}}}'
         rebin = ReBinary(meta, None, self._oeb, self.opts, map=OPF_MAP)
         meta = rebin.content
         self._meta = meta
         self._add_file('/meta', meta)
 
-    def _build_drm_storage(self):
-        drmsource = u'Free as in freedom\0'.encode('utf-16-le')
+    def _build_drm_storage(self) -> None:
+        drmsource = 'Free as in freedom\0'.encode('utf-16-le')
         self._add_file('/DRMStorage/DRMSource', drmsource)
+        assert self._meta is not None  # set by _build_meta()
         tempkey = self._calculate_deskey([self._meta, drmsource])
         msdes.deskey(tempkey, msdes.EN0)
-        self._add_file('/DRMStorage/DRMSealed', msdes.des(b"\0" * 16))
+        self._add_file('/DRMStorage/DRMSealed', msdes.des(b'\0' * 16))
         self._bookkey = b'\0' * 8
         self._add_file('/DRMStorage/ValidationStream', b'MSReader', 3)
 
-    def _build_version(self):
+    def _build_version(self) -> None:
         self._add_file('/Version', pack('<HH', 8, 1))
 
-    def _build_namelist(self):
+    def _build_namelist(self) -> None:
         data = io.BytesIO()
-        data.write(pack('<HH', 0x3c, len(self._sections)))
-        names = ['Uncompressed', 'MSCompressed', 'EbEncryptDS',
-                 'EbEncryptOnlyDS']
+        data.write(pack('<HH', 0x3C, len(self._sections)))
+        names = ['Uncompressed', 'MSCompressed', 'EbEncryptDS', 'EbEncryptOnlyDS']
         for name in names:
             data.write(pack('<H', len(name)))
             data.write(name.encode('utf-16-le'))
             data.write(b'\0\0')
         self._add_file('::DataSpace/NameList', data.getvalue())
 
-    def _build_storage(self):
-        mapping = [(1, 'MSCompressed', (LZXCOMPRESS_GUID,)),
-                   (2, 'EbEncryptDS', (LZXCOMPRESS_GUID, DESENCRYPT_GUID)),
-                   (3, 'EbEncryptOnlyDS', (DESENCRYPT_GUID,)),]
+    def _build_storage(self) -> None:
+        mapping = [
+            (1, 'MSCompressed', (LZXCOMPRESS_GUID,)),
+            (2, 'EbEncryptDS', (LZXCOMPRESS_GUID, DESENCRYPT_GUID)),
+            (3, 'EbEncryptOnlyDS', (DESENCRYPT_GUID,)),
+        ]
         for secnum, name, transforms in mapping:
             root = '::DataSpace/Storage/' + name
             data = self._sections[secnum].getvalue()
@@ -627,8 +656,7 @@ class LitWriter(object):
                     lzx = Compressor(17)
                     data, rtable = lzx.compress(data, flush=True)
                     rdata = io.BytesIO()
-                    rdata.write(pack('<IIIIQQQQ',
-                        3, len(rtable), 8, 0x28, unlen, len(data), 0x8000, 0))
+                    rdata.write(pack('<IIIIQQQQ', 3, len(rtable), 8, 0x28, unlen, len(data), 0x8000, 0))
                     for uncomp, comp in rtable[:-1]:
                         rdata.write(pack('<Q', comp))
                     rdata = rdata.getvalue()
@@ -644,20 +672,20 @@ class LitWriter(object):
                     dname += '/ResetTable'
                     self._add_file(dname, rdata)
 
-    def _build_transforms(self):
+    def _build_transforms(self) -> None:
         for guid in (LZXCOMPRESS_GUID, DESENCRYPT_GUID):
-            self._add_folder('::Transform/'+ guid)
+            self._add_folder('::Transform/' + guid)
 
-    def _calculate_deskey(self, hashdata):
+    def _calculate_deskey(self, hashdata: Iterable[bytes]) -> bytes:
         prepad = 2
         hash = mssha1.new()
         for data in hashdata:
             if prepad > 0:
-                data = (b"\000" * prepad) + data
+                data = (b'\000' * prepad) + data
                 prepad = 0
             postpad = 64 - (len(data) % 64)
             if postpad < 64:
-                data = data + (b"\000" * postpad)
+                data = data + (b'\000' * postpad)
             hash.update(data)
         digest = hash.digest()
         if not isinstance(digest, bytes):
@@ -668,7 +696,7 @@ class LitWriter(object):
             key[i % 8] ^= k
         return bytes(key)
 
-    def _build_dchunks(self):
+    def _build_dchunks(self) -> tuple[list[int], list[bytes], bytes | None]:
         ddata = []
         directory = list(self._directory)
         directory.sort(key=lambda x: x.name.lower())
@@ -681,9 +709,7 @@ class LitWriter(object):
             en = entry.name
             if not isinstance(en, bytes):
                 en = en.encode('utf-8')
-            nxt = b''.join([decint(len(en)), en,
-                decint(entry.section), decint(entry.offset),
-                decint(entry.size)])
+            nxt = b''.join([decint(len(en)), en, decint(entry.section), decint(entry.offset), decint(entry.size)])
             usedlen = dchunk.tell() + len(nxt) + (len(quickref) * 2) + 52
             if usedlen >= DCHUNK_SIZE:
                 ddata.append((dchunk.getvalue(), quickref, dcount, name))
@@ -728,6 +754,11 @@ class LitWriter(object):
         if ichunk:
             rem = DCHUNK_SIZE - (ichunk.tell() + 16)
             pad = rem - 2
-            ichunk = b''.join([b'AOLI', pack('<IQ', rem, len(dchunks)),
-                ichunk.getvalue(), (b'\0' * pad), pack('<H', len(dchunks))])
-        return dcounts, dchunks, ichunk
+            ichunk = b''.join([
+                b'AOLI',
+                pack('<IQ', rem, len(dchunks)),
+                ichunk.getvalue(),
+                (b'\0' * pad),
+                pack('<H', len(dchunks)),
+            ])
+        return dcounts, dchunks, ichunk  # ty: ignore[invalid-explicit-return] BytesIO objects are always truthy so ichunk is None or bytes

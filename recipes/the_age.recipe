@@ -6,14 +6,14 @@ __docformat__ = 'restructuredtext en'
 '''
 theage.com.au
 '''
-from calibre import strftime
-from calibre.web.feeds.news import BasicNewsRecipe
-from calibre.ebooks.BeautifulSoup import BeautifulSoup
 import re
+
+from calibre import strftime
+from calibre.ebooks.BeautifulSoup import BeautifulSoup
+from calibre.web.feeds.news import BasicNewsRecipe
 
 
 class TheAge(BasicNewsRecipe):
-
     title = 'The Age'
     description = 'Business News, World News and Breaking News in Melbourne, Australia'
     publication_type = 'newspaper'
@@ -22,8 +22,7 @@ class TheAge(BasicNewsRecipe):
 
     max_articles_per_feed = 1000
     recursions = 0
-    remove_tags = [dict(name=['table', 'script', 'noscript', 'style']), dict(
-        name='a', attrs={'href': '/'}), dict(name='a', attrs={'href': '/text/'})]
+    remove_tags = [dict(name=['table', 'script', 'noscript', 'style']), dict(name='a', attrs={'href': '/'}), dict(name='a', attrs={'href': '/text/'})]
 
     def get_browser(self):
         br = BasicNewsRecipe.get_browser(self)
@@ -32,8 +31,7 @@ class TheAge(BasicNewsRecipe):
 
     def parse_index(self):
 
-        soup = BeautifulSoup(self.browser.open(
-            'http://www.theage.com.au/text/').read())
+        soup = BeautifulSoup(self.browser.open('http://www.theage.com.au/text/').read())
 
         section = None
         sections = {}
@@ -63,8 +61,7 @@ class TheAge(BasicNewsRecipe):
 
         # Insert feeds in specified order, if available
 
-        feedSort = ['National', 'World', 'Opinion',
-                    'Columns', 'Business', 'Sport', 'Entertainment']
+        feedSort = ['National', 'World', 'Opinion', 'Columns', 'Business', 'Sport', 'Entertainment']
         for i in feedSort:
             if i in sections:
                 feeds.append((i, sections[i]))
@@ -72,23 +69,21 @@ class TheAge(BasicNewsRecipe):
         # Done with the sorted feeds
 
         for i in feedSort:
-            del sections[i]
+            sections.pop(i, None)
 
         # Append what is left over...
-
-        for i in sections:
-            feeds.append((i, sections[i]))
+        for i, s in sections.items():
+            feeds.append((i, s))
 
         return feeds
 
     def get_cover_url(self):
 
-        soup = BeautifulSoup(self.browser.open(
-            'http://www.theage.com.au/todays-paper').read())
+        soup = BeautifulSoup(self.browser.open('http://www.theage.com.au/todays-paper').read())
 
         for i in soup.findAll('a'):
             href = i['href']
-            if href and re.match('http://www.theage.com.au/frontpage/[0-9]+/[0-9]+/[0-9]+/frontpage.pdf', href):
+            if href and re.match(r'http://www.theage.com.au/frontpage/[0-9]+/[0-9]+/[0-9]+/frontpage.pdf', href):
                 return href
 
         return None
@@ -96,11 +91,10 @@ class TheAge(BasicNewsRecipe):
     def preprocess_html(self, soup):
 
         for p in soup.findAll('p'):
-
             # Collapse the paragraph by joining the non-tag contents
 
-            contents = [i for i in p.contents if isinstance(i, type(u''))]
-            if len(contents):
+            contents = [i for i in p.contents if isinstance(i, type(''))]
+            if contents:
                 contents = ''.join(contents)
 
                 # Filter out what's left of the text-mode navigation stuff

@@ -4,6 +4,7 @@
 
 import os
 import sys
+from typing import NoReturn
 
 is_py3 = sys.version_info.major >= 3
 native_string_type = str
@@ -14,7 +15,7 @@ def hasenv(x):
     return getenv(x) is not None
 
 
-def as_bytes(x, encoding='utf-8'):
+def as_bytes(x, encoding='utf-8') -> bytes:
     if isinstance(x, unicode_type):
         return x.encode(encoding)
     if isinstance(x, bytes):
@@ -52,7 +53,7 @@ def only_unicode_recursive(x, encoding='utf-8', errors='strict'):
     return x
 
 
-def reraise(tp, value, tb=None):
+def reraise(tp, value, tb=None) -> NoReturn:
     try:
         if value is None:
             value = tp()

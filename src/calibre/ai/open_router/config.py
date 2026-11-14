@@ -1,0 +1,565 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2025, Kovid Goyal <kovid at kovidgoyal.net>
+
+import datetime
+import textwrap
+from functools import partial
+from typing import TYPE_CHECKING, Any, cast
+
+from qt.core import (
+    QAbstractItemView,
+    QAbstractListModel,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QHBoxLayout,
+    QIcon,
+    QLabel,
+    QLineEdit,
+    QListView,
+    QLocale,
+    QModelIndex,
+    QObject,
+    QPushButton,
+    QSize,
+    QSortFilterProxyModel,
+    QSplitter,
+    Qt,
+    QTextBrowser,
+    QUrl,
+    QVBoxLayout,
+    QWidget,
+    pyqtSignal,
+)
+
+from calibre.ai import AICapabilities
+from calibre.ai.open_router import OpenRouterAI
+from calibre.ai.prefs import decode_secret, encode_secret, pref_for_provider, set_prefs_for_provider
+from calibre.ai.utils import configure, reasoning_strategy_config_widget
+from calibre.customize.ui import available_ai_provider_plugins
+from calibre.ebooks.txt.processor import create_markdown_object
+from calibre.gui2 import error_dialog, gprefs, safe_open_url
+from calibre.gui2.widgets2 import Dialog
+from calibre.utils.date import qt_from_dt
+from calibre.utils.icu import primary_sort_key
+from calibre.utils.localization import _
+
+pref = partial(pref_for_provider, OpenRouterAI.name)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from calibre.ai.open_router.backend import Model as AIModel
+
+
+def backend() -> Any:  # ruff: ignore[any-type]
+    for plugin in available_ai_provider_plugins():
+        if plugin.name == OpenRouterAI.name:
+            return plugin.builtin_live_module
+    raise ValueError(f'Could not find the {OpenRouterAI.name} plugin')
+
+
+class Model(QWidget):
+    select_model = pyqtSignal(str, bool)
+
+    def __init__(self, for_text: bool = True, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        l = QHBoxLayout(self)
+        l.setContentsMargins(0, 0, 0, 0)
+        self.for_text = for_text
+        self.model_id, self.model_name = pref('text_model' if for_text else 'text_to_image_model', ('', _('Automatic')))
+        self.la = la = QLabel(self.model_name)
+        self.setToolTip(_('The model to use for text related tasks') if for_text else _('The model to use for generating images from text'))
+        self.setToolTip(
+            self.toolTip()
+            + '\n\n'
+            + _(
+                'If not specified an appropriate model is chosen automatically.\n'
+                'See the option for "Model choice strategy" to control how models are automatically chosen.'
+            )
+        )
+        self.b = b = QPushButton(_('&Change'))
+        b.setToolTip(_('Choose a model'))
+        l.addWidget(la), l.addWidget(b)
+        b.clicked.connect(self._select_model)
+
+    def set(self, model_id: str, model_name: str) -> None:
+        self.model_id, self.model_name = model_id, model_name or _('Automatic')
+        self.la.setText(self.model_name)
+
+    def _select_model(self) -> None:
+        self.select_model.emit(self.model_id, self.for_text)
+
+
+class ModelsModel(QAbstractListModel):
+    def __init__(self, capabilities: AICapabilities, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.backend = backend()
+        self.all_models_map = self.backend.get_available_models()
+        self.all_models = tuple(filter(lambda m: capabilities & m.capabilities == capabilities, self.all_models_map.values()))
+        self.sorts = tuple(primary_sort_key(m.name) for m in self.all_models)
+
+    def generate_sorts(self, *sorts: Callable[[AIModel], object]) -> None:
+        self.sorts = tuple(tuple(f(m) for f in sorts) for m in self.all_models)
+
+    def rowCount(self, parent: QModelIndex | None = None) -> int:
+        return len(self.all_models)
+
+    def data(self, index: QModelIndex, role: int | None = None) -> object:
+        try:
+            m = self.all_models[index.row()]
+        except IndexError:
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
+            return m.name
+        if role == Qt.ItemDataRole.UserRole:
+            return m
+        if role == Qt.ItemDataRole.UserRole + 1:
+            return self.sorts[index.row()]
+        return None
+
+
+class ProxyModels(QSortFilterProxyModel):
+    def __init__(self, capabilities: AICapabilities, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.source_model = ModelsModel(capabilities, self)
+        self.source_model.generate_sorts(lambda x: primary_sort_key(x.name))
+        self.setSourceModel(self.source_model)
+        self.filters = []
+        self.setSortRole(Qt.ItemDataRole.UserRole + 1)
+
+    def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
+        try:
+            m = self.source_model.all_models[source_row]
+        except IndexError:
+            return False
+        return all(f(m) for f in self.filters)
+
+    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
+        return left.data(self.sortRole()) < right.data(self.sortRole())
+
+    def set_filters(self, *filters: Callable[[AIModel], bool]) -> None:
+        self.filters = filters
+        self.invalidate()
+
+    def set_sorts(self, *sorts: Callable[[AIModel], object]) -> None:
+        self.source_model.generate_sorts(*sorts)
+        self.invalidate()
+
+    def index_for_model_id(self, model_id: str) -> QModelIndex:
+        for i in range(self.rowCount(QModelIndex())):
+            ans = self.index(i, 0)
+            if ans.data(Qt.ItemDataRole.UserRole).id == model_id:
+                return ans
+        return QModelIndex()
+
+
+class ModelDetails(QTextBrowser):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setOpenLinks(False)
+        self.anchorClicked.connect(self.open_link)
+        self.show_help()
+
+    def show_help(self) -> None:
+        self.setText(f'''
+        <p>{_('Pick an AI model to use. Generally, newer models are more capable but also more expensive.')}</p>
+        <p>{
+            _(
+                'By default, an appropriate AI model is chosen automatically based on the query being made.'
+                ' By picking a model explicitly, you have more control over this process.'
+            )
+        }</p>
+        <p>{_('Another criterion to look for is if the model is <i>moderated</i> (that is, its output is filtered by the provider).')}</p>
+        ''')
+
+    def show_model_details(self, m: AIModel) -> None:
+        if m.pricing.is_free:
+            price = f"<b>{_('Free')}</b>"
+        else:
+
+            def fmt(p: float) -> str:
+                ans = f'$ {p:.2f}'
+                ans = ans.removesuffix('.00')
+                return ans
+
+            price = ''
+            if m.pricing.input_token:
+                price += f'{fmt(m.pricing.input_token * 1e6)}/M {_("input tokens")} '
+            if m.pricing.output_token:
+                price += f'{fmt(m.pricing.output_token * 1e6)}/M {_("output tokens")} '
+            if m.pricing.image:
+                price += f'$ {fmt(m.pricing.image * 1e3)}/K {_("input images")} '
+            if m.pricing.image_output:
+                price += f'{fmt(m.pricing.image_output * 1e6)}/M {_("output image tokens")} '
+        md = create_markdown_object(extensions=())
+        created = qt_from_dt(m.created).date()
+        html = f'''
+        <h2>{m.name}</h2>
+        <div>{md.convert(m.description)}</div>
+        <h2>{_('Price')}</h2>
+        <p>{price}</p>
+        <h2>{_('Details')}</h2>
+        <p>{_('Created:')} {QLocale.system().toString(created, QLocale.FormatType.ShortFormat)}<br>
+           {_('Content moderated:')} {_('yes') if m.is_moderated else _('no')}<br>
+           {_('Context length:')} {QLocale.system().toString(m.context_length)}<br>
+           {_('Identifier:')} {m.id}<br>
+           {_('See the model on')} <a href="https://openrouter.ai/{m.slug}">OpenRouter.ai</a>
+        </p>
+        '''
+        self.setText(html)
+
+    def sizeHint(self) -> QSize:
+        return QSize(350, 500)
+
+    def open_link(self, url: QUrl) -> None:
+        if url.host() == '':
+            safe_open_url('https://openrouter.ai/' + url.path().lstrip('/'))
+        else:
+            safe_open_url(url)
+
+
+class SortLoc(QComboBox):
+    def __init__(self, initial: str = '', parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.addItem('', '')
+        self.addItem(_('Newest'), 'newest')
+        self.addItem(_('Cheapest'), 'cheapest')
+        self.addItem(_('Name'), 'name')
+        self.addItem(_('Oldest'), 'oldest')
+        self.addItem(_('Most expensive'), 'expensive')
+        if (idx := self.findData(initial)) > -1:
+            self.setCurrentIndex(idx)
+
+    @property
+    def sort_key(self) -> str:
+        return self.currentData()
+
+    @property
+    def sort_key_func(self) -> Callable[[AIModel], object]:
+        match self.sort_key:
+            case 'oldest':
+                return lambda x: x.created
+            case 'newest':
+                now = datetime.datetime.now(datetime.UTC)
+                return lambda x: now - x.created
+            case 'cheapest':
+                return lambda x: x.pricing.output_cost
+            case 'expensive':
+                return lambda x: -x.pricing.output_cost
+            case 'name':
+                return lambda x: primary_sort_key(x.name)
+        return lambda x: ''
+
+
+class ChooseModel(Dialog):
+    def __init__(
+        self,
+        model_id: str = '',
+        capabilities: AICapabilities = AICapabilities.text_to_text,
+        parent: QWidget | None = None,
+    ) -> None:
+        self.capabilities = capabilities
+        super().__init__(title=_('Choose an AI model'), name='open-router-choose-model', parent=parent)
+        self.model_id = model_id
+
+    def sizeHint(self) -> QSize:
+        return QSize(700, 500)
+
+    @property
+    def model_id(self) -> str:
+        ci = self.models.currentIndex()
+        if ci.isValid():
+            return ci.data(Qt.ItemDataRole.UserRole).id
+        return ''
+
+    @model_id.setter
+    def model_id(self, val: str) -> None:
+        pm = self.models.model()
+        assert isinstance(pm, ProxyModels)
+        self.models.setCurrentIndex(pm.index_for_model_id(val))
+
+    @property
+    def model_name(self) -> str:
+        idx = self.models.currentIndex()
+        if idx.isValid():
+            return idx.data(Qt.ItemDataRole.DisplayRole)
+        return ''
+
+    def setup_ui(self) -> None:
+        l = QVBoxLayout(self)
+        self.only_free = of = QCheckBox(_('Only &free'))
+        of.setChecked(bool(gprefs.get('openrouter-filter-only-free')))
+        of.toggled.connect(self.update_filters)
+        self.only_unmoderated = ou = QCheckBox(_('Only &unmoderated'))
+        ou.setChecked(bool(gprefs.get('openrouter-filter-only-unmoderated')))
+        ou.toggled.connect(self.update_filters)
+        self.search = f = QLineEdit(self)
+        f.setPlaceholderText(_('Search for models by name'))
+        f.textChanged.connect(self.update_filters)
+        f.setClearButtonEnabled(True)
+        h = QHBoxLayout()
+        h.addWidget(f), h.addWidget(of), h.addWidget(ou)
+        l.addLayout(h)
+
+        h = QHBoxLayout()
+        la = QLabel(_('S&ort by:'))
+        h.addWidget(la)
+        sorts = tuple(gprefs.get('openrouter-model-sorts') or ('newest', 'cheapest', 'name')) + ('', '', '')
+        self.sorts = tuple(SortLoc(loc, self) for loc in sorts[:3])
+        for s in self.sorts:
+            h.addWidget(s)
+            if s is not self.sorts[-1]:
+                h.addWidget(QLabel(' ' + _('and') + ' '))
+            s.currentIndexChanged.connect(self.update_sorts)
+        la.setBuddy(self.sorts[0])
+        h.addStretch()
+        l.addLayout(h)
+
+        self.splitter = s = QSplitter(self)
+        l.addWidget(s)
+        self.models = m = QListView(self)
+        m.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.proxy_model = pm = ProxyModels(self.capabilities, m)
+        m.setModel(pm)
+        s.addWidget(m)
+        self.details = d = ModelDetails(self)
+        s.addWidget(d)
+        sm = m.selectionModel()
+        assert sm is not None
+        sm.currentChanged.connect(self.current_changed)
+
+        b = self.bb.addButton(_('Clear choice'), QDialogButtonBox.ButtonRole.ActionRole)
+        assert b is not None
+        b.setIcon(QIcon.ic('trash.png'))
+        b.clicked.connect(lambda: setattr(self, 'model_id', ''))
+        b.setToolTip(_('Let the AI model be chosen dynamically based on the query being made'))
+        h = QHBoxLayout()
+        self.counts = QLabel('')
+        h.addWidget(self.counts), h.addStretch(), h.addWidget(self.bb)
+        l.addLayout(h)
+        self.update_filters()
+        self.update_sorts()
+
+    def current_changed(self) -> None:
+        sm = self.models.selectionModel()
+        assert sm is not None
+        idx = sm.currentIndex()
+        if idx.isValid():
+            model = idx.data(Qt.ItemDataRole.UserRole)
+            self.details.show_model_details(model)
+        else:
+            self.details.show_help()
+
+    def update_sorts(self) -> None:
+        self.proxy_model.set_sorts(*(s.sort_key_func for s in self.sorts))
+        gprefs.set('openrouter-model-sorts', tuple(s.sort_key for s in self.sorts))
+        self.proxy_model.sort(0, Qt.SortOrder.AscendingOrder)
+
+    def update_filters(self) -> None:
+        filters = []
+        text = self.search.text().strip()
+        if text:
+            search_tokens = text.lower().split()
+
+            def model_matches(m: AIModel) -> bool:
+                name_tokens = m.name.lower().split()
+                for tok in search_tokens:
+                    for q in name_tokens:
+                        if tok in q:
+                            break
+                    else:
+                        return False
+                return True
+
+            filters.append(model_matches)
+        with gprefs:
+            gprefs.set('openrouter-filter-only-free', self.only_free.isChecked())
+            gprefs.set('openrouter-filter-only-unmoderated', self.only_unmoderated.isChecked())
+        if self.only_free.isChecked():
+            filters.append(lambda m: m.pricing.is_free)
+        if self.only_unmoderated.isChecked():
+            filters.append(lambda m: not m.is_moderated)
+        self.proxy_model.set_filters(*filters)
+        num_showing = self.proxy_model.rowCount(QModelIndex())
+        src_model = self.proxy_model.sourceModel()
+        assert src_model is not None
+        total = src_model.rowCount(QModelIndex())
+        if num_showing == total:
+            self.counts.setText(_('{} models').format(num_showing))
+        else:
+            self.counts.setText(_('{0} of {1} models').format(num_showing, total))
+        self.current_changed()
+
+
+class ConfigWidget(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        l = QFormLayout(self)
+        l.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        la = QLabel(
+            '<p>'
+            + _(
+                'You have to create an account at {0}, then generate an'
+                ' API key and purchase a token amount of credits. After that, you can use any'
+                ' <a href="{1}">AI model</a> you like, including free ones. Your requests are'
+                ' sent to remote providers via OpenRouter.ai, see the <a href="{2}">privacy policy</a>.'
+            ).format(
+                '<a href="https://openrouter.ai">OpenRouter.ai</a>',
+                'https://openrouter.ai/rankings',
+                'https://openrouter.ai/docs/features/privacy-and-logging',
+            )
+        )
+        la.setWordWrap(True)
+        la.setOpenExternalLinks(True)
+        l.addRow(la)
+
+        self.api_key_edit = a = QLineEdit(self)
+        a.setPlaceholderText(_('An API key is required to use OpenRouter'))
+        l.addRow(_('API &key:'), a)
+        if key := pref('api_key'):
+            a.setText(decode_secret(key))
+
+        self.model_strategy = ms = QComboBox(self)
+        l.addRow(_('Model &choice strategy:'), ms)
+        ms.addItem(_('Free only'), 'free-only')
+        ms.addItem(_('Free or paid'), 'free-or-paid')
+        ms.addItem(_('High quality'), 'native')
+        if strat := pref('model_choice_strategy', 'free-or-paid'):
+            ms.setCurrentIndex(max(0, ms.findData(strat)))
+        ms.setToolTip(
+            '<p>'
+            + _(
+                'The model choice strategy controls how a model to query is chosen when no specific'
+                ' model is specified. The choices are:<ul>\n'
+                '<li><b>Free only</b> - Only uses free models. Can lead to lower quality/slower'
+                ' results, with some rate limiting as well. Prefers unmoderated models where possible. If no free models'
+                ' are available, will fail with an error.\n'
+                '<li><b>Free or paid</b> - Like Free only, but fallback to non-free models if no free ones are available.\n'
+                '<li><b>High quality</b> - Automatically choose a model based on the query, for best possible'
+                " results, regardless of cost. Uses OpenRouter's own automatic model selection."
+            )
+        )
+        self._allow_web_searches = aws = QCheckBox(_('Allow &searching the web when generating responses'))
+        aws.setChecked(pref('allow_web_searches', False))
+        aws.setToolTip(
+            '<p>'
+            + _(
+                'If enabled, OpenRouter will use Exa.ai web searches to return accurate and up-to-date'
+                ' information for queries, where possible. This adds about two cents to the cost of every request.'
+            )
+        )
+        l.addRow(aws)
+
+        self.reasoning_strat = rs = reasoning_strategy_config_widget(pref('reasoning_strategy', 'auto'), self)
+        l.addRow(_('&Reasoning effort:'), rs)
+
+        self.data_retention = dr = QCheckBox(_('Allow usage of providers that &store prompts'), self)
+        dr.setToolTip(
+            textwrap.fill(
+                _(
+                    'Some AI providers might store your prompts, usually to use as data for training.'
+                    ' When disabled, such providers will not be used. This may prevent usage of some models.'
+                )
+            )
+        )
+        dr.setChecked(pref('data_collection', 'deny') == 'allow')
+        l.addRow(dr)
+
+        self.text_model = tm = Model(parent=self)
+        tm.select_model.connect(self.select_model)
+        l.addRow(_('Model for &text tasks:'), tm)
+
+        self.image_model = im = Model(for_text=False, parent=self)
+        im.select_model.connect(self.select_model)
+        l.addRow(_('Model for &image tasks:'), im)
+
+    def restrict_to_purpose(self, purpose: AICapabilities) -> None:
+        # Hide the settings irrelevant to the given purpose, e.g. the image
+        # model choice when configuring the AI for text only use. The data
+        # collection setting stays as it applies to image requests too.
+        self._restricted_purpose = purpose
+        lay = self.layout()
+        assert isinstance(lay, QFormLayout)
+        lay.setRowVisible(self.image_model, purpose.supports_text_to_image)
+        for w in (self.model_strategy, self._allow_web_searches, self.reasoning_strat, self.text_model):
+            lay.setRowVisible(w, purpose.supports_text_to_text)
+
+    def set_model(self, model_id: str, purpose: AICapabilities) -> bool:
+        # Make the specified model be used for the specified purpose,
+        # returning False if OpenRouter does not offer that model.
+        target = self.image_model if purpose.supports_text_to_image else self.text_model
+        model_name = model_id
+        try:
+            available = backend().get_available_models()
+        except Exception:
+            available = None  # the list of models could not be fetched, trust the caller
+        if available is not None:
+            m = available.get(model_id)
+            if m is None:
+                return False
+            model_name = m.name
+        target.set(model_id, model_name)
+        return True
+
+    def select_model(self, model_id: str, for_text: bool) -> None:
+        model_choice_target = cast('Model', self.sender())
+        caps = AICapabilities.text_to_text if for_text else AICapabilities.text_to_image
+        d = ChooseModel(model_id, caps, self)
+        if d.exec() == QDialog.DialogCode.Accepted:
+            model_choice_target.set(d.model_id, d.model_name)
+
+    @property
+    def api_key(self) -> str:
+        return self.api_key_edit.text().strip()
+
+    @property
+    def model_choice_strategy(self) -> str:
+        return self.model_strategy.currentData()
+
+    @property
+    def reasoning_strategy(self) -> str:
+        return self.reasoning_strat.currentData()
+
+    @property
+    def data_collection(self) -> str:
+        return 'allow' if self.data_retention.isChecked() else 'deny'
+
+    @property
+    def settings(self) -> dict[str, Any]:
+        ans = {
+            'api_key': encode_secret(self.api_key),
+            'model_choice_strategy': self.model_choice_strategy,
+            'reasoning_strategy': self.reasoning_strategy,
+            'data_collection': self.data_collection,
+        }
+        purpose = getattr(self, '_restricted_purpose', None)
+        if self.text_model.model_id and (purpose is None or purpose.supports_text_to_text):
+            ans['text_model'] = (self.text_model.model_id, self.text_model.model_name)
+        if self.image_model.model_id and (purpose is None or purpose.supports_text_to_image):
+            ans['text_to_image_model'] = (self.image_model.model_id, self.image_model.model_name)
+        return ans
+
+    @property
+    def is_ready_for_use(self) -> bool:
+        return bool(self.api_key)
+
+    def validate(self) -> bool:
+        if self.is_ready_for_use:
+            return True
+        error_dialog(
+            self,
+            _('No API key'),
+            _('You must supply an API key to use OpenRouter. Remember to also buy a few credits, even if you plan on using only free models.'),
+            show=True,
+        )
+        return False
+
+    def save_settings(self) -> None:
+        set_prefs_for_provider(OpenRouterAI.name, self.settings)
+
+
+if __name__ == '__main__':
+    configure(OpenRouterAI.name)

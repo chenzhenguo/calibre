@@ -1,22 +1,16 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2011, Kovid Goyal <kovid@kovidgoyal.net>
 
+from qt.core import QComboBox
 
-__license__   = 'GPL v3'
-__copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-from PyQt5.Qt import QComboBox
 from calibre.gui2 import gui_prefs
-from calibre.gui2.complete2 import EditWithComplete
+from calibre.gui2.complete2 import EditWithComplete, LineEdit
+from calibre.utils.icu import lower, sort_key
 from calibre.utils.localization import lang_map_for_ui
-from calibre.utils.icu import sort_key, lower
-from polyglot.builtins import iteritems, itervalues, unicode_type
 
 
 class LanguagesEdit(EditWithComplete):
-
-    def __init__(self, parent=None, db=None, prefs=None):
+    def __init__(self, parent=None, db=None, prefs=None) -> None:
         self.prefs = prefs or gui_prefs()
         self.refresh_recently_used()
         EditWithComplete.__init__(self, parent, sort_func=self.sort_language_items_key)
@@ -24,21 +18,24 @@ class LanguagesEdit(EditWithComplete):
         self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.setMinimumContentsLength(20)
         self._lang_map = lang_map_for_ui()
-        self.names_with_commas = [x for x in itervalues(self._lang_map) if ',' in x]
-        self.comma_map = {k:k.replace(',', '|') for k in self.names_with_commas}
-        self.comma_rmap = {v:k for k, v in iteritems(self.comma_map)}
-        self._rmap = {lower(v):k for k,v in iteritems(self._lang_map)}
+        self.names_with_commas = [x for x in self._lang_map.values() if ',' in x]
+        self.comma_map = {k: k.replace(',', '|') for k in self.names_with_commas}
+        self.comma_rmap = {v: k for k, v in self.comma_map.items()}
+        self._rmap = {lower(v): k for k, v in self._lang_map.items()}
         self.init_langs(db)
         self.item_selected.connect(self.update_recently_used)
+        line_edit = self.lineEdit()
+        assert isinstance(line_edit, LineEdit)
+        line_edit.set_use_startswith_search(False)
 
-    def init_langs(self, db):
-        self.update_items_cache(itervalues(self._lang_map))
+    def init_langs(self, db) -> None:
+        self.update_items_cache(self._lang_map.values())
 
-    def refresh_recently_used(self):
+    def refresh_recently_used(self) -> None:
         recently_used = self.prefs.get('recently_used_languages') or ()
-        self.recently_used = {x:i for i, x in enumerate(recently_used) if x}
+        self.recently_used = {x: i for i, x in enumerate(recently_used) if x}
 
-    def update_recently_used(self):
+    def update_recently_used(self) -> None:
         recently_used = self.prefs.get('recently_used_languages') or []
         vals = self.vals
         for x in vals:
@@ -54,8 +51,10 @@ class LanguagesEdit(EditWithComplete):
 
     @property
     def vals(self):
-        raw = unicode_type(self.lineEdit().text())
-        for k, v in iteritems(self.comma_map):
+        line_edit = self.lineEdit()
+        assert line_edit is not None
+        raw = str(line_edit.text())
+        for k, v in self.comma_map.items():
             raw = raw.replace(k, v)
         parts = [x.strip() for x in raw.split(',')]
         return [self.comma_rmap.get(x, x) for x in parts]
@@ -72,10 +71,10 @@ class LanguagesEdit(EditWithComplete):
         return ans
 
     @lang_codes.setter
-    def lang_codes(self, lang_codes):
+    def lang_codes(self, lang_codes) -> None:
         self.set_lang_codes(lang_codes, allow_undo=False)
 
-    def set_lang_codes(self, lang_codes, allow_undo=True):
+    def set_lang_codes(self, lang_codes, allow_undo=True) -> None:
         ans = []
         for lc in lang_codes:
             name = self._lang_map.get(lc, None)
@@ -86,7 +85,9 @@ class LanguagesEdit(EditWithComplete):
         if allow_undo:
             orig, self.disable_popup = self.disable_popup, True
             try:
-                self.lineEdit().selectAll(), self.lineEdit().insert(ans)
+                _le = self.lineEdit()
+                assert _le is not None
+                _le.selectAll(), _le.insert(ans)
             finally:
                 self.disable_popup = orig
         else:
@@ -101,3 +102,17 @@ class LanguagesEdit(EditWithComplete):
                 if code is None:
                     bad.append(name)
         return bad
+
+
+if __name__ == '__main__':
+    from calibre.gui2 import Application
+
+    app = Application([])
+    from qt.core import QMainWindow
+
+    w = LanguagesEdit()
+    w.setMaximumHeight(50)
+    d = QMainWindow()
+    d.setCentralWidget(w)
+    d.show()
+    app.exec()

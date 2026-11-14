@@ -43,7 +43,7 @@ calibre represents all content as XHTML. In XHTML tags have a *namespace*, and
 ``h:`` is the namespace prefix for HTML tags.
 
 Now suppose you want to select both ``<h1>`` and ``<h2>`` tags. To do that,
-we need a XPath construct called *predicate*. A :dfn:`predicate` is simply
+we need an XPath construct called *predicate*. A :dfn:`predicate` is simply
 a test that is used to select tags. Tests can be arbitrarily powerful and as
 this tutorial progresses, you will see more powerful examples. A predicate
 is created by enclosing the test expression in square brackets::
@@ -70,6 +70,16 @@ To select tags based on their attributes, the use of predicates is required::
 Here, the ``@`` operator refers to the attributes of the tag. You can use some
 of the `XPath built-in functions`_ to perform more sophisticated
 matching on attribute values.
+
+.. note::
+    When XPath expressions are used for conversion options such as chapter
+    detection or the start reading at position, they are evaluated against the
+    *input* document, before calibre flattens the CSS. CSS flattening rewrites
+    class names, so the class names you see in the converted output (things like
+    ``calibre1``) do not exist yet when your expression runs. Copy
+    class names from the input document, not from the converted book. If in
+    doubt, match on tag names and text content instead, as these are not changed
+    by the conversion.
 
 
 Selecting by tag content

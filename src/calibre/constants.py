@@ -1,31 +1,43 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
-from polyglot.builtins import map, unicode_type, environ_item, hasenv, getenv
-import sys, locale, codecs, os, collections
+import codecs
+import locale
+import os
+import sys
+from collections.abc import Generator, Iterator, Mapping, MutableMapping, Sequence
+from contextlib import contextmanager
+from functools import lru_cache
+from typing import TYPE_CHECKING, NamedTuple, Self
 
-__appname__   = 'calibre'
-numeric_version = (5, 9, 0)
-__version__   = '.'.join(map(unicode_type, numeric_version))
-git_version   = None
-__author__    = "Kovid Goyal <kovid@kovidgoyal.net>"
+from polyglot.builtins import environ_item, hasenv
+
+if TYPE_CHECKING:
+    import sqlite3
+    from types import ModuleType
+
+    import apsw
+
+__appname__ = 'calibre'
+numeric_version = (9, 18, 100)
+__version__ = '.'.join(map(str, numeric_version))
+git_version = None
+__author__ = 'Kovid Goyal <kovid@kovidgoyal.net>'
 
 '''
 Various run time constants.
 '''
 
-
 _plat = sys.platform.lower()
 iswindows = 'win32' in _plat or 'win64' in _plat
 ismacos = isosx = 'darwin' in _plat
-isnewosx  = ismacos and getattr(sys, 'new_app_bundle', False)
+isnewosx = ismacos and getattr(sys, 'new_app_bundle', False)
 isfreebsd = 'freebsd' in _plat
 isnetbsd = 'netbsd' in _plat
 isdragonflybsd = 'dragonfly' in _plat
 isbsd = isfreebsd or isnetbsd or isdragonflybsd
-ishaiku = 'haiku1' in _plat
-islinux   = not(iswindows or ismacos or isbsd or ishaiku)
-isfrozen  = hasattr(sys, 'frozen')
+ishaiku = 'haiku' in _plat
+islinux = not (iswindows or ismacos or isbsd or ishaiku)
+isfrozen = hasattr(sys, 'frozen')
 isunix = ismacos or islinux or ishaiku
 isportable = hasenv('CALIBRE_PORTABLE_BUILD')
 ispy3 = sys.version_info.major > 2
@@ -34,20 +46,22 @@ if iswindows:
     wver = sys.getwindowsversion()
     isxp = wver.major < 6
     isoldvista = wver.build < 6002
-is64bit = sys.maxsize > (1 << 32)
+is64bit = True
 isworker = hasenv('CALIBRE_WORKER') or hasenv('CALIBRE_SIMPLE_WORKER')
 if isworker:
     os.environ.pop(environ_item('CALIBRE_FORCE_ANSI'), None)
 FAKE_PROTOCOL, FAKE_HOST = 'clbr', 'internal.invalid'
+SPECIAL_TITLE_FOR_WEBENGINE_COMMS = '__webengine_messages_pending__'
 VIEWER_APP_UID = 'com.calibre-ebook.viewer'
 EDITOR_APP_UID = 'com.calibre-ebook.edit-book'
 MAIN_APP_UID = 'com.calibre-ebook.main-gui'
 STORE_DIALOG_APP_UID = 'com.calibre-ebook.store-dialog'
 TOC_DIALOG_APP_UID = 'com.calibre-ebook.toc-editor'
+CYOA_APP_UID = 'com.calibre-ebook.cyoa'
 try:
     preferred_encoding = locale.getpreferredencoding()
     codecs.lookup(preferred_encoding)
-except:
+except Exception:
     preferred_encoding = 'utf-8'
 
 dark_link_color = '#6cb4ee'
@@ -59,7 +73,7 @@ builtin_colors_light = {
     'purple': '#d9b2ff',
 }
 builtin_colors_dark = {
-    'yellow': '#c18d18',
+    'yellow': '#906e00',
     'green': '#306f50',
     'blue': '#265589',
     'red': '#a23e5a',
@@ -70,20 +84,23 @@ builtin_decorations = {
     'strikeout': {'text-decoration-line': 'line-through', 'text-decoration-color': 'red'},
 }
 
-
 _osx_ver = None
 
 
-def get_osx_version():
+def get_osx_version() -> tuple[int, int, int]:
     global _osx_ver
     if _osx_ver is None:
         import platform
-        from collections import namedtuple
-        OSX = namedtuple('OSX', 'major minor tertiary')
+
+        class OSX(NamedTuple):
+            major: int
+            minor: int
+            tertiary: int
+
         try:
             ver = platform.mac_ver()[0].split('.')
             if len(ver) == 2:
-                ver.append(0)
+                ver.append('0')
             _osx_ver = OSX(*map(int, ver))  # no2to3
         except Exception:
             _osx_ver = OSX(0, 0, 0)
@@ -104,128 +121,153 @@ else:
     except Exception:
         filesystem_encoding = 'utf-8'
 
-
 DEBUG = hasenv('CALIBRE_DEBUG')
 
 
-def debug():
+def debug(val: object = True) -> None:
     global DEBUG
-    DEBUG = True
+    DEBUG = bool(val)
 
 
-def _get_cache_dir():
+def is_debugging() -> bool:
+    return DEBUG
+
+
+def _get_cache_dir(create: bool = True) -> str:
     import errno
+
+    assert config_dir is not None
     confcache = os.path.join(config_dir, 'caches')
-    try:
-        os.makedirs(confcache)
-    except EnvironmentError as err:
-        if err.errno != errno.EEXIST:
-            raise
+    if create:
+        try:
+            os.makedirs(confcache)
+        except OSError as err:
+            if err.errno != errno.EEXIST:
+                raise
     if isportable:
         return confcache
-    ccd = getenv('CALIBRE_CACHE_DIRECTORY')
+    ccd = os.getenv('CALIBRE_CACHE_DIRECTORY')
     if ccd is not None:
         ans = os.path.abspath(ccd)
+        if not create:
+            return ans
         try:
             os.makedirs(ans)
             return ans
-        except EnvironmentError as err:
+        except OSError as err:
             if err.errno == errno.EEXIST:
                 return ans
 
     if iswindows:
         try:
-            candidate = os.path.join(winutil.special_folder_path(winutil.CSIDL_LOCAL_APPDATA), '%s-cache'%__appname__)
+            candidate = os.path.join(winutil.special_folder_path(winutil.CSIDL_LOCAL_APPDATA), f'{__appname__}-cache')
         except ValueError:
             return confcache
     elif ismacos:
         candidate = os.path.join(os.path.expanduser('~/Library/Caches'), __appname__)
     else:
-        candidate = getenv('XDG_CACHE_HOME', '~/.cache')
-        candidate = os.path.join(os.path.expanduser(candidate),
-                                    __appname__)
+        candidate = os.getenv('XDG_CACHE_HOME', '~/.cache')
+        candidate = os.path.join(os.path.expanduser(candidate), __appname__)
         if isinstance(candidate, bytes):
             try:
                 candidate = candidate.decode(filesystem_encoding)
             except ValueError:
                 candidate = confcache
-    try:
-        os.makedirs(candidate)
-    except EnvironmentError as err:
-        if err.errno != errno.EEXIST:
-            candidate = confcache
+    if create:
+        try:
+            os.makedirs(candidate)
+        except OSError as err:
+            if err.errno != errno.EEXIST:
+                candidate = confcache
     return candidate
 
 
-def cache_dir():
+def cache_dir() -> str:
     ans = getattr(cache_dir, 'ans', None)
     if ans is None:
-        ans = cache_dir.ans = os.path.realpath(_get_cache_dir())
+        ans = os.path.realpath(_get_cache_dir())
+        setattr(cache_dir, 'ans', ans)
     return ans
 
 
+def existing_cache_dir() -> str | None:
+    """Return the cache directory without creating it, or None if it does not exist."""
+    ans = getattr(cache_dir, 'ans', None)
+    if ans is None:
+        ans = os.path.realpath(_get_cache_dir(create=False))
+    return ans if os.path.isdir(ans) else None
+
+
 # plugins {{{
-plugins_loc = sys.extensions_location
-from importlib.machinery import ModuleSpec, EXTENSION_SUFFIXES, ExtensionFileLoader
-from importlib.util import find_spec
+plugins_loc = getattr(sys, 'extensions_location')
+system_plugins_loc = getattr(sys, 'system_plugins_location', None)
+
 from importlib import import_module
+from importlib.abc import Loader
+from importlib.machinery import EXTENSION_SUFFIXES, ExtensionFileLoader, ModuleSpec
+from importlib.util import find_spec
 
 
-class DeVendorLoader:
-
-    def __init__(self, aliased_name):
+class DeVendorLoader(Loader):
+    def __init__(self, aliased_name: str) -> None:
         self.aliased_module = import_module(aliased_name)
         try:
-            self.path = self.aliased_module.__loader__.path
+            self.path = self.aliased_module.__loader__.path  # type: ignore
         except Exception:
             self.path = aliased_name
 
-    def create_module(self, spec):
+    def create_module(self, spec: ModuleSpec) -> ModuleType:
         return self.aliased_module
 
-    def exec_module(self, module):
+    def exec_module(self, module: ModuleType) -> ModuleType:  # ty: ignore[incompatible-method-override]
         return module
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return repr(self.path)
 
 
 class DeVendor:
-
-    def find_spec(self, fullname, path=None, target=None):
+    def find_spec(self, fullname: str, path: Sequence[str] | None = None, target: ModuleType | None = None) -> ModuleSpec | None:
         if fullname == 'calibre.web.feeds.feedparser':
             return find_spec('feedparser')
         if fullname.startswith('calibre.ebooks.markdown'):
-            return ModuleSpec(fullname, DeVendorLoader(fullname[len('calibre.ebooks.'):]))
+            return ModuleSpec(fullname, DeVendorLoader(fullname[len('calibre.ebooks.') :]))
+        if fullname.startswith('PyQt5'):
+            # this is present for third party plugin compat
+            if fullname == 'PyQt5':
+                return ModuleSpec(fullname, DeVendorLoader('qt'))
+            return ModuleSpec(fullname, DeVendorLoader('qt.webengine' if 'QWebEngine' in fullname else 'qt.core'))
+        if fullname.startswith('Cryptodome'):
+            # this is needed for py7zr which uses pycryptodomex instead of
+            # pycryptodome for some reason
+            return ModuleSpec(fullname, DeVendorLoader(fullname.replace('dome', '', 1)))
 
 
-class ExtensionsPackageLoader:
-
-    def __init__(self, calibre_extensions):
+class ExtensionsPackageLoader(Loader):
+    def __init__(self, calibre_extensions: frozenset[str]) -> None:
         self.calibre_extensions = calibre_extensions
 
-    def is_package(self, fullname=None):
+    def is_package(self, fullname: str | None = None) -> bool:
         return True
 
-    def get_resource_reader(self, fullname=None):
+    def get_resource_reader(self, fullname: str | None = None) -> Self:
         return self
 
-    def get_source(self, fullname=None):
+    def get_source(self, fullname: str | None = None) -> str:
         return ''
 
-    def contents(self):
+    def contents(self) -> Iterator[str]:
         return iter(self.calibre_extensions)
 
-    def create_module(self, spec):
+    def create_module(self, spec: ModuleSpec) -> None:
         pass
 
-    def exec_module(self, spec):
+    def exec_module(self, module: ModuleType) -> None:
         pass
 
 
 class ExtensionsImporter:
-
-    def __init__(self):
+    def __init__(self) -> None:
         extensions = (
             'pictureflow',
             'lzx',
@@ -233,23 +275,34 @@ class ExtensionsImporter:
             'podofo',
             'cPalmdoc',
             'progress_indicator',
+            'rcc_backend',
             'icu',
             'speedup',
+            'piper',
+            'seq2seq',
             'html_as_json',
+            'fast_css_transform',
+            'translator',
+            'fast_html_entities',
             'unicode_names',
             'html_syntax_highlighter',
             'hyphen',
+            'ffmpeg',
             'freetype',
             'imageops',
+            'avif',
+            'jxl',
             'hunspell',
             '_patiencediff_c',
             'bzzdec',
             'matcher',
             'tokenizer',
             'certgen',
+            'sqlite_extension',
+            'uchardet',
         )
         if iswindows:
-            extra = ('winutil', 'wpd', 'winfonts', 'winsapi')
+            extra = ('winutil', 'wpd', 'winfonts', 'wintoast')
         elif ismacos:
             extra = ('usbobserver', 'cocoa', 'libusb', 'libmtp')
         elif isfreebsd or ishaiku or islinux:
@@ -258,7 +311,7 @@ class ExtensionsImporter:
             extra = ()
         self.calibre_extensions = frozenset(extensions + extra)
 
-    def find_spec(self, fullname, path=None, target=None):
+    def find_spec(self, fullname: str, path: Sequence[str] | None = None, target: ModuleType | None = None) -> ModuleSpec | None:
         if not fullname.startswith('calibre_extensions'):
             return
         parts = fullname.split('.')
@@ -288,34 +341,52 @@ if iswindows:
     from calibre_extensions import winutil
 
 
-class Plugins(collections.Mapping):
+class Plugins(Mapping):
+    def __iter__(self) -> Iterator[str]:
+        from importlib.resources import files
 
-    def __iter__(self):
-        from importlib.resources import contents
-        return contents('calibre_extensions')
+        return (x.name for x in files('calibre_extensions').iterdir())
 
-    def __len__(self):
-        from importlib.resources import contents
+    def __len__(self) -> int:
+        from importlib.resources import files
+
         ans = 0
-        for x in contents('calibre_extensions'):
+        for _ in files('calibre_extensions').iterdir():
             ans += 1
         return ans
 
-    def __contains__(self, name):
-        from importlib.resources import contents
-        for x in contents('calibre_extensions'):
-            if x == name:
-                return True
-        return False
+    def __contains__(self, name: object) -> bool:
+        from importlib.resources import files
 
-    def __getitem__(self, name):
+        return any(x.name == name for x in files('calibre_extensions').iterdir())
+
+    def __getitem__(self, name: str) -> tuple[ModuleType | None, str]:
         from importlib import import_module
+
         try:
             return import_module('calibre_extensions.' + name), ''
         except ModuleNotFoundError:
-            raise KeyError('No plugin named %r'%name)
+            raise KeyError(f'No plugin named {name!r}')
         except Exception as err:
             return None, str(err)
+
+    def load_apsw_extension(self, conn: apsw.Connection, name: str) -> None:
+        conn.enableloadextension(True)
+        try:
+            ext = 'pyd' if iswindows else 'so'
+            path = os.path.join(plugins_loc, f'{name}.{ext}')
+            conn.loadextension(path, f'calibre_{name}_init')
+        finally:
+            conn.enableloadextension(False)
+
+    def load_sqlite3_extension(self, conn: sqlite3.Connection, name: str) -> None:
+        conn.enable_load_extension(True)
+        try:
+            ext = 'pyd' if iswindows else 'so'
+            path = os.path.join(plugins_loc, f'{name}.{ext}')
+            conn.load_extension(path)
+        finally:
+            conn.enable_load_extension(False)
 
 
 plugins = None
@@ -327,7 +398,7 @@ if plugins is None:
 
 CONFIG_DIR_MODE = 0o700
 
-cconfd = getenv('CALIBRE_CONFIG_DIRECTORY')
+cconfd = os.getenv('CALIBRE_CONFIG_DIRECTORY')
 if cconfd is not None:
     config_dir = os.path.abspath(cconfd)
 elif iswindows:
@@ -335,49 +406,54 @@ elif iswindows:
         config_dir = winutil.special_folder_path(winutil.CSIDL_APPDATA)
     except ValueError:
         config_dir = None
-    if not config_dir or not os.access(config_dir, os.W_OK|os.X_OK):
+    if not config_dir or not os.access(config_dir, os.W_OK | os.X_OK):
         config_dir = os.path.expanduser('~')
     config_dir = os.path.join(config_dir, 'calibre')
 elif ismacos:
     config_dir = os.path.expanduser('~/Library/Preferences/calibre')
 else:
-    bdir = os.path.abspath(os.path.expanduser(getenv('XDG_CONFIG_HOME', '~/.config')))
+    bdir = os.path.abspath(os.path.expanduser(os.getenv('XDG_CONFIG_HOME', '~/.config')))
     config_dir = os.path.join(bdir, 'calibre')
     try:
         os.makedirs(config_dir, mode=CONFIG_DIR_MODE)
-    except:
+    except Exception:
         pass
-    if not os.path.exists(config_dir) or \
-            not os.access(config_dir, os.W_OK) or not \
-            os.access(config_dir, os.X_OK):
-        print('No write acces to', config_dir, 'using a temporary dir instead')
-        import tempfile, atexit
+    if not os.path.exists(config_dir) or not os.access(config_dir, os.W_OK) or not os.access(config_dir, os.X_OK):
+        print('No write access to', config_dir, 'using a temporary dir instead')
+        import atexit
+        import tempfile
+
         config_dir = tempfile.mkdtemp(prefix='calibre-config-')
 
-        def cleanup_cdir():
+        def cleanup_cdir() -> None:
             try:
                 import shutil
+
+                assert config_dir
                 shutil.rmtree(config_dir)
-            except:
+            except Exception:
                 pass
+
         atexit.register(cleanup_cdir)
 # }}}
-
 
 is_running_from_develop = False
 if getattr(sys, 'frozen', False):
     try:
-        from bypy_importer import running_in_develop_mode
+        from bypy_importer import running_in_develop_mode  # type: ignore
     except ImportError:
         pass
     else:
         is_running_from_develop = running_in_develop_mode()
 
-in_develop_mode = getenv('CALIBRE_ENABLE_DEVELOP_MODE') == '1'
+in_develop_mode = os.getenv('CALIBRE_ENABLE_DEVELOP_MODE') == '1'
+if iswindows:
+    # Needed to get Qt to use the correct cache dir, relies on a patched Qt
+    os.environ['CALIBRE_QT_CACHE_LOCATION'] = cache_dir()
 
 
-def get_version():
-    '''Return version string for display to user '''
+def get_version() -> str:
+    """Return version string for display to user"""
     if git_version is not None:
         v = git_version
     else:
@@ -386,39 +462,148 @@ def get_version():
             v = v[:-2]
     if is_running_from_develop:
         v += '*'
-    if iswindows and is64bit:
-        v += ' [64bit]'
 
     return v
 
 
-def get_portable_base():
-    'Return path to the directory that contains calibre-portable.exe or None'
+def get_appname_for_display() -> str:
+    from calibre.utils.localization import _
+
+    ans = __appname__
     if isportable:
-        return os.path.dirname(os.path.dirname(getenv('CALIBRE_PORTABLE_BUILD')))
+        ans = _('{} Portable').format(ans)
+    return ans
 
 
-def get_windows_username():
-    '''
+def get_portable_base() -> str | None:
+    "Return path to the directory that contains calibre-portable.exe or None"
+    if isportable and (cpb := os.getenv('CALIBRE_PORTABLE_BUILD')):
+        return os.path.dirname(os.path.dirname(cpb))
+
+
+def get_windows_username() -> str:
+    """
     Return the user name of the currently logged in user as a unicode string.
     Note that usernames on windows are case insensitive, the case of the value
     returned depends on what the user typed into the login box at login time.
-    '''
+    """
     return winutil.username()
 
 
-def get_windows_temp_path():
+def get_windows_temp_path() -> str:
     return winutil.temp_path()
 
 
-def get_windows_user_locale_name():
+def get_windows_user_locale_name() -> str:
     return winutil.locale_name()
 
 
-def get_windows_number_formats():
+def get_windows_number_formats() -> tuple[str, str]:
     ans = getattr(get_windows_number_formats, 'ans', None)
     if ans is None:
         d = winutil.localeconv()
         thousands_sep, decimal_point = d['thousands_sep'], d['decimal_point']
-        ans = get_windows_number_formats.ans = thousands_sep, decimal_point
+        ans = thousands_sep, decimal_point
+        setattr(get_windows_number_formats, 'ans', ans)
     return ans
+
+
+def trash_name() -> str:
+    from calibre.utils.localization import _
+
+    return _('Trash') if ismacos else _('Recycle Bin')
+
+
+@lru_cache(maxsize=2)
+def get_umask() -> int:
+    mask = os.umask(0o22)
+    os.umask(mask)
+    return mask
+
+
+# call this at startup as it changes process global state, which doesn't work
+# with multi-threading. It's absurd there is no way to safely read the current
+# umask of a process.
+get_umask()
+
+
+@lru_cache(maxsize=2)
+def bundled_binaries_dir() -> str:
+    if ismacos and hasattr(sys, 'frameworks_dir'):
+        base = os.path.join(os.path.dirname(sys.frameworks_dir), 'utils.app', 'Contents', 'MacOS')
+        return base
+    if iswindows and hasattr(sys, 'frozen'):
+        base = sys.extensions_location if hasattr(sys, 'new_app_layout') else os.path.dirname(sys.executable)
+        return base
+    if (islinux or isbsd) and getattr(sys, 'frozen', False):
+        return os.path.join(getattr(sys, 'executables_location'), 'bin')
+    return ''
+
+
+@lru_cache(maxsize=2)
+def bin_install_dir() -> str:
+    """Return a platform-specific directory suitable for installing binaries for use by calibre."""
+    if portable := get_portable_base():
+        return os.path.join(portable, 'Calibre', 'dbin')
+    dname = f'{__appname__}-dbin'
+    if iswindows:
+        try:
+            return os.path.join(winutil.special_folder_path(winutil.CSIDL_LOCAL_APPDATA), dname)
+        except ValueError:
+            return cache_dir()
+    if ismacos:
+        return os.path.join(os.path.expanduser('~/Library/Application Support'), dname)
+    base = os.path.expanduser(os.getenv('XDG_DATA_HOME', '~/.local/share'))
+    return os.path.join(base, dname)
+
+
+def sanitize_env_vars_in(env: MutableMapping[str, str]) -> dict[str, str]:
+    """Remove the paths into the calibre bundle from various environment
+    variables in env, modifying it in place. This is needed to prevent library
+    conflicts when launching external utilities. Returns the original values
+    of the variables that were changed."""
+
+    if islinux and isfrozen:
+        env_vars = {
+            'LD_LIBRARY_PATH': '/lib',
+            'OPENSSL_MODULES': '/lib/ossl-modules',
+        }
+    elif iswindows:
+        env_vars = {'OPENSSL_MODULES': None, 'QTWEBENGINE_DISABLE_SANDBOX': None}
+        if env.get('CALIBRE_USE_SYSTEM_CERTIFICATES', '') != '1':
+            env_vars['SSL_CERT_DIR'] = None
+    elif ismacos:
+        env_vars = {k: None for k in ('FONTCONFIG_FILE FONTCONFIG_PATH OPENSSL_ENGINES OPENSSL_MODULES').split()}
+        if env.get('CALIBRE_USE_SYSTEM_CERTIFICATES', '') != '1':
+            env_vars['SSL_CERT_DIR'] = None
+    else:
+        env_vars = {}
+
+    changed = {}
+    for var, suffix in env_vars.items():
+        orig = env.get(var, '')
+        paths = [x for x in orig.split(os.pathsep) if x]
+        npaths = [] if suffix is None else [x for x in paths if x != (getattr(sys, 'frozen_path') + suffix)]
+        if len(npaths) < len(paths):
+            if npaths:
+                env[var] = os.pathsep.join(npaths)
+            else:
+                del env[var]
+            changed[var] = orig
+    return changed
+
+
+@contextmanager
+def sanitize_env_vars() -> Generator[None]:
+    """Unset various environment variables that calibre uses. This
+    is needed to prevent library conflicts when launching external utilities."""
+
+    changed = sanitize_env_vars_in(os.environ)
+    try:
+        yield
+    finally:
+        for var, orig in changed.items():
+            if orig:
+                os.environ[var] = orig
+            elif var in os.environ:
+                del os.environ[var]

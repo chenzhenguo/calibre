@@ -1,18 +1,18 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-from uuid import uuid4
 import time
+from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 
+from calibre import prepare_string_for_xml as xml
+from calibre import strftime
 from calibre.constants import __appname__, __version__
-from calibre import strftime, prepare_string_for_xml as xml
 from calibre.utils.date import parse_date
-from polyglot.builtins import unicode_type, filter
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from calibre.ebooks.oeb.base import Metadata, OEBBook
 
 SONY_METADATA = '''\
 <?xml version="1.0" encoding="utf-8"?>
@@ -81,56 +81,57 @@ SONY_ATOM_ENTRY = '''\
 '''
 
 
-def sony_metadata(oeb):
+def sony_metadata(oeb: OEBBook) -> tuple[str, bytes]:
     m = oeb.metadata
-    title = short_title = unicode_type(m.title[0])
+    title = short_title = str(m.title[0])
     publisher = __appname__ + ' ' + __version__
     try:
-        pt = unicode_type(oeb.metadata.publication_type[0])
+        pt = str(oeb.metadata.publication_type[0])
         short_title = ':'.join(pt.split(':')[2:])
-    except:
+    except Exception:
         pass
 
     try:
-        date = parse_date(unicode_type(m.date[0]),
-                as_utc=False).strftime('%Y-%m-%d')
-    except:
+        date = parse_date(str(m.date[0]), as_utc=False).strftime('%Y-%m-%d')
+    except Exception:
         date = strftime('%Y-%m-%d')
     try:
-        language = unicode_type(m.language[0]).replace('_', '-')
-    except:
+        language = str(m.language[0]).replace('_', '-')
+    except Exception:
         language = 'en'
     short_title = xml(short_title, True)
 
-    metadata = SONY_METADATA.format(title=xml(title),
-            short_title=short_title,
-            publisher=xml(publisher), issue_date=xml(date),
-            language=xml(language))
+    metadata = SONY_METADATA.format(
+        title=xml(title),
+        short_title=short_title,
+        publisher=xml(publisher),
+        issue_date=xml(date),
+        language=xml(language),
+    )
 
     updated = strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
-    def cal_id(x):
+    def cal_id(x: Metadata.Item) -> bool | None:
         for k, v in x.attrib.items():
             if k.endswith('scheme') and v == 'uuid':
                 return True
 
     try:
-        base_id = unicode_type(list(filter(cal_id, m.identifier))[0])
-    except:
-        base_id = unicode_type(uuid4())
+        base_id = str(list(filter(cal_id, m.identifier))[0])
+    except Exception:
+        base_id = str(uuid4())
 
     toc = oeb.toc
 
-    if False and toc.depth() < 3:
+    if False and toc.depth() < 3:  # ruff: ignore[expr-and-false]
         # Single section periodical
         # Disabled since I prefer the current behavior
         from calibre.ebooks.oeb.base import TOC
-        section = TOC(klass='section', title=_('All articles'),
-                    href=oeb.spine[2].href)
+
+        section = TOC(klass='section', title=_('All articles'), href=oeb.spine[2].href)
         for x in toc:
             section.nodes.append(x)
-        toc = TOC(klass='periodical', href=oeb.spine[2].href,
-                    title=unicode_type(oeb.metadata.title[0]))
+        toc = TOC(klass='periodical', href=oeb.spine[2].href, title=str(oeb.metadata.title[0]))
         toc.nodes.append(section)
 
     entries = []
@@ -138,14 +139,14 @@ def sony_metadata(oeb):
     for i, section in enumerate(toc):
         if not section.href:
             continue
-        secid = 'section%d'%i
+        secid = f'section{i}'
         sectitle = section.title
         if not sectitle:
             sectitle = _('Unknown')
         d = 1
         bsectitle = sectitle
         while sectitle in seen_titles:
-            sectitle = bsectitle + ' ' + unicode_type(d)
+            sectitle = bsectitle + ' ' + str(d)
             d += 1
         seen_titles.add(sectitle)
         sectitle = xml(sectitle, True)
@@ -153,9 +154,16 @@ def sony_metadata(oeb):
         if not secdesc:
             secdesc = ''
         secdesc = xml(secdesc)
-        entries.append(SONY_ATOM_SECTION.format(title=sectitle,
-            href=section.href, id=xml(base_id)+'/'+secid,
-            short_title=short_title, desc=secdesc, updated=updated))
+        entries.append(
+            SONY_ATOM_SECTION.format(
+                title=sectitle,
+                href=section.href,
+                id=xml(base_id) + '/' + secid,
+                short_title=short_title,
+                desc=secdesc,
+                updated=updated,
+            )
+        )
 
         for j, article in enumerate(section):
             if not article.href:
@@ -164,29 +172,29 @@ def sony_metadata(oeb):
             btitle = atitle
             d = 1
             while atitle in seen_titles:
-                atitle = btitle + ' ' + unicode_type(d)
+                atitle = btitle + ' ' + str(d)  # ty: ignore[unsupported-operator] seen_titles only contains str so atitle is not None here
                 d += 1
 
-            auth = article.author if article.author else ''
+            auth = article.author or ''
             desc = section.description
             if not desc:
                 desc = ''
-            aid = 'article%d'%j
+            aid = f'article{j}'
 
-            entries.append(SONY_ATOM_ENTRY.format(
-                title=xml(atitle),
-                author=xml(auth),
-                updated=updated,
-                desc=desc,
-                short_title=short_title,
-                section_title=sectitle,
-                href=article.href,
-                word_count=unicode_type(1),
-                id=xml(base_id)+'/'+secid+'/'+aid
-            ))
+            entries.append(
+                SONY_ATOM_ENTRY.format(
+                    title=xml(cast('str', atitle)),
+                    author=xml(auth),
+                    updated=updated,
+                    desc=desc,
+                    short_title=short_title,
+                    section_title=sectitle,
+                    href=article.href,
+                    word_count=str(1),
+                    id=xml(base_id) + '/' + secid + '/' + aid,
+                )
+            )
 
-    atom = SONY_ATOM.format(short_title=short_title,
-            entries='\n\n'.join(entries), updated=updated,
-            id=xml(base_id)).encode('utf-8')
+    atom = SONY_ATOM.format(short_title=short_title, entries='\n\n'.join(entries), updated=updated, id=xml(base_id)).encode('utf-8')
 
     return metadata, atom

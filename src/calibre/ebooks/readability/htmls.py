@@ -1,50 +1,51 @@
-
-
 import re
+from typing import TYPE_CHECKING, cast
 
 from lxml.html import tostring
-import lxml.html
 
-from calibre.ebooks.readability.cleaners import normalize_spaces, clean_attributes
 from calibre.ebooks.chardet import xml_to_unicode
-from polyglot.builtins import iteritems, unicode_type
+from calibre.ebooks.readability.cleaners import clean_attributes, normalize_spaces
+from calibre.utils.xml_parse import document_fromstring
+
+if TYPE_CHECKING:
+    from lxml.html import HtmlElement
 
 
-def build_doc(page):
+def build_doc(page: str | bytes) -> HtmlElement:
     page_unicode = xml_to_unicode(page, strip_encoding_pats=True)[0]
-    doc = lxml.html.document_fromstring(page_unicode)
+    doc = cast('HtmlElement', document_fromstring(page_unicode))  # parsed with the lxml.html parser
     return doc
 
 
-def js_re(src, pattern, flags, repl):
+def js_re(src: str, pattern: str, flags: int, repl: str) -> str:
     return re.compile(pattern, flags).sub(src, repl.replace('$', '\\'))
 
 
-def normalize_entities(cur_title):
+def normalize_entities(cur_title: str) -> str:
     entities = {
-        '\u2014':'-',
-        '\u2013':'-',
+        '\u2014': '-',
+        '\u2013': '-',
         '&mdash;': '-',
         '&ndash;': '-',
-        '\u00A0': ' ',
-        '\u00AB': '"',
-        '\u00BB': '"',
+        '\u00a0': ' ',
+        '\u00ab': '"',
+        '\u00bb': '"',
         '&quot;': '"',
     }
-    for c, r in iteritems(entities):
+    for c, r in entities.items():
         if c in cur_title:
             cur_title = cur_title.replace(c, r)
 
     return cur_title
 
 
-def norm_title(title):
+def norm_title(title: str) -> str:
     return normalize_entities(normalize_spaces(title))
 
 
-def get_title(doc):
+def get_title(doc: HtmlElement) -> str:
     try:
-        title = doc.find('.//title').text
+        title = doc.find('.//title').text  # ty: ignore[missing-union-attribute] a missing title is handled by the except clause
     except AttributeError:
         title = None
     if not title:
@@ -53,15 +54,15 @@ def get_title(doc):
     return norm_title(title)
 
 
-def add_match(collection, text, orig):
+def add_match(collection: set[str], text: str, orig: str) -> None:
     text = norm_title(text)
     if len(text.split()) >= 2 and len(text) >= 15:
         if text.replace('"', '') in orig.replace('"', ''):
             collection.add(text)
 
 
-def shorten_title(doc):
-    title = doc.find('.//title').text
+def shorten_title(doc: HtmlElement) -> str:
+    title = doc.find('.//title').text  # ty: ignore[missing-union-attribute] raises AttributeError if there is no <title>
     if not title:
         return ''
 
@@ -77,16 +78,16 @@ def shorten_title(doc):
                 add_match(candidates, e.text_content(), orig)
 
     for item in [
-            "descendant-or-self::*[@id = 'title']",
-            "descendant-or-self::*[@id = 'head']",
-            "descendant-or-self::*[@id = 'heading']",
-            "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' pageTitle ')]",
-            "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' news_title ')]",
-            "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' title ')]",
-            "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' head ')]",
-            "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' heading ')]",
-            "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' contentheading ')]",
-            "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' small_header_red ')]"
+        "descendant-or-self::*[@id = 'title']",
+        "descendant-or-self::*[@id = 'head']",
+        "descendant-or-self::*[@id = 'heading']",
+        "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' pageTitle ')]",
+        "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' news_title ')]",
+        "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' title ')]",
+        "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' head ')]",
+        "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' heading ')]",
+        "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' contentheading ')]",
+        "descendant-or-self::*[@class and contains(concat(' ', normalize-space(@class), ' '), ' small_header_red ')]",
     ]:
         for e in doc.xpath(item):
             if e.text:
@@ -95,7 +96,7 @@ def shorten_title(doc):
                 add_match(candidates, e.text_content(), orig)
 
     if candidates:
-        title = sorted(candidates, key=len)[-1]
+        title = max(candidates, key=len)
     else:
         for delimiter in [' | ', ' - ', ' :: ', ' / ']:
             if delimiter in title:
@@ -120,7 +121,7 @@ def shorten_title(doc):
     return title
 
 
-def get_body(doc):
+def get_body(doc: HtmlElement) -> str:
     [elem.drop_tree() for elem in doc.xpath('.//script | .//link | .//style')]
-    raw_html = unicode_type(tostring(doc.body or doc))
+    raw_html = str(tostring(doc.body or doc))
     return clean_attributes(raw_html)

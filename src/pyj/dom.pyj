@@ -3,29 +3,30 @@
 from __python__ import hash_literals
 
 simple_vendor_prefixes = {
-    'animation': v"['webkit', 'moz', 'o']",
-    'animation-name': v"['webkit', 'moz', 'o']",
-    'animation-duration': v"['webkit', 'moz', 'o']",
-    'animation-timing-function': v"['webkit', 'moz', 'o']",
-    'animation-delay': v"['webkit', 'moz', 'o']",
-    'animation-iteration-count': v"['webkit', 'moz', 'o']",
-    'animation-direction': v"['webkit', 'moz', 'o']",
-    'animation-fill-mode': v"['webkit', 'moz', 'o']",
-    'animation-play-state': v"['webkit', 'moz', 'o']",
-    'hyphens': v"['webkit', 'moz', 'ms']",
-    'transform': v"['webkit', 'ms', 'moz', 'o']",
-    'transform-origin': v"['webkit', 'ms', 'moz', 'o']",
-    'transition': v"['webkit', 'moz', 'o']",
-    'filter': v"['webkit']",
-    'user-select': v"['webkit', 'moz', 'ms']",
-    'break-before': v"['webkit-column']",
-    'break-after': v"['webkit-column']",
-    'break-inside': v"['webkit-column']",
-    'column-gap': v"['webkit', 'moz']",
-    'column-width': v"['webkit', 'moz']",
-    'column-rule': v"['webkit', 'moz']",
-    'column-fill': v"['moz']",
+    'animation': ['webkit', 'moz', 'o'],
+    'animation-name': ['webkit', 'moz', 'o'],
+    'animation-duration': ['webkit', 'moz', 'o'],
+    'animation-timing-function': ['webkit', 'moz', 'o'],
+    'animation-delay': ['webkit', 'moz', 'o'],
+    'animation-iteration-count': ['webkit', 'moz', 'o'],
+    'animation-direction': ['webkit', 'moz', 'o'],
+    'animation-fill-mode': ['webkit', 'moz', 'o'],
+    'animation-play-state': ['webkit', 'moz', 'o'],
+    'hyphens': ['webkit', 'moz', 'ms'],
+    'transform': ['webkit', 'ms', 'moz', 'o'],
+    'transform-origin': ['webkit', 'ms', 'moz', 'o'],
+    'transition': ['webkit', 'moz', 'o'],
+    'filter': ['webkit'],
+    'user-select': ['webkit', 'moz', 'ms'],
+    'break-before': ['webkit-column'],
+    'break-after': ['webkit-column'],
+    'break-inside': ['webkit-column'],
+    'column-gap': ['webkit', 'moz'],
+    'column-width': ['webkit', 'moz'],
+    'column-rule': ['webkit', 'moz'],
+    'column-fill': ['moz'],
 }
+
 
 def set_css(elem, **kw):
     if jstype(elem) is 'string':
@@ -47,8 +48,30 @@ def set_css(elem, **kw):
                         s.setProperty('-' + prefix + '-' + name, val)
     return elem
 
+
+def set_important_css(elem, **kw):
+    if jstype(elem) is 'string':
+        elem = document.querySelector(elem)
+    s = elem.style
+    if s:
+        for prop in kw:
+            name, val = str.replace(str.rstrip(prop, '_'), '_', '-'), kw[prop]
+            if val is None or val is undefined:
+                s.removeProperty(name)
+            else:
+                s.setProperty(name, val, 'important')
+            prefixes = simple_vendor_prefixes[name]
+            if prefixes:
+                for prefix in prefixes:
+                    if val is None or val is undefined:
+                        s.removeProperty('-' + prefix + '-' + name)
+                    else:
+                        s.setProperty('-' + prefix + '-' + name, val, 'important')
+    return elem
+
+
 def build_rule(selector, **kw):
-    ans = v'[selector + " { "]'
+    ans = [selector + ' { ']
     for prop in kw:
         name, val = str.replace(str.rstrip(prop, '_'), '_', '-'), kw[prop]
         ans.push(name + ':' + val + ';')
@@ -75,7 +98,7 @@ def remove_all_attributes():
 
 
 def create_keyframes(animation_name, *frames):
-    ans = v'[]'
+    ans = []
     for prefix in '-webkit-', '-moz-', '-o-', '':
         ans.push('@' + prefix + 'keyframes ' + animation_name + ' {')
         for frame in frames:
@@ -83,11 +106,20 @@ def create_keyframes(animation_name, *frames):
         ans.push('}')
     return ans.join('\n') + '\n'
 
-def change_icon_image(icon_element, new_name):
+
+def change_icon_image(icon_element, new_name, tooltip):
     if new_name:
         icon_element.firstChild.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', '#icon-' + new_name)
     else:
         icon_element.firstChild.removeAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href')
+    if tooltip?:
+        x = icon_element.getElementsByTagNameNS('http://www.w3.org/2000/svg', 'title')
+        if not x.length:
+            tt = document.createElementNS('http://www.w3.org/2000/svg', 'title')
+            icon_element.appendChild(tt)
+            x = [tt]
+        x[0].textContent = tooltip
+
 
 def svgicon(name, height, width, tooltip):
     ans = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
@@ -102,11 +134,13 @@ def svgicon(name, height, width, tooltip):
         ans.appendChild(tt)
     return ans
 
+
 def element(elem_id, child_selector):
     ans = document.getElementById(elem_id) if elem_id else document.body
     if child_selector:
         ans = ans.querySelector(child_selector)
     return ans
+
 
 def selector(id_selector, *args):
     ans = '#' + id_selector
@@ -114,14 +148,17 @@ def selector(id_selector, *args):
         ans += ' ' + x
     return ans
 
+
 def rule(id_selector, *args, **kw):
     return build_rule(selector(id_selector, *args), **kw)
+
 
 def unique_id(prefix):
     prefix = prefix or 'auto-id'
     unique_id.counts[prefix] = num = (unique_id.counts[prefix] or 0) + 1
     return prefix + '-' + num
 unique_id.counts = {}
+
 
 def ensure_id(w, prefix):
     ans = w.getAttribute('id')
@@ -130,13 +167,106 @@ def ensure_id(w, prefix):
         w.setAttribute('id', ans)
     return ans
 
-extra_css = v'[]'
+extra_css = []
+add_extra_css = extra_css.push.bind(extra_css)
+add_extra_css(def ():
+    # Hidden visually but still read by screen readers
+    return build_rule('.calibre-visually-hidden',
+        position='absolute', width='1px', height='1px', overflow='hidden', clip_path='inset(50%)', white_space='nowrap')
+)
 
-def add_extra_css(func):
-    extra_css.push(func())
+
+def create_live_region():
+    # A polite, visually hidden region whose text changes are read out by
+    # screen readers. It must persist, so keep it outside containers that are
+    # cleared, and change its text with set_live_region_text().
+    ans = document.createElement('div')
+    ans.setAttribute('role', 'status')
+    ans.setAttribute('aria-atomic', 'true')
+    ans.className = 'calibre-visually-hidden'
+    return ans
+
+
+def set_live_region_text(region, msg, delayed, still_wanted):
+    # Clearing is immediate. Screen readers ignore changes made to a live
+    # region in the same task that inserted or revealed it, so with delayed
+    # the text is set shortly afterwards. The delay also means a burst of
+    # updates announces only the last one: any later call cancels a pending
+    # update, as does still_wanted() returning False when it fires. Setting
+    # the text it already has is a no-op, so nothing is announced twice.
+    region.calibre_live_region_updates = count = (region.calibre_live_region_updates or 0) + 1
+
+    def apply():
+        if region.textContent is not msg:
+            region.textContent = msg
+
+    if not msg or not delayed:
+        apply()
+        return
+    window.setTimeout(def ():
+        if count is region.calibre_live_region_updates and region.isConnected and (not still_wanted or still_wanted()):
+            apply()
+    , 100)
+
+
+def index_of_focused(elements):
+    # The index of the element that has focus among elements, or None
+    ans = Array.prototype.indexOf.call(elements, document.activeElement)
+    return None if ans < 0 else ans
+
+
+def cycle_focus(elements, backwards):
+    # Move focus to the next, or previous, of elements, wrapping around. When
+    # none of them has focus, focus the first, or the last when going backwards.
+    if not elements.length:
+        return
+    idx = index_of_focused(elements)
+    if idx is None:
+        idx = elements.length - 1 if backwards else 0
+    else:
+        idx = (idx + (-1 if backwards else 1) + elements.length) % elements.length
+    elements[idx].focus()
+
+
+def button_space_key_event(ev):
+    # Listen to keydown, keyup and blur with this, so that Space activates
+    # an element that acts as a button the way it does a native button: on
+    # release, without scrolling the page. Returns True for Space key events and
+    # blur.
+    target = ev.currentTarget
+    if ev.type is 'blur':
+        target.button_space_pressed = False
+        return True
+    if ev.key is not ' ':
+        return False
+    modified = ev.ctrlKey or ev.altKey or ev.metaKey
+    if ev.type is 'keydown':
+        if not modified:
+            ev.preventDefault(), ev.stopPropagation()
+            target.button_space_pressed = True
+    elif ev.type is 'keyup':
+        pressed, target.button_space_pressed = target.button_space_pressed, False
+        if pressed and not modified:
+            ev.preventDefault(), ev.stopPropagation()
+            target.click()
+    return True
+
+
+def make_link_a_button(a):
+    # Make a, an <a>, reachable with Tab and usable like a push button. A link
+    # is activated by Enter but not by Space, unlike the button it says it is.
+    a.setAttribute('href', 'javascript: void(0)')
+    a.setAttribute('role', 'button')
+    for name in ('keydown', 'keyup', 'blur'):
+        a.addEventListener(name, button_space_key_event)
+    return a
+
 
 def get_widget_css():
-    return extra_css.join('\n')
+    ans = []
+    for func in extra_css:
+        ans.push(func())
+    return ans.join('\n')
 
 
 def set_radio_group_value(parent, name, val):

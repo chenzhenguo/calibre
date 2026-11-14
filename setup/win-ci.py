@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2016, Kovid Goyal <kovid at kovidgoyal.net>
 
 
@@ -9,6 +8,7 @@ import subprocess
 import sys
 import tarfile
 import time
+from urllib.request import Request, urlopen
 
 
 def printf(*args, **kw):
@@ -16,26 +16,28 @@ def printf(*args, **kw):
     sys.stdout.flush()
 
 
-def download_file(url):
-    from urllib.request import urlopen
-    count = 5
-    while count > 0:
-        count -= 1
+def download_with_retry(url: str | Request, count: int = 5) -> bytes:
+    for i in range(count):
         try:
-            printf('Downloading', url)
-            return urlopen(url).read()
-        except Exception:
-            if count <= 0:
+            print('Downloading', getattr(url, 'full_url', url), flush=True)
+            with urlopen(url) as f:
+                ans: bytes = f.read()
+            return ans
+        except Exception as err:
+            if getattr(err, 'code', -1) == 403:
                 raise
-            print('Download failed retrying...')
+            if i >= count - 1:
+                raise
+            print(f'Download failed with error {err} retrying...', file=sys.stderr)
             time.sleep(1)
+    return b''
 
 
 def sw():
     sw = os.environ['SW']
     os.chdir(sw)
-    url = 'https://download.calibre-ebook.com/ci/calibre3/windows-64.tar.xz'
-    tarball = download_file(url)
+    url = 'https://download.calibre-ebook.com/ci/calibre7/windows-64.tar.xz'
+    tarball = download_with_retry(url)
     with tarfile.open(fileobj=io.BytesIO(tarball)) as tf:
         tf.extractall()
     printf('Download complete')
@@ -43,16 +45,14 @@ def sw():
 
 def sanitize_path():
     needed_paths = []
-    executables = 'git.exe curl.exe rapydscript.cmd node.exe'.split()
+    executables = 'git.exe curl.exe rapydscript.exe node.exe'.split()
     for p in os.environ['PATH'].split(os.pathsep):
         for x in tuple(executables):
             if os.path.exists(os.path.join(p, x)):
                 needed_paths.append(p)
                 executables.remove(x)
     sw = os.environ['SW']
-    paths = r'{0}\private\python\bin {0}\private\python\Lib\site-packages\pywin32_system32 {0}\bin {0}\qt\bin C:\Windows\System32'.format(
-        sw
-    ).split() + needed_paths
+    paths = rf'{sw}\private\python\bin {sw}\private\python\Lib\site-packages\pywin32_system32 {sw}\bin {sw}\qt\bin C:\Windows\System32'.split() + needed_paths
     os.environ['PATH'] = os.pathsep.join(paths)
     print('PATH:', os.environ['PATH'])
 
@@ -69,9 +69,19 @@ def build():
     raise SystemExit(p.wait())
 
 
+def browser_deps():
+    sanitize_path()
+    cmd = [python_exe(), 'setup.py', 'browser_deps']
+    printf(*cmd)
+    p = subprocess.Popen(cmd)
+    if p.wait() != 0:
+        raise SystemExit(p.returncode)
+
+
 def test():
     sanitize_path()
-    for q in ('test', 'test_rs'):
+    # test_rs is flaky in CI because webengine is flaky in CI
+    for q in ('test',):
         cmd = [python_exe(), 'setup.py', q]
         printf(*cmd)
         p = subprocess.Popen(cmd)
@@ -85,21 +95,27 @@ def setup_env():
     os.environ['QMAKE'] = os.path.join(SW, r'qt\bin\qmake')
     os.environ['CALIBRE_QT_PREFIX'] = os.path.join(SW, r'qt')
     os.environ['CI'] = 'true'
+    os.environ['OPENSSL_MODULES'] = os.path.join(SW, 'lib', 'ossl-modules')
+    os.environ['PIPER_TTS_DIR'] = os.path.join(SW, 'piper')
+    os.environ['CALIBRE_ESPEAK_DATA_DIR'] = os.path.join(SW, 'share', 'espeak-ng-data')
 
 
 def main():
     q = sys.argv[-1]
     setup_env()
     if q == 'bootstrap':
+        subprocess.check_call(['rapydscript.exe', '--version'])
         build()
+    elif q == 'browser-deps':
+        browser_deps()
     elif q == 'test':
         test()
     elif q == 'install':
         sw()
     else:
         if len(sys.argv) == 1:
-            raise SystemExit('Usage: win-ci.py sw|build|test')
-        raise SystemExit('%r is not a valid action' % sys.argv[-1])
+            raise SystemExit('Usage: win-ci.py install|bootstrap|browser-deps|test')
+        raise SystemExit(f'{sys.argv[-1]!r} is not a valid action')
 
 
 if __name__ == '__main__':

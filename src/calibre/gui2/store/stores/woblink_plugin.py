@@ -1,29 +1,25 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
+# License: GPLv3 Copyright: 2011-2019, Tomasz Długosz <tomek3d@gmail.com>
 
-store_version = 15  # Needed for dynamic plugin loading
 
-__license__ = 'GPL 3'
-__copyright__ = '2011-2019, Tomasz Długosz <tomek3d@gmail.com>'
-__docformat__ = 'restructuredtext en'
+store_version = 16  # Needed for dynamic plugin loading
 
 from base64 import b64encode
-try:
-    from urllib.parse import urlencode, quote_plus
-except ImportError:
-    from urllib import urlencode, quote_plus
+from urllib.parse import quote_plus, urlencode
 
-from lxml import html
 from mechanize import Request
+from qt.core import QUrl
 
-from PyQt5.Qt import QUrl
-
-from calibre import url_slash_cleaner, browser
+from calibre import browser, url_slash_cleaner
 from calibre.gui2 import open_url
 from calibre.gui2.store import StorePlugin
 from calibre.gui2.store.basic_config import BasicStoreConfig
 from calibre.gui2.store.search_result import SearchResult
 from calibre.gui2.store.web_store_dialog import WebStoreDialog
+
+try:
+    from calibre.utils.xml_parse import safe_html_fromstring
+except ImportError:
+    from lxml.html import fromstring as safe_html_fromstring
 
 
 def as_base64(data):
@@ -44,18 +40,22 @@ def search(query, max_results=10, timeout=60):
             url += '&limit=20'
     br = browser(user_agent='CalibreCrawler/1.0')
     br.set_handle_gzip(True)
-    rq = Request(url, headers={
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Referrer':'https://woblink.com/ebooki-kategorie',
-        'Cache-Control':'max-age=0',
-    }, data=urlencode({
-        'nw_filtry_filtr_zakrescen_formularz[min]':'0',
-        'nw_filtry_filtr_zakrescen_formularz[max]':'350',
-    }))
+    rq = Request(
+        url,
+        headers={
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referrer': 'https://woblink.com/ebooki-kategorie',
+            'Cache-Control': 'max-age=0',
+        },
+        data=urlencode({
+            'nw_filtry_filtr_zakrescen_formularz[min]': '0',
+            'nw_filtry_filtr_zakrescen_formularz[max]': '350',
+        }),
+    )
     r = br.open(rq)
     raw = r.read()
-    doc = html.fromstring('<html><body>' + raw.decode('utf-8') + '</body></html>')
+    doc = safe_html_fromstring('<html><body>' + raw.decode('utf-8') + '</body></html>')
     counter = max_results
 
     for data in doc.xpath('//div[@class="nw_katalog_lista_ksiazka ebook " or @class="nw_katalog_lista_ksiazka ebook promocja"]'):
@@ -86,8 +86,7 @@ def search(query, max_results=10, timeout=60):
 
 
 class WoblinkStore(BasicStoreConfig, StorePlugin):
-
-    def open(self, parent=None, detail_item=None, external=False):
+    def open(self, gui=None, parent=None, detail_item=None, external=False) -> None:
         aff_root = 'https://www.a4b-tracking.com/pl/stat-click-text-link/16/58/'
         url = 'https://woblink.com/publication'
 
@@ -98,18 +97,18 @@ class WoblinkStore(BasicStoreConfig, StorePlugin):
             detail_url = aff_root + as_base64(detail_item)
 
         if external or self.config.get('open_external', False):
-            open_url(QUrl(url_slash_cleaner(detail_url if detail_url else aff_url)))
+            open_url(QUrl(url_slash_cleaner(detail_url or aff_url)))
         else:
-            d = WebStoreDialog(self.gui, url, parent, detail_url if detail_url else aff_url)
+            d = WebStoreDialog(self.gui, url, parent, detail_url or aff_url)
             d.setWindowTitle(self.name)
             d.set_tags(self.config.get('tags', ''))
-            d.exec_()
+            d.exec()
 
     def search(self, query, max_results=10, timeout=60):
-        for s in search(query, max_results, timeout):
-            yield s
+        yield from search(query, max_results, timeout)
 
 
 if __name__ == '__main__':
     from pprint import pprint
+
     pprint(list(search('Franciszek')))

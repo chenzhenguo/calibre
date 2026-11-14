@@ -1,54 +1,74 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPL v3 Copyright: 2018, Kovid Goyal <kovid at kovidgoyal.net>
-
 
 import json
 import os
 import re
 import sys
-from collections import defaultdict, namedtuple
+import time
+import uuid
+from collections import defaultdict
 from hashlib import sha256
-from PyQt5.Qt import (
-    QApplication, QCursor, QDockWidget, QEvent, QMainWindow, QMenu, QMimeData,
-    QModelIndex, QPixmap, Qt, QTimer, QToolBar, QUrl, QVBoxLayout, QWidget,
-    pyqtSignal
-)
 from threading import Thread
+from typing import NamedTuple
 
+from qt.core import (
+    QCursor,
+    QDockWidget,
+    QEvent,
+    QImage,
+    QMainWindow,
+    QMenu,
+    QMimeData,
+    QModelIndex,
+    QPainter,
+    QPixmap,
+    QSizeF,
+    QSvgRenderer,
+    Qt,
+    QTimer,
+    QToolBar,
+    QUrl,
+    QVBoxLayout,
+    QWidget,
+    pyqtSignal,
+    sip,
+)
+
+import calibre.gui2.viewer.web_view as _web_view_module
 from calibre import prints
-from calibre.constants import DEBUG
+from calibre.constants import ismacos, iswindows
 from calibre.customize.ui import available_input_formats
 from calibre.db.annotations import merge_annotations
-from calibre.gui2 import choose_files, error_dialog
+from calibre.db.book_storage import InvalidBookStorage, validate_book_storage
+from calibre.gui2 import add_to_recent_docs, choose_files, error_dialog, qapplication_or_fail, sanitize_env_vars
 from calibre.gui2.dialogs.drm_error import DRMErrorMessage
 from calibre.gui2.image_popup import ImagePopup
 from calibre.gui2.main_window import MainWindow
-from calibre.gui2.viewer import get_current_book_data
-from calibre.gui2.viewer.annotations import (
-    AnnotationsSaveWorker, annotations_dir, parse_annotations
-)
+from calibre.gui2.viewer import get_boss, get_current_book_data, performance_monitor
+from calibre.gui2.viewer.annotations import AnnotationsSaveWorker, annotations_dir, parse_annotations
+from calibre.gui2.viewer.book_storage import BookStorageSaveWorker, load_book_storage
 from calibre.gui2.viewer.bookmarks import BookmarkManager
-from calibre.gui2.viewer.config import get_session_pref, vprefs
-from calibre.gui2.viewer.convert_book import clean_running_workers, prepare_book
-from calibre.gui2.viewer.highlights import HighlightsPanel
-from calibre.gui2.viewer.integration import (
-    get_book_library_details, load_annotations_map_from_library
-)
-from calibre.gui2.viewer.lookup import Lookup
+from calibre.gui2.viewer.config import delete_all_reading_rates, get_session_pref, load_reading_rates, save_reading_rates, vprefs
+from calibre.gui2.viewer.convert_book import prepare_book
+from calibre.gui2.viewer.highlights import HighlightsPanel, style_definition_for_name
+from calibre.gui2.viewer.integration import get_book_library_details, load_annotations_map_from_library
 from calibre.gui2.viewer.overlay import LoadingOverlay
 from calibre.gui2.viewer.search import SearchPanel
-from calibre.gui2.viewer.toc import TOC, TOCSearch, TOCView
+from calibre.gui2.viewer.toc import TOC, TOCItem, TOCSearch, TOCView
 from calibre.gui2.viewer.toolbars import ActionsToolBar
 from calibre.gui2.viewer.web_view import WebView, get_path_for_name, set_book_path
+from calibre.live import async_stop_worker
+from calibre.startup import connect_lambda
 from calibre.utils.date import utcnow
+from calibre.utils.filenames import make_long_path_useable
 from calibre.utils.img import image_from_path
 from calibre.utils.ipc.simple_worker import WorkerError
-from calibre.utils.monotonic import monotonic
-from polyglot.builtins import as_bytes, as_unicode, iteritems, itervalues
+from calibre.utils.localization import _
+from polyglot.builtins import as_bytes, as_unicode
 
 
-def is_float(x):
+def is_float(x) -> bool:
     try:
         float(x)
         return True
@@ -58,14 +78,19 @@ def is_float(x):
 
 
 def dock_defs():
-    Dock = namedtuple('Dock', 'name title initial_area allowed_areas')
     ans = {}
 
-    def d(title, name, area, allowed=Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea):
+    class Dock(NamedTuple):
+        name: str
+        title: str
+        initial_area: Qt.DockWidgetArea
+        allowed_areas: Qt.DockWidgetArea
+
+    def d(title, name, area, allowed=Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea) -> None:
         ans[name] = Dock(name + '-dock', title, area, allowed)
 
-    d(_('Table of Contents'), 'toc', Qt.DockWidgetArea.LeftDockWidgetArea),
-    d(_('Lookup'), 'lookup', Qt.DockWidgetArea.RightDockWidgetArea),
+    d(_('Table of Contents'), 'toc', Qt.DockWidgetArea.LeftDockWidgetArea)
+    d(_('Lookup'), 'lookup', Qt.DockWidgetArea.RightDockWidgetArea)
     d(_('Bookmarks'), 'bookmarks', Qt.DockWidgetArea.RightDockWidgetArea)
     d(_('Search'), 'search', Qt.DockWidgetArea.LeftDockWidgetArea)
     d(_('Inspector'), 'inspector', Qt.DockWidgetArea.RightDockWidgetArea, Qt.DockWidgetArea.AllDockWidgetAreas)
@@ -78,36 +103,52 @@ def path_key(path):
 
 
 class EbookViewer(MainWindow):
-
     msg_from_anotherinstance = pyqtSignal(object)
     book_preparation_started = pyqtSignal()
     book_prepared = pyqtSignal(object, object)
     MAIN_WINDOW_STATE_VERSION = 1
 
-    def __init__(self, open_at=None, continue_reading=None, force_reload=False, calibre_book_data=None):
+    toc_dock: QDockWidget
+    search_dock: QDockWidget
+    inspector_dock: QDockWidget
+    bookmarks_dock: QDockWidget
+    highlights_dock: QDockWidget
+    lookup_dock: QDockWidget
+
+    def __init__(self, open_at=None, continue_reading=None, force_reload=False, calibre_book_data=None) -> None:
         MainWindow.__init__(self, None)
+        get_boss(self)
+
         self.annotations_saver = None
+        self.book_storage_saver: BookStorageSaveWorker | None = None
+        self.last_read_pos_saver = None
         self.calibre_book_data_for_first_book = calibre_book_data
         self.shutting_down = self.close_forced = self.shutdown_done = False
         self.force_reload = force_reload
-        connect_lambda(self.book_preparation_started, self, lambda self: self.loading_overlay(_(
-            'Preparing book for first read, please wait')), type=Qt.ConnectionType.QueuedConnection)
+        connect_lambda(
+            self.book_preparation_started,
+            self,
+            lambda self: self.loading_overlay(_('Preparing book for first read, please wait')),
+            type=Qt.ConnectionType.QueuedConnection,
+        )
         self.maximized_at_last_fullscreen = False
         self.save_pos_timer = t = QTimer(self)
         t.setSingleShot(True), t.setInterval(3000), t.setTimerType(Qt.TimerType.VeryCoarseTimer)
-        connect_lambda(t.timeout, self, lambda self: self.save_annotations(in_book_file=False))
+        t.timeout.connect(self._on_save_pos_timer)
         self.pending_open_at = open_at
+        self.pending_search = None
         self.base_window_title = _('E-book viewer')
         self.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowTabbedDocks | QMainWindow.DockOption.AllowNestedDocks)
         self.setWindowTitle(self.base_window_title)
         self.in_full_screen_mode = None
-        self.image_popup = ImagePopup(self)
+        self.image_popup = ImagePopup(self, prefs=vprefs)
         self.actions_toolbar = at = ActionsToolBar(self)
         at.open_book_at_path.connect(self.ask_for_open)
+        at.resize_window_requested.connect(self.resize_window_to)
         self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, at)
         try:
-            os.makedirs(annotations_dir)
-        except EnvironmentError:
+            os.makedirs(annotations_dir())
+        except OSError:
             pass
         self.current_book_data = {}
         get_current_book_data(self.current_book_data)
@@ -122,17 +163,20 @@ class EbookViewer(MainWindow):
             ans.visibilityChanged.connect(self.dock_visibility_changed)
             return ans
 
-        for dock_def in itervalues(self.dock_defs):
-            setattr(self, '{}_dock'.format(dock_def.name.partition('-')[0]), create_dock(
-                dock_def.title, dock_def.name, dock_def.initial_area, dock_def.allowed_areas))
+        for dock_def in self.dock_defs.values():
+            setattr(
+                self,
+                '{}_dock'.format(dock_def.name.partition('-')[0]),
+                create_dock(dock_def.title, dock_def.name, dock_def.initial_area, dock_def.allowed_areas),
+            )
 
         self.toc_container = w = QWidget(self)
-        w.l = QVBoxLayout(w)
+        toc_layout = QVBoxLayout(w)
         self.toc = TOCView(w)
         self.toc.clicked[QModelIndex].connect(self.toc_clicked)
         self.toc.searched.connect(self.toc_searched)
         self.toc_search = TOCSearch(self.toc, parent=w)
-        w.l.addWidget(self.toc), w.l.addWidget(self.toc_search), w.l.setContentsMargins(0, 0, 0, 0)
+        toc_layout.addWidget(self.toc), toc_layout.addWidget(self.toc_search), toc_layout.setContentsMargins(0, 0, 0, 0)
         self.toc_dock.setWidget(w)
 
         self.search_widget = w = SearchPanel(self)
@@ -143,14 +187,14 @@ class EbookViewer(MainWindow):
         self.search_dock.setWidget(w)
         self.search_dock.visibilityChanged.connect(self.search_widget.visibility_changed)
 
-        self.lookup_widget = w = Lookup(self)
+        from calibre.gui2.viewer.lookup import Lookup
+
+        self.lookup_widget = w = Lookup(self, viewer=self)
         self.lookup_dock.visibilityChanged.connect(self.lookup_widget.visibility_changed)
         self.lookup_dock.setWidget(w)
 
         self.bookmarks_widget = w = BookmarkManager(self)
-        connect_lambda(
-            w.create_requested, self,
-            lambda self: self.web_view.trigger_shortcut('new_bookmark'))
+        connect_lambda(w.create_requested, self, lambda self: self.web_view.trigger_shortcut('new_bookmark'))
         w.edited.connect(self.bookmarks_edited)
         w.activated.connect(self.bookmark_activated)
         w.toggle_requested.connect(self.toggle_bookmarks)
@@ -162,12 +206,14 @@ class EbookViewer(MainWindow):
 
         self.web_view = WebView(self)
         self.web_view.cfi_changed.connect(self.cfi_changed)
+        self.web_view.update_last_read_position.connect(self._on_last_read_pos_data)
         self.web_view.reload_book.connect(self.reload_book)
         self.web_view.toggle_toc.connect(self.toggle_toc)
         self.web_view.show_search.connect(self.show_search)
         self.web_view.find_next.connect(self.search_widget.find_next_requested)
-        self.search_widget.show_search_result.connect(self.web_view.show_search_result)
+        self.search_widget.show_search_result.connect(self.show_search_result)
         self.web_view.search_result_not_found.connect(self.search_widget.search_result_not_found)
+        self.web_view.search_result_discovered.connect(self.search_widget.search_result_discovered)
         self.web_view.toggle_bookmarks.connect(self.toggle_bookmarks)
         self.web_view.toggle_highlights.connect(self.toggle_highlights)
         self.web_view.new_bookmark.connect(self.bookmarks_widget.create_new_bookmark)
@@ -175,8 +221,9 @@ class EbookViewer(MainWindow):
         self.web_view.toggle_lookup.connect(self.toggle_lookup)
         self.web_view.quit.connect(self.quit)
         self.web_view.update_current_toc_nodes.connect(self.toc.update_current_toc_nodes)
+        self.web_view.update_current_toc_nodes.connect(self.search_widget.update_current_toc_nodes)
         self.web_view.toggle_full_screen.connect(self.toggle_full_screen)
-        self.web_view.ask_for_open.connect(self.ask_for_open, type=Qt.ConnectionType.QueuedConnection)
+        self.web_view.ask_for_open.connect(self.ask_for_open_from_js, type=Qt.ConnectionType.QueuedConnection)
         self.web_view.selection_changed.connect(self.lookup_widget.selected_text_changed, type=Qt.ConnectionType.QueuedConnection)
         self.web_view.selection_changed.connect(self.highlights_widget.selected_text_changed, type=Qt.ConnectionType.QueuedConnection)
         self.web_view.view_image.connect(self.view_image, type=Qt.ConnectionType.QueuedConnection)
@@ -190,6 +237,12 @@ class EbookViewer(MainWindow):
         self.web_view.scrollbar_context_menu.connect(self.scrollbar_context_menu)
         self.web_view.close_prep_finished.connect(self.close_prep_finished)
         self.web_view.highlights_changed.connect(self.highlights_changed)
+        self.web_view.update_reading_rates.connect(self.update_reading_rates)
+        self.web_view.reset_reading_rates.connect(self.reset_reading_rates)
+        self.web_view.book_storage_changed.connect(self.book_storage_changed)
+        self.web_view.edit_book.connect(self.edit_book)
+        self.web_view.content_file_changed.connect(self.content_file_changed)
+
         self.actions_toolbar.initialize(self.web_view, self.search_dock.toggleViewAction())
         self.setCentralWidget(self.web_view)
         self.loading_overlay = LoadingOverlay(self)
@@ -198,26 +251,34 @@ class EbookViewer(MainWindow):
         self.dock_visibility_changed()
         self.highlights_widget.request_highlight_action.connect(self.web_view.highlight_action)
         self.highlights_widget.web_action.connect(self.web_view.generic_action)
+        self.highlights_widget.notes_edited_signal.connect(self.notes_edited)
         if continue_reading:
             self.continue_reading()
-        self.setup_mouse_auto_hide()
 
-    def shortcuts_changed(self, smap):
+        self.setup_mouse_auto_hide()
+        self.lookup_widget.add_note_requested.connect(self.add_notes_or_create_highlight)
+
+    def create_uuid(self):
+        return uuid.uuid4().hex
+
+    def shortcuts_changed(self, smap) -> None:
         rmap = defaultdict(list)
-        for k, v in iteritems(smap):
+        for k, v in smap.items():
             rmap[v].append(k)
         self.actions_toolbar.set_tooltips(rmap)
-        self.highlights_widget.set_tooltips(rmap)
+        if hasattr(self, 'highlights_widget'):
+            self.highlights_widget.set_tooltips(rmap)
+        self.search_widget.set_tooltips(rmap)
 
-    def resizeEvent(self, ev):
+    def resizeEvent(self, a0):
         self.loading_overlay.resize(self.size())
-        return MainWindow.resizeEvent(self, ev)
+        return MainWindow.resizeEvent(self, a0)
 
-    def scrollbar_context_menu(self, x, y, frac):
+    def scrollbar_context_menu(self, x, y, frac) -> None:
         m = QMenu(self)
         amap = {}
 
-        def a(text, name):
+        def a(text, name) -> None:
             m.addAction(text)
             amap[text] = name
 
@@ -234,7 +295,7 @@ class EbookViewer(MainWindow):
         m.addSeparator()
         a(_('Hide this scrollbar'), 'toggle_scrollbar')
 
-        q = m.exec_(QCursor.pos())
+        q = m.exec(QCursor.pos())
         if not q:
             return
         q = amap[q.text()]
@@ -244,14 +305,14 @@ class EbookViewer(MainWindow):
             self.web_view.trigger_shortcut(q)
 
     # IPC {{{
-    def handle_commandline_arg(self, arg):
+    def handle_commandline_arg(self, arg) -> None:
         if arg:
             if os.path.isfile(arg) and os.access(arg, os.R_OK):
                 self.load_ebook(arg)
             else:
                 prints('Cannot read from:', arg, file=sys.stderr)
 
-    def message_from_other_instance(self, msg):
+    def message_from_other_instance(self, msg) -> None:
         try:
             msg = json.loads(msg)
             path, open_at = msg
@@ -260,12 +321,13 @@ class EbookViewer(MainWindow):
             print(err, file=sys.stderr)
             return
         self.load_ebook(path, open_at=open_at)
-        self.raise_()
+        self.raise_and_focus()
         self.activateWindow()
+
     # }}}
 
     # Fullscreen {{{
-    def set_full_screen(self, on):
+    def set_full_screen(self, on) -> None:
         if on:
             self.maximized_at_last_fullscreen = self.isMaximized()
             if not self.actions_toolbar.visible_in_fullscreen:
@@ -278,36 +340,53 @@ class EbookViewer(MainWindow):
             else:
                 self.showNormal()
 
-    def changeEvent(self, ev):
-        if ev.type() == QEvent.Type.WindowStateChange:
+    def changeEvent(self, a0):
+        if a0.type() == QEvent.Type.WindowStateChange:
             in_full_screen_mode = self.isFullScreen()
             if self.in_full_screen_mode is None or self.in_full_screen_mode != in_full_screen_mode:
                 self.in_full_screen_mode = in_full_screen_mode
                 self.web_view.notify_full_screen_state_change(self.in_full_screen_mode)
-        return MainWindow.changeEvent(self, ev)
+        return MainWindow.changeEvent(self, a0)
 
-    def toggle_full_screen(self):
+    def toggle_full_screen(self) -> None:
         self.set_full_screen(not self.isFullScreen())
+
+    def resize_window_to(self, width, height) -> None:
+        if self.isFullScreen():
+            self.maximized_at_last_fullscreen = False
+            self.set_full_screen(False)
+        elif self.isMaximized():
+            self.showNormal()
+        self.resize(width, height)
+        qapplication_or_fail().ensure_window_on_screen(self)
+
     # }}}
 
     # Docks (ToC, Bookmarks, Lookup, etc.) {{{
 
-    def toggle_inspector(self):
-        visible = self.inspector_dock.toggleViewAction().isChecked()
+    def toggle_inspector(self) -> None:
+        action = self.inspector_dock.toggleViewAction()
+        visible = action.isChecked() if action is not None else False
         self.inspector_dock.setVisible(not visible)
 
-    def toggle_toc(self):
-        self.toc_dock.setVisible(not self.toc_dock.isVisible())
+    def toggle_toc(self) -> None:
+        is_visible = self.toc_dock.isVisible()
+        self.toc_dock.setVisible(not is_visible)
+        if not is_visible:
+            self.toc.scroll_to_current_toc_node()
 
-    def show_search(self, text, trigger=False):
+    def show_search_result(self, sr) -> None:
+        self.web_view.show_search_result(sr)
+
+    def show_search(self, text, trigger=False, search_type=None, case_sensitive=None, no_history=False) -> None:
         self.search_dock.setVisible(True)
         self.search_dock.activateWindow()
-        self.search_dock.raise_()
-        self.search_widget.focus_input(text)
+        self.search_dock.raise_and_focus()
+        self.search_widget.focus_input(text, search_type, case_sensitive, no_history=no_history)
         if trigger:
             self.search_widget.trigger()
 
-    def search_results_count_changed(self, num=-1):
+    def search_results_count_changed(self, num=-1) -> None:
         if num < 0:
             tt = _('Search')
         elif num == 0:
@@ -321,11 +400,18 @@ class EbookViewer(MainWindow):
     def start_search(self, search_query):
         name = self.web_view.current_content_file
         if name:
+            if search_query.is_empty and search_query.text:
+                return error_dialog(
+                    self,
+                    _('Empty search expression'),
+                    _('Cannot search for {!r} as it contains only punctuation and spaces.').format(search_query.text),
+                    show=True,
+                )
             self.web_view.get_current_cfi(self.search_widget.set_anchor_cfi)
             self.search_widget.start_search(search_query, name)
             self.web_view.setFocus(Qt.FocusReason.OtherFocusReason)
 
-    def toggle_bookmarks(self):
+    def toggle_bookmarks(self) -> None:
         is_visible = self.bookmarks_dock.isVisible()
         self.bookmarks_dock.setVisible(not is_visible)
         if is_visible:
@@ -333,7 +419,7 @@ class EbookViewer(MainWindow):
         else:
             self.bookmarks_widget.bookmarks_list.setFocus(Qt.FocusReason.OtherFocusReason)
 
-    def toggle_highlights(self):
+    def toggle_highlights(self) -> None:
         is_visible = self.highlights_dock.isVisible()
         self.highlights_dock.setVisible(not is_visible)
         if is_visible:
@@ -341,87 +427,152 @@ class EbookViewer(MainWindow):
         else:
             self.highlights_widget.focus()
 
-    def toggle_lookup(self, force_show=False):
+    def toggle_lookup(self, force_show=False) -> None:
         self.lookup_dock.setVisible(force_show or not self.lookup_dock.isVisible())
         if force_show and self.lookup_dock.isVisible():
             self.lookup_widget.on_forced_show()
 
-    def toc_clicked(self, index):
+    def check_for_read_aloud(self, where: str) -> bool:
+        if self.actions_toolbar.toggle_read_aloud_action.isChecked():
+            error_dialog(
+                self,
+                _('Cannot jump to location'),
+                _('The Read aloud feature is active, cannot jump to {}. Close it first.').format(where),
+                show=True,
+            )
+            return True
+        return False
+
+    def toc_clicked(self, index) -> None:
+        if self.check_for_read_aloud(_('Table of Contents locations')):
+            return
         item = self.toc_model.itemFromIndex(index)
+        assert item is not None
+        assert isinstance(item, TOCItem)
+        self.web_view.goto_toc_node(item.node_id)
+        self.force_focus_on_web_view()
+
+    def force_focus_on_web_view(self) -> None:
+        self.activateWindow()
+        self.web_view.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def toc_searched(self, index) -> None:
+        item = self.toc_model.itemFromIndex(index)
+        assert item is not None
+        assert isinstance(item, TOCItem)
         self.web_view.goto_toc_node(item.node_id)
 
-    def toc_searched(self, index):
-        item = self.toc_model.itemFromIndex(index)
-        self.web_view.goto_toc_node(item.node_id)
-
-    def bookmarks_edited(self, bookmarks):
+    def bookmarks_edited(self, bookmarks) -> None:
         self.current_book_data['annotations_map']['bookmark'] = bookmarks
-        # annotations will be saved in book file on exit
         self.save_annotations(in_book_file=False)
 
-    def goto_cfi(self, cfi):
-        self.web_view.goto_cfi(cfi)
+    def goto_cfi(self, cfi, add_to_history=False) -> None:
+        self.web_view.goto_cfi(cfi, add_to_history=add_to_history)
 
-    def bookmark_activated(self, cfi):
-        self.goto_cfi(cfi)
+    def bookmark_activated(self, cfi) -> None:
+        if self.check_for_read_aloud(_('bookmark')):
+            return
+        self.goto_cfi(cfi, add_to_history=True)
 
     def view_image(self, name):
         path = get_path_for_name(name)
         if path:
-            pmap = QPixmap()
-            if pmap.load(path):
+            from calibre.utils.imghdr import what
+
+            with open(make_long_path_useable(path), 'rb') as f:
+                fmt = what(f)
+            if fmt == 'svg':
+                r = QSvgRenderer(path)
+                if not r.isValid():
+                    return error_dialog(self, _('Invalid image'), _('Failed to load the image {}').format(name), show=True)
+                dpr = self.devicePixelRatioF()
+                sz = (QSizeF(r.defaultSize()) * dpr).toSize()
+                img = QImage(sz, QImage.Format.Format_ARGB32_Premultiplied)
+                img.fill(Qt.GlobalColor.transparent)
+                p = QPainter(img)
+                r.render(p)
+                p.end()
+                img.setDevicePixelRatio(dpr)
+                pmap = QPixmap.fromImage(img)
                 self.image_popup.current_img = pmap
                 self.image_popup.current_url = QUrl.fromLocalFile(path)
+                self.image_popup.current_image_is_svg = True
                 self.image_popup()
             else:
-                error_dialog(self, _('Invalid image'), _(
-                    "Failed to load the image {}").format(name), show=True)
+                pmap = QPixmap()
+                if pmap.load(path):
+                    self.image_popup.current_img = pmap
+                    self.image_popup.current_url = QUrl.fromLocalFile(path)
+                    self.image_popup.current_image_is_svg = False
+                    self.image_popup()
+                else:
+                    error_dialog(self, _('Invalid image'), _('Failed to load the image {}').format(name), show=True)
         else:
-            error_dialog(self, _('Image not found'), _(
-                    "Failed to find the image {}").format(name), show=True)
+            error_dialog(self, _('Image not found'), _('Failed to find the image {}').format(name), show=True)
 
     def copy_image(self, name):
         path = get_path_for_name(name)
         if not path:
-            return error_dialog(self, _('Image not found'), _(
-                "Failed to find the image {}").format(name), show=True)
+            return error_dialog(self, _('Image not found'), _('Failed to find the image {}').format(name), show=True)
         try:
             img = image_from_path(path)
         except Exception:
-            return error_dialog(self, _('Invalid image'), _(
-                "Failed to load the image {}").format(name), show=True)
+            return error_dialog(self, _('Invalid image'), _('Failed to load the image {}').format(name), show=True)
         url = QUrl.fromLocalFile(path)
         md = QMimeData()
         md.setImageData(img)
         md.setUrls([url])
-        QApplication.instance().clipboard().setMimeData(md)
+        cb = qapplication_or_fail().clipboard()
+        assert cb is not None
+        cb.setMimeData(md)
 
-    def dock_visibility_changed(self):
+    def dock_visibility_changed(self) -> None:
         vmap = {dock.objectName().partition('-')[0]: dock.toggleViewAction().isChecked() for dock in self.dock_widgets}
         self.actions_toolbar.update_dock_actions(vmap)
+
     # }}}
 
     # Load book {{{
 
-    def show_loading_message(self, msg):
+    def show_loading_message(self, msg) -> None:
         if msg:
             self.loading_overlay(msg)
+            self.actions_toolbar.update_action_state(False)
         else:
+            if not hasattr(self, 'initial_loading_performace_reported'):
+                performance_monitor('loading finished')
+                self.initial_loading_performace_reported = True
             self.loading_overlay.hide()
+            self.actions_toolbar.update_action_state(True)
 
-    def show_error(self, title, msg, details):
+    def content_file_changed(self, fname) -> None:
+        if self.pending_search:
+            search, self.pending_search = self.pending_search, None
+            self.show_search(
+                text=search['query'],
+                trigger=True,
+                search_type=search['type'],
+                case_sensitive=search['case_sensitive'],
+                no_history=True,
+            )
+
+    def show_error(self, title, msg, details) -> None:
         self.loading_overlay.hide()
         error_dialog(self, title, msg, det_msg=details or None, show=True)
 
-    def print_book(self):
+    def print_book(self) -> None:
+        if _web_view_module._book_pathtoebook is None:
+            error_dialog(self, _('Cannot print book'), _('No book is currently open'), show=True)
+            return
         from .printing import print_book
-        print_book(set_book_path.pathtoebook, book_title=self.current_book_data['metadata']['title'], parent=self)
+
+        print_book(_web_view_module._book_pathtoebook, book_title=self.current_book_data['metadata']['title'], parent=self)
 
     @property
     def dock_widgets(self):
         return self.findChildren(QDockWidget, options=Qt.FindChildOption.FindDirectChildrenOnly)
 
-    def reset_interface(self):
+    def reset_interface(self) -> None:
         for dock in self.dock_widgets:
             dock.setFloating(False)
             area = self.dock_defs[dock.objectName().partition('-')[0]].initial_area
@@ -434,77 +585,105 @@ class EbookViewer(MainWindow):
             self.removeToolBar(toolbar)
             self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, toolbar)
 
-    def ask_for_open(self, path=None):
+    def ask_for_open_from_js(self, path) -> None:
+        if path and not os.path.exists(path):
+            self.web_view.remove_recently_opened(path)
+            error_dialog(self, _('Book does not exist'), _('Cannot open {} as it no longer exists').format(path), show=True)
+        else:
+            self.ask_for_open(path)
+
+    def ask_for_open(self, path=None) -> None:
         if path is None:
             files = choose_files(
-                self, 'ebook viewer open dialog',
-                _('Choose e-book'), [(_('E-books'), available_input_formats())],
-                all_files=False, select_only_single_file=True)
+                self,
+                'ebook viewer open dialog',
+                _('Choose e-book'),
+                [(_('E-books'), available_input_formats())],
+                all_files=False,
+                select_only_single_file=True,
+            )
             if not files:
                 return
             path = files[0]
         self.load_ebook(path)
 
-    def continue_reading(self):
+    def continue_reading(self) -> None:
         rl = vprefs['session_data'].get('standalone_recently_opened')
         if rl:
             entry = rl[0]
             self.load_ebook(entry['pathtoebook'])
 
-    def load_ebook(self, pathtoebook, open_at=None, reload_book=False):
+    def load_ebook(self, pathtoebook, open_at=None, reload_book=False) -> None:
+        if '.' not in os.path.basename(pathtoebook):
+            pathtoebook = os.path.abspath(os.path.realpath(pathtoebook))
+        performance_monitor('Load of book started', reset=True)
+        self.actions_toolbar.update_action_state(False)
         self.web_view.show_home_page_on_ready = False
         if open_at:
             self.pending_open_at = open_at
-        self.setWindowTitle(_('Loading book') + '… — {}'.format(self.base_window_title))
+        self.setWindowTitle(_('Loading book') + f'… — {self.base_window_title}')
         self.loading_overlay(_('Loading book, please wait'))
         self.save_annotations()
+        self.save_reading_rates()
         self.current_book_data = {}
         get_current_book_data(self.current_book_data)
         self.search_widget.clear_searches()
-        t = Thread(name='LoadBook', target=self._load_ebook_worker, args=(pathtoebook, open_at, reload_book or self.force_reload))
+        t = Thread(
+            name='LoadBook',
+            target=self._load_ebook_worker,
+            args=(pathtoebook, open_at, reload_book or self.force_reload),
+        )
         t.daemon = True
         t.start()
 
-    def reload_book(self):
+    def reload_book(self) -> None:
         if self.current_book_data:
             self.load_ebook(self.current_book_data['pathtoebook'], reload_book=True)
 
-    def _load_ebook_worker(self, pathtoebook, open_at, reload_book):
-        if DEBUG:
-            start_time = monotonic()
+    def _load_ebook_worker(self, pathtoebook, open_at, reload_book) -> None:
         try:
             ans = prepare_book(pathtoebook, force=reload_book, prepare_notify=self.prepare_notify)
         except WorkerError as e:
-            self.book_prepared.emit(False, {'exception': e, 'tb': e.orig_tb, 'pathtoebook': pathtoebook})
+            if not sip.isdeleted(self):
+                self.book_prepared.emit(False, {'exception': e, 'tb': e.orig_tb, 'pathtoebook': pathtoebook})
         except Exception as e:
             import traceback
-            self.book_prepared.emit(False, {'exception': e, 'tb': traceback.format_exc(), 'pathtoebook': pathtoebook})
-        else:
-            if DEBUG:
-                print('Book prepared in {:.2f} seconds'.format(monotonic() - start_time))
-            self.book_prepared.emit(True, {'base': ans, 'pathtoebook': pathtoebook, 'open_at': open_at, 'reloaded': reload_book})
 
-    def prepare_notify(self):
+            if not sip.isdeleted(self):
+                self.book_prepared.emit(False, {'exception': e, 'tb': traceback.format_exc(), 'pathtoebook': pathtoebook})
+        else:
+            performance_monitor('prepared emitted')
+            if not sip.isdeleted(self):
+                self.book_prepared.emit(True, {'base': ans, 'pathtoebook': pathtoebook, 'open_at': open_at, 'reloaded': reload_book})
+
+    def prepare_notify(self) -> None:
+        performance_monitor('preparation started')
         self.book_preparation_started.emit()
 
-    def load_finished(self, ok, data):
+    def load_finished(self, ok, data) -> None:
         cbd = self.calibre_book_data_for_first_book
         self.calibre_book_data_for_first_book = None
         if self.shutting_down:
             return
         open_at, self.pending_open_at = self.pending_open_at, None
+        self.pending_search = None
         self.web_view.clear_caches()
         if not ok:
+            self.actions_toolbar.update_action_state(False)
             self.setWindowTitle(self.base_window_title)
             tb = as_unicode(data['tb'].strip(), errors='replace')
             tb = re.split(r'^calibre\.gui2\.viewer\.convert_book\.ConversionFailure:\s*', tb, maxsplit=1, flags=re.M)[-1]
             last_line = tuple(tb.strip().splitlines())[-1]
             if last_line.startswith('calibre.ebooks.DRMError'):
-                DRMErrorMessage(self).exec_()
+                DRMErrorMessage(self).exec()
             else:
-                error_dialog(self, _('Loading book failed'), _(
-                    'Failed to open the book at {0}. Click "Show details" for more info.').format(data['pathtoebook']),
-                    det_msg=tb, show=True)
+                error_dialog(
+                    self,
+                    _('Loading book failed'),
+                    _('Failed to open the book at {0}. Click "Show details" for more info.').format(data['pathtoebook']),
+                    det_msg=tb,
+                    show=True,
+                )
             self.loading_overlay.hide()
             self.web_view.show_home_page()
             return
@@ -515,35 +694,59 @@ class EbookViewer(MainWindow):
                 raise
             self.load_ebook(data['pathtoebook'], open_at=data['open_at'], reload_book=True)
             return
+        if iswindows:
+            try:
+                add_to_recent_docs(data['pathtoebook'])
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
         self.current_book_data = data
         get_current_book_data(self.current_book_data)
         self.current_book_data['annotations_map'] = defaultdict(list)
-        self.current_book_data['annotations_path_key'] = path_key(data['pathtoebook']) + '.json'
+        self.current_book_data['path_key'] = path_key(data['pathtoebook'])
+        self.current_book_data['annotations_path_key'] = self.current_book_data['path_key'] + '.json'
         self.load_book_data(cbd)
         self.update_window_title()
         initial_cfi = self.initial_cfi_for_current_book()
         initial_position = {'type': 'cfi', 'data': initial_cfi} if initial_cfi else None
         if open_at:
             if open_at.startswith('toc:'):
-                initial_toc_node = self.toc_model.node_id_for_text(open_at[len('toc:'):])
+                initial_toc_node = self.toc_model.node_id_for_text(open_at[len('toc:') :])
                 initial_position = {'type': 'toc', 'data': initial_toc_node}
             elif open_at.startswith('toc-href:'):
-                initial_toc_node = self.toc_model.node_id_for_href(open_at[len('toc-href:'):], exact=True)
+                initial_toc_node = self.toc_model.node_id_for_href(open_at[len('toc-href:') :], exact=True)
                 initial_position = {'type': 'toc', 'data': initial_toc_node}
             elif open_at.startswith('toc-href-contains:'):
-                initial_toc_node = self.toc_model.node_id_for_href(open_at[len('toc-href-contains:'):], exact=False)
+                initial_toc_node = self.toc_model.node_id_for_href(open_at[len('toc-href-contains:') :], exact=False)
                 initial_position = {'type': 'toc', 'data': initial_toc_node}
             elif open_at.startswith('epubcfi(/'):
                 initial_position = {'type': 'cfi', 'data': open_at}
             elif open_at.startswith('ref:'):
-                initial_position = {'type': 'ref', 'data': open_at[len('ref:'):]}
+                initial_position = {'type': 'ref', 'data': open_at[len('ref:') :]}
+            elif open_at.startswith('search:'):
+                self.pending_search = {'type': 'normal', 'query': open_at[len('search:') :], 'case_sensitive': False}
+                initial_position = {'type': 'bookpos', 'data': 0}
+            elif open_at.startswith('regex:'):
+                self.pending_search = {'type': 'regex', 'query': open_at[len('regex:') :], 'case_sensitive': True}
+                initial_position = {'type': 'bookpos', 'data': 0}
             elif is_float(open_at):
                 initial_position = {'type': 'bookpos', 'data': float(open_at)}
         highlights = self.current_book_data['annotations_map']['highlight']
         self.highlights_widget.load(highlights)
-        self.web_view.start_book_load(initial_position=initial_position, highlights=highlights, current_book_data=self.current_book_data)
+        rates = load_reading_rates(self.current_book_data['annotations_path_key'])
+        self.web_view.start_book_load(
+            initial_position=initial_position,
+            highlights=highlights,
+            current_book_data=self.current_book_data,
+            reading_rates=rates,
+            book_storage=self.current_book_data['book_storage'],
+        )
+        performance_monitor('webview loading requested')
 
-    def load_book_data(self, calibre_book_data=None):
+        self.lookup_widget.book_loaded(self.current_book_data)
+
+    def load_book_data(self, calibre_book_data=None) -> None:
         self.current_book_data['book_library_details'] = get_book_library_details(self.current_book_data['pathtoebook'])
         if calibre_book_data is not None:
             self.current_book_data['calibre_book_id'] = calibre_book_data['book_id']
@@ -551,6 +754,12 @@ class EbookViewer(MainWindow):
             self.current_book_data['calibre_book_fmt'] = calibre_book_data['fmt']
             self.current_book_data['calibre_library_id'] = calibre_book_data['library_id']
         self.load_book_annotations(calibre_book_data)
+        self.current_book_data['book_storage'] = load_book_storage(
+            self.current_book_data['path_key'],
+            self.current_book_data['book_library_details'],
+            get_session_pref('sync_annots_user', default=''),
+            calibre_book_data,
+        )
         path = os.path.join(self.current_book_data['base'], 'calibre-book-manifest.json')
         with open(path, 'rb') as f:
             raw = f.read()
@@ -559,17 +768,17 @@ class EbookViewer(MainWindow):
         self.toc_model = TOC(toc)
         self.toc.setModel(self.toc_model)
         self.bookmarks_widget.set_bookmarks(self.current_book_data['annotations_map']['bookmark'])
-        self.current_book_data['metadata'] = set_book_path.parsed_metadata
-        self.current_book_data['manifest'] = set_book_path.parsed_manifest
+        self.current_book_data['metadata'] = _web_view_module._book_parsed_metadata
+        self.current_book_data['manifest'] = _web_view_module._book_parsed_manifest
 
-    def load_book_annotations(self, calibre_book_data=None):
+    def load_book_annotations(self, calibre_book_data=None) -> None:
         amap = self.current_book_data['annotations_map']
         path = os.path.join(self.current_book_data['base'], 'calibre-book-annotations.json')
         if os.path.exists(path):
             with open(path, 'rb') as f:
                 raw = f.read()
             merge_annotations(parse_annotations(raw), amap)
-        path = os.path.join(annotations_dir, self.current_book_data['annotations_path_key'])
+        path = os.path.join(annotations_dir(), self.current_book_data['annotations_path_key'])
         if os.path.exists(path):
             with open(path, 'rb') as f:
                 raw = f.read()
@@ -584,20 +793,21 @@ class EbookViewer(MainWindow):
                     if other_amap:
                         merge_annotations(other_amap, lib_amap)
                 if lib_amap:
-                    for annot_type, annots in iteritems(lib_amap):
+                    for annot_type, annots in lib_amap.items():
                         merge_annotations(annots, amap)
         else:
-            for annot_type, annots in iteritems(calibre_book_data['annotations_map']):
+            for annot_type, annots in calibre_book_data['annotations_map'].items():
                 merge_annotations(annots, amap)
 
-    def update_window_title(self):
+    def update_window_title(self) -> None:
         try:
             title = self.current_book_data['metadata']['title']
         except Exception:
             title = _('Unknown')
         book_format = self.current_book_data['manifest']['book_format']
-        title = '{} [{}] — {}'.format(title, book_format, self.base_window_title)
+        title = f'{title} [{book_format}] — {self.base_window_title}'
         self.setWindowTitle(title)
+
     # }}}
 
     # CFI management {{{
@@ -608,16 +818,25 @@ class EbookViewer(MainWindow):
             if lrp['pos_type'] == 'epubcfi':
                 return lrp['pos']
 
-    def cfi_changed(self, cfi):
+    def cfi_changed(self, cfi) -> None:
         if not self.current_book_data:
             return
-        self.current_book_data['annotations_map']['last-read'] = [{
-            'pos': cfi, 'pos_type': 'epubcfi', 'timestamp': utcnow().isoformat()}]
+        self.current_book_data['annotations_map']['last-read'] = [{'pos': cfi, 'pos_type': 'epubcfi', 'timestamp': utcnow().isoformat()}]
         self.save_pos_timer.start()
+
+    def _on_save_pos_timer(self) -> None:
+        self.save_annotations(in_book_file=False)
+
+    def _on_last_read_pos_data(self, cfi, pos_frac) -> None:
+        if not self.current_book_data:
+            return
+        self.current_book_data['pos_frac'] = pos_frac or 0.0
+        self.save_pos_timer.start()
+
     # }}}
 
     # State serialization {{{
-    def save_annotations(self, in_book_file=True):
+    def save_annotations(self, in_book_file=True) -> None:
         if not self.current_book_data:
             return
         if self.annotations_saver is None:
@@ -626,92 +845,207 @@ class EbookViewer(MainWindow):
         self.annotations_saver.save_annotations(
             self.current_book_data,
             in_book_file and get_session_pref('save_annotations_in_ebook', default=True),
-            get_session_pref('sync_annots_user', default='')
+            get_session_pref('sync_annots_user', default=''),
         )
 
-    def highlights_changed(self, highlights):
+    def book_storage_changed(self, pathtoebook, entry) -> None:
+        if not self.current_book_data or pathtoebook != self.current_book_data.get('pathtoebook'):
+            # A change made just before a different book was opened
+            return
+        try:
+            entry = validate_book_storage(entry)
+        except InvalidBookStorage as err:
+            print(f'Ignoring invalid book storage from the book: {err}', file=sys.stderr)
+            return
+        self.current_book_data['book_storage'] = entry
+        if self.book_storage_saver is None:
+            self.book_storage_saver = BookStorageSaveWorker()
+            self.book_storage_saver.start()
+        cbd = self.current_book_data
+        self.book_storage_saver.save(
+            entry,
+            cbd['path_key'],
+            cbd['book_library_details'],
+            get_session_pref('sync_annots_user', default=''),
+            {'library_id': cbd.get('calibre_library_id'), 'book_id': cbd.get('calibre_book_id'), 'book_fmt': cbd.get('calibre_book_fmt')},
+        )
+
+    def update_reading_rates(self, rates) -> None:
         if not self.current_book_data:
             return
-        amap = self.current_book_data['annotations_map']
-        amap['highlight'] = highlights
-        self.highlights_widget.refresh(highlights)
-        self.save_annotations()
+        self.current_book_data['reading_rates'] = rates
+        self.save_reading_rates()
 
-    def save_state(self):
+    def reset_reading_rates(self) -> None:
+        if self.current_book_data:
+            self.current_book_data.pop('reading_rates', None)
+        delete_all_reading_rates()
+
+    def save_reading_rates(self) -> None:
+        if not self.current_book_data:
+            return
+        key = self.current_book_data.get('annotations_path_key')
+        rates = self.current_book_data.get('reading_rates')
+        if key and rates:
+            save_reading_rates(key, rates)
+
+    def edit_book(self, file_name, progress_frac, selected_text):
+        import subprocess
+
+        from calibre.ebooks.oeb.polish.main import SUPPORTED
+        from calibre.utils.ipc.launch import exe_path, macos_edit_book_bundle_path
+
+        path = _web_view_module._book_pathtoebook
+        if path is None:
+            return error_dialog(self, _('Cannot edit book'), _('No book is currently open'), show=True)
+        fmt = path.rpartition('.')[-1].upper().replace('ORIGINAL_', '')
+        if fmt not in SUPPORTED:
+            return error_dialog(
+                self,
+                _('Cannot edit book'),
+                _('The book must be in the {} formats to edit.\n\nFirst convert the book to one of these formats.').format(_(' or ').join(SUPPORTED)),
+                show=True,
+            )
+        exe = 'ebook-edit'
+        if ismacos:
+            exe = os.path.join(macos_edit_book_bundle_path(), exe)
+        else:
+            exe = exe_path(exe)
+        cmd = [exe] if isinstance(exe, str) else list(exe)
+        if selected_text:
+            cmd += ['--select-text', selected_text]
+        from calibre.gui2.widgets import BusyCursor
+
+        with sanitize_env_vars():
+            subprocess.Popen(cmd + [path, file_name])
+            with BusyCursor():
+                time.sleep(2)
+
+    def save_state(self) -> None:
         with vprefs:
             vprefs['main_window_state'] = bytearray(self.saveState(self.MAIN_WINDOW_STATE_VERSION))
-            vprefs['main_window_geometry'] = bytearray(self.saveGeometry())
+            self.save_geometry(vprefs, 'main_window_geometry')
 
-    def restore_state(self):
+    def restore_state(self) -> None:
         state = vprefs['main_window_state']
-        geom = vprefs['main_window_geometry']
-        if geom and get_session_pref('remember_window_geometry', default=False):
-            QApplication.instance().safe_restore_geometry(self, geom)
-        else:
-            QApplication.instance().ensure_window_on_screen(self)
+        if not get_session_pref('remember_window_geometry', default=False) or not self.restore_geometry(vprefs, 'main_window_geometry'):
+            qapplication_or_fail().ensure_window_on_screen(self)
         if state:
             self.restoreState(state, self.MAIN_WINDOW_STATE_VERSION)
             self.inspector_dock.setVisible(False)
+            if not get_session_pref('restore_docks', True):
+                for dock_def in self.dock_defs.values():
+                    d = getattr(self, '{}_dock'.format(dock_def.name.partition('-')[0]))
+                    d.setVisible(False)
 
-    def quit(self):
+    def quit(self) -> None:
         self.close()
 
-    def force_close(self):
+    def force_close(self) -> None:
         if not self.close_forced:
             self.close_forced = True
             self.quit()
 
-    def close_prep_finished(self, cfi):
+    def close_prep_finished(self, cfi) -> None:
         if cfi:
             self.cfi_changed(cfi)
         self.force_close()
 
-    def closeEvent(self, ev):
+    def request_close(self) -> None:
+        self.close()
+
+    def closeEvent(self, a0):
         if self.shutdown_done:
             return
         if self.current_book_data and self.web_view.view_is_ready and not self.close_forced:
-            ev.ignore()
+            a0.ignore()
             if not self.shutting_down:
                 self.shutting_down = True
                 QTimer.singleShot(2000, self.force_close)
                 self.web_view.prepare_for_close()
             return
         self.shutting_down = True
+        wait_for_worker = async_stop_worker()
         self.search_widget.shutdown()
         self.web_view.shutdown()
         try:
             self.save_state()
             self.save_annotations()
+            self.save_reading_rates()
             if self.annotations_saver is not None:
                 self.annotations_saver.shutdown()
                 self.annotations_saver = None
+            if self.book_storage_saver is not None:
+                self.book_storage_saver.shutdown()
+                self.book_storage_saver = None
+            if self.last_read_pos_saver is not None:
+                self.last_read_pos_saver.shutdown()
+                self.last_read_pos_saver = None
         except Exception:
             import traceback
+
             traceback.print_exc()
-        clean_running_workers()
+        wait_for_worker()
         self.shutdown_done = True
-        return MainWindow.closeEvent(self, ev)
+        return MainWindow.closeEvent(self, a0)
+
     # }}}
 
-    # Auto-hide mouse cursor  {{{
-    def setup_mouse_auto_hide(self):
-        QApplication.instance().installEventFilter(self)
+    # Auto-hide mouse cursor {{{
+    def setup_mouse_auto_hide(self) -> None:
+        qapplication_or_fail().installEventFilter(self)
         self.cursor_hidden = False
         self.hide_cursor_timer = t = QTimer(self)
         t.setSingleShot(True), t.setInterval(3000)
         t.timeout.connect(self.hide_cursor)
         t.start()
 
-    def eventFilter(self, obj, ev):
-        if ev.type() == QEvent.Type.MouseMove:
+    def eventFilter(self, a0, a1) -> bool:
+        et = a1.type()
+        if et == QEvent.Type.MouseMove:
             if self.cursor_hidden:
                 self.cursor_hidden = False
-                QApplication.instance().restoreOverrideCursor()
+                qapplication_or_fail().restoreOverrideCursor()
             self.hide_cursor_timer.start()
+        elif et == QEvent.Type.FocusIn:
+            if iswindows and a0 and a0.objectName() == 'EbookViewerClassWindow' and self.isFullScreen():
+                self.web_view.repair_after_fullscreen_switch()
         return False
 
-    def hide_cursor(self):
+    def hide_cursor(self) -> None:
         if get_session_pref('auto_hide_mouse', True):
             self.cursor_hidden = True
-            QApplication.instance().setOverrideCursor(Qt.CursorShape.BlankCursor)
+            qapplication_or_fail().setOverrideCursor(Qt.CursorShape.BlankCursor)
+
     # }}}
+
+    def highlights_changed(self, changed_annotations: list) -> None:
+        try:
+            master_map = self.current_book_data.setdefault('annotations_map', {})
+            master_map['highlight'] = changed_annotations
+            self.highlights_widget.load(changed_annotations)
+            self.save_annotations()
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+
+    def notes_edited(self, uuid, notes) -> None:
+        for h in self.current_book_data['annotations_map']['highlight']:
+            if h.get('uuid') == uuid:
+                h['notes'] = notes
+                h['timestamp'] = utcnow().isoformat()
+                break
+        else:
+            return
+        self.save_annotations()
+        self.web_view.generic_action('set-notes-in-highlight', {'uuid': uuid, 'notes': notes})
+
+    def add_notes_or_create_highlight(self, notes: str, style_name_for_new_highlight: str = '') -> None:
+        if not notes:
+            return
+        data = {
+            'style': style_definition_for_name(style_name_for_new_highlight),
+            'notes': notes,
+        }
+        self.web_view.generic_action('add-notes-or-create-highlight', data)

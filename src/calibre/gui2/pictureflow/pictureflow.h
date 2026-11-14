@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-* (C) Copyright 2007 Trolltech ASA  
+* (C) Copyright 2007 Trolltech ASA
 *  All rights reserved.
 **
 * This is version of the Pictureflow animated image show widget modified by Trolltech ASA.
@@ -59,166 +59,172 @@
 
 #include <QWidget>
 
-class FlowImages : public QObject
-{
-Q_OBJECT
+class FlowImages : public QObject {
+    Q_OBJECT
 
-public:
-	virtual int count();
-	virtual QImage image(int index);
-	virtual QString caption(int index);
+  public:
+    virtual int count();
+    virtual QImage image(int index);
+    virtual QString caption(int index);
     virtual QString subtitle(int index);
 
-signals:
-	void dataChanged();
-
+  signals:
+    void dataChanged();
 };
 
 class PictureFlowPrivate;
 
 /*!
-  Class PictureFlow implements an image show widget with animation effect 
-  like Apple's CoverFlow (in iTunes and iPod). Images are arranged in form 
-  of slides, one main slide is shown at the center with few slides on 
-  the left and right sides of the center slide. When the next or previous 
-  slide is brought to the front, the whole slides flow to the right or 
-  the right with smooth animation effect; until the new slide is finally 
+  Class PictureFlow implements an image show widget with animation effect
+  like Apple's CoverFlow (in iTunes and iPod). Images are arranged in form
+  of slides, one main slide is shown at the center with few slides on
+  the left and right sides of the center slide. When the next or previous
+  slide is brought to the front, the whole slides flow to the right or
+  the right with smooth animation effect; until the new slide is finally
   placed at the center.
 
- */ 
-class PictureFlow : public QWidget
-{
-Q_OBJECT
+ */
+class PictureFlow : public QWidget {
+    Q_OBJECT
 
-  Q_PROPERTY(int currentSlide READ currentSlide WRITE setCurrentSlide)
-  Q_PROPERTY(QSize slideSize READ slideSize WRITE setSlideSize)
-  Q_PROPERTY(QFont subtitleFont READ subtitleFont WRITE setSubtitleFont)
-  Q_PROPERTY(bool preserveAspectRatio READ preserveAspectRatio WRITE setPreserveAspectRatio)
+    Q_PROPERTY(int currentSlide READ currentSlide WRITE setCurrentSlide)
+    Q_PROPERTY(QSize slideSize READ slideSize WRITE setSlideSize)
+    Q_PROPERTY(QFont subtitleFont READ subtitleFont WRITE setSubtitleFont)
+    Q_PROPERTY(bool preserveAspectRatio READ preserveAspectRatio WRITE setPreserveAspectRatio)
+    Q_PROPERTY(bool activateOnDoubleClick READ activateOnDoubleClick WRITE setActivateOnDoubleClick)
 
-public:
-  /*!
-    Creates a new PictureFlow widget.
-  */  
-  PictureFlow(QWidget* parent = 0, int queueLength = 3);
+  public:
+    /*!
+      Creates a new PictureFlow widget.
+    */
+    PictureFlow(QWidget *parent = 0, int queueLength = 3);
 
-  /*!
-    Destroys the widget.
-  */
-  ~PictureFlow();
+    /*!
+      Destroys the widget.
+    */
+    ~PictureFlow();
 
-  /*!
-    Set the images to be displayed by this widget.
-  */
-  void setImages(FlowImages *images);
-  
-  /*!
-    Returns the dimension of each slide (in pixels).
-  */  
-  QSize slideSize() const;
+    /*!
+      Set the images to be displayed by this widget.
+    */
+    void setImages(FlowImages *images);
 
-  /*!
-    Sets the dimension of each slide (in pixels). Do not use this method directly
-    instead use resize which automatically sets an appropriate slide size.
-  */  
-  void setSlideSize(QSize size);
+    int count() const;
 
-  /*!
-    Returns whether aspect ration is preserved when scaling images
-  */  
-  bool preserveAspectRatio() const;
+    /*!
+      Returns the dimension of each slide (in pixels).
+    */
+    QSize slideSize() const;
 
-  /*!
-    Whether to preserve aspect ration when scaling images
-  */  
-  void setPreserveAspectRatio(bool preserve);
+    /*!
+      Sets the dimension of each slide (in pixels). Do not use this method directly
+      instead use resize which automatically sets an appropriate slide size.
+    */
+    void setSlideSize(QSize size);
 
-  /*!
-    Turn the reflections on/off.
-  */  
-  void setShowReflections(bool show);
-  bool showReflections() const;
+    /*!
+      Returns whether aspect ration is preserved when scaling images
+    */
+    bool preserveAspectRatio() const;
 
-  /*!
-    Returns the font used to render subtitles
-  */  
-  QFont subtitleFont() const;
+    /*!
+      Whether to preserve aspect ration when scaling images
+    */
+    void setPreserveAspectRatio(bool preserve);
 
-  /*!
-    Sets the font used to render subtitles
-  */  
-  void setSubtitleFont(QFont font);
+    /*!
+      Turn the reflections on/off.
+    */
+    void setShowReflections(bool show);
+    bool showReflections() const;
+
+    int maxFontSize() const;
+    void setMaxFontSize(int val);
+
+    /*!
+      Returns the font used to render subtitles
+    */
+    QFont subtitleFont() const;
+
+    /*!
+      Sets the font used to render subtitles
+    */
+    void setSubtitleFont(QFont font);
 
 
-  /*!
-    Clears any caches held to free up memory
-  */
-  void clearCaches();
+    /*!
+      Clears any caches held to free up memory
+    */
+    void clearCaches();
 
-  /*!
-    Returns QImage of specified slide.
-    This function will be called only whenever necessary, e.g. the 100th slide
-    will not be retrived when only the first few slides are visible.
-  */  
-  virtual QImage slide(int index) const;
+    /*!
+      Returns QImage of specified slide.
+      This function will be called only whenever necessary, e.g. the 100th slide
+      will not be retrieved when only the first few slides are visible.
+    */
+    virtual QImage slide(int index) const;
 
-  /*!
-    Returns the index of slide currently shown in the middle of the viewport.
-  */  
-  int currentSlide() const;
+    /*!
+      Returns the index of slide currently shown in the middle of the viewport.
+    */
+    int currentSlide() const;
 
-public slots:
+    bool activateOnDoubleClick() const;
+    void setActivateOnDoubleClick(bool on);
 
-  /*!
-    Sets slide to be shown in the middle of the viewport. No animation 
-    effect will be produced, unlike using showSlide.
-  */  
-  void setCurrentSlide(int index);
+  public slots:
 
-  /*!
-    Rerender the widget. Normally this function will be automatically invoked
-    whenever necessary, e.g. during the transition animation.
-  */
-  void render();
+    /*!
+      Sets slide to be shown in the middle of the viewport. No animation
+      effect will be produced, unlike using showSlide.
+    */
+    void setCurrentSlide(int index);
 
-  /*!
-    Shows previous slide using animation effect.
-  */
-  void showPrevious();
+    /*!
+      Rerender the widget. Normally this function will be automatically invoked
+      whenever necessary, e.g. during the transition animation.
+    */
+    void render();
 
-  /*!
-    Shows next slide using animation effect.
-  */
-  void showNext();
+    /*!
+      Shows previous slide using animation effect.
+    */
+    void showPrevious();
 
-  /*!
-    Go to specified slide using animation effect.
-  */
-  void showSlide(int index);
-  
-  /*!
-    Clear all caches and redraw
-  */
-  void dataChanged();
-  
-  void emitcurrentChanged(int index);
+    /*!
+      Shows next slide using animation effect.
+    */
+    void showNext();
 
-signals:
-  void itemActivated(int index);
-  void currentChanged(int index);
-  void stop(); //Emitted when the user presses the Esc key
+    /*!
+      Go to specified slide using animation effect.
+    */
+    void showSlide(int index);
 
-protected:
-  void paintEvent(QPaintEvent *event);
-  void keyPressEvent(QKeyEvent* event);
-  void mouseMoveEvent(QMouseEvent* event);
-  void mousePressEvent(QMouseEvent* event);
-  void mouseReleaseEvent(QMouseEvent* event);
-  void resizeEvent(QResizeEvent* event);
-  void timerEvent(QTimerEvent* event);
+    /*!
+      Clear all caches and redraw
+    */
+    void dataChanged();
 
-private:
-  PictureFlowPrivate* d;
-  qreal device_pixel_ratio() const;
-  qreal last_device_pixel_ratio;
+    void emitcurrentChanged(int index);
+
+  signals:
+    void itemActivated(int index);
+    void currentChanged(int index);
+    void stop(); // Emitted when the user presses the Esc key
+
+  protected:
+    void paintEvent(QPaintEvent *event);
+    void keyPressEvent(QKeyEvent *event);
+    void mouseMoveEvent(QMouseEvent *event);
+    void mousePressEvent(QMouseEvent *event);
+    void mouseReleaseEvent(QMouseEvent *event);
+    void mouseDoubleClickEvent(QMouseEvent *event);
+    void resizeEvent(QResizeEvent *event);
+    void timerEvent(QTimerEvent *event);
+
+  private:
+    PictureFlowPrivate *d;
+    qreal device_pixel_ratio() const;
+    qreal last_device_pixel_ratio;
 };
-

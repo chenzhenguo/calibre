@@ -1,27 +1,37 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2017, Kovid Goyal <kovid at kovidgoyal.net>
 
-
 import os
+from typing import TYPE_CHECKING, cast
 
 from calibre import prints
 from calibre.ebooks.metadata.book.base import field_from_string
 from calibre.ebooks.metadata.book.serialize import read_cover
 from calibre.ebooks.metadata.opf import get_metadata
 from calibre.srv.changes import metadata
-from polyglot.builtins import iteritems, unicode_type, getcwd
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Sequence
+    from optparse import Values
+
+    from calibre.db.cache import Cache
+    from calibre.db.cli.main import DBContext
+    from calibre.ebooks.metadata.book.base import FieldMetadataDict, Metadata
+    from calibre.library.field_metadata import FieldMetadata
+    from calibre.srv.changes import ChangeEvent
+    from calibre.utils.config import OptionParser
 
 readonly = False
 version = 0  # change this if you change signature of implementation()
 
 
-def implementation(db, notify_changes, action, *args):
+def implementation(db: Cache, notify_changes: Callable[[ChangeEvent], None] | None, action: str, *args: object) -> FieldMetadata | Metadata | None:
     is_remote = notify_changes is not None
     if action == 'field_metadata':
         return db.field_metadata
     if action == 'opf':
-        book_id, mi = args
+        book_id, mi = cast('tuple[int, Metadata]', args)
         with db.write_lock:
             if not db.has_id(book_id):
                 return
@@ -30,7 +40,7 @@ def implementation(db, notify_changes, action, *args):
                 notify_changes(metadata(changed_ids))
             return db.get_metadata(book_id)
     if action == 'fields':
-        book_id, fvals = args
+        book_id, fvals = cast('tuple[int, Sequence[tuple[str, object]]]', args)
         with db.write_lock:
             if not db.has_id(book_id):
                 return
@@ -41,11 +51,13 @@ def implementation(db, notify_changes, action, *args):
                     if sname:
                         mi.set(field[:-6], sname, extra=val)
                         if field == 'series_index':
+                            assert isinstance(val, (int, float))  # from field_from_string()
                             mi.series_index = val  # extra has no effect for the builtin series field
                 elif field == 'cover':
                     if is_remote:
-                        mi.cover_data = None, val[1]
+                        mi.cover_data = None, val[1]  # ty: ignore[not-subscriptable]
                     else:
+                        assert isinstance(val, str)  # a path, see main()
                         mi.cover = val
                         read_cover(mi)
                 else:
@@ -56,18 +68,18 @@ def implementation(db, notify_changes, action, *args):
             return db.get_metadata(book_id)
 
 
-def option_parser(get_parser, args):
+def option_parser(get_parser: Callable[[str], OptionParser], args: Sequence[str]) -> OptionParser:
     parser = get_parser(
         _(
             '''
-%prog set_metadata [options] id [/path/to/metadata.opf]
+%prog set_metadata [options] book_id [/path/to/metadata.opf]
 
-Set the metadata stored in the calibre database for the book identified by id
-from the OPF file metadata.opf. id is an id number from the search command. You
-can get a quick feel for the OPF format by using the --as-opf switch to the
-show_metadata command. You can also set the metadata of individual fields with
-the --field option. If you use the --field option, there is no need to specify
-an OPF file.
+Set the metadata stored in the calibre database for the book identified by
+book_id from the OPF file metadata.opf. book_id is a book id number from the
+search command. You can get a quick feel for the OPF format by using the
+--as-opf switch to the show_metadata command. You can also set the metadata of
+individual fields with the --field option. If you use the --field option, there
+is no need to specify an OPF file.
 '''
         )
     )
@@ -84,27 +96,23 @@ an OPF file.
             'en for English, fr for French and so on). For identifiers, the '
             'syntax is {0} {2}. For boolean (yes/no) fields use true and false '
             'or yes and no.'
-        ).format('--field', '--list-fields', 'identifiers:isbn:XXXX,doi:YYYYY')
+        ).format('--field', '--list-fields', 'identifiers:isbn:XXXX,doi:YYYYY'),
     )
     parser.add_option(
         '-l',
         '--list-fields',
         action='store_true',
         default=False,
-        help=_(
-            'List the metadata field names that can be used'
-            ' with the --field option'
-        )
+        help=_('List the metadata field names that can be used with the --field option'),
     )
     return parser
 
 
-def get_fields(dbctx):
-    fm = dbctx.run('set_metadata', 'field_metadata')
+def get_fields(dbctx: DBContext) -> Iterator[tuple[str, FieldMetadataDict]]:
+    fm = cast('FieldMetadata', dbctx.run('set_metadata', 'field_metadata'))
     for key in sorted(fm.all_field_keys()):
         m = fm[key]
-        if (key not in {'formats', 'series_sort', 'ondevice', 'path',
-            'last_modified'} and m['is_editable'] and m['name']):
+        if key not in {'formats', 'series_sort', 'ondevice', 'path', 'last_modified'} and m['is_editable'] and m['name']:
             yield key, m
             if m['datatype'] == 'series':
                 si = m.copy()
@@ -116,26 +124,23 @@ def get_fields(dbctx):
     yield 'cover', c
 
 
-def main(opts, args, dbctx):
+def main(opts: Values, args: list[str], dbctx: DBContext) -> int:
     if opts.list_fields:
         ans = get_fields(dbctx)
-        prints('%-40s' % _('Title'), _('Field name'), '\n')
+        prints('{:<40}'.format(_('Title')), _('Field name'), '\n')
         for key, m in ans:
-            prints('%-40s' % m['name'], key)
+            prints('{:<40}'.format(m['name']), key)
         return 0
 
-    def verify_int(x):
+    def verify_int(x: str) -> bool | None:
         try:
             int(x)
             return True
-        except:
+        except Exception:
             return False
 
     if len(args) < 1 or not verify_int(args[0]):
-        raise SystemExit(_(
-            'You must specify a record id as the '
-            'first argument'
-        ))
+        raise SystemExit(_('You must specify a record id as the first argument'))
     if len(args) < 2 and not opts.field:
         raise SystemExit(_('You must specify either a field or an OPF file'))
     book_id = int(args[0])
@@ -144,16 +149,16 @@ def main(opts, args, dbctx):
         opf = os.path.abspath(args[1])
         if not os.path.exists(opf):
             raise SystemExit(_('The OPF file %s does not exist') % opf)
-        with lopen(opf, 'rb') as stream:
+        with open(opf, 'rb') as stream:
             mi = get_metadata(stream)[0]
         if mi.cover:
-            mi.cover = os.path.join(os.path.dirname(opf), os.path.relpath(mi.cover, getcwd()))
-        final_mi = dbctx.run('set_metadata', 'opf', book_id, read_cover(mi))
+            mi.cover = os.path.join(os.path.dirname(opf), os.path.relpath(mi.cover, os.getcwd()))
+        final_mi = cast('Metadata | None', dbctx.run('set_metadata', 'opf', book_id, read_cover(mi)))
         if not final_mi:
             raise SystemExit(_('No book with id: %s in the database') % book_id)
 
     if opts.field:
-        fields = {k: v for k, v in get_fields(dbctx)}
+        fields = dict(get_fields(dbctx))
         fields['title_sort'] = fields['sort']
         vals = {}
         for x in opts.field:
@@ -161,7 +166,7 @@ def main(opts, args, dbctx):
             if field == 'sort':
                 field = 'title_sort'
             if field not in fields:
-                raise SystemExit(_('%s is not a known field' % field))
+                raise SystemExit(_('{} is not a known field').format(field))
             if field == 'cover':
                 val = dbctx.path(os.path.abspath(os.path.expanduser(val)))
             else:
@@ -169,17 +174,18 @@ def main(opts, args, dbctx):
             vals[field] = val
         fvals = []
         for field, val in sorted(  # ensure series_index fields are set last
-                iteritems(vals), key=lambda k: 1 if k[0].endswith('_index') else 0):
+            vals.items(), key=lambda k: 1 if k[0].endswith('_index') else 0
+        ):
             if field.endswith('_index'):
                 try:
-                    val = float(val)
+                    val = float(val)  # ty: ignore[invalid-argument-type]
                 except Exception:
-                    raise SystemExit('The value %r is not a valid series index' % val)
+                    raise SystemExit(_('The value {!r} is not a valid series index').format(val))
             fvals.append((field, val))
 
-        final_mi = dbctx.run('set_metadata', 'fields', book_id, fvals)
+        final_mi = cast('Metadata | None', dbctx.run('set_metadata', 'fields', book_id, fvals))
         if not final_mi:
             raise SystemExit(_('No book with id: %s in the database') % book_id)
 
-    prints(unicode_type(final_mi))
+    prints(str(final_mi))
     return 0

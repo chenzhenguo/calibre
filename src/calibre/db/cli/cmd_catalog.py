@@ -1,12 +1,23 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2017, Kovid Goyal <kovid at kovidgoyal.net>
 
-
 import os
+from typing import TYPE_CHECKING
 
 from calibre.customize.ui import available_catalog_formats, plugin_for_catalog_format
 from calibre.db.cli import integers_from_string
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from optparse import Values
+    from typing import NoReturn
+
+    from calibre.db.cache import Cache
+    from calibre.db.cli.main import DBContext
+    from calibre.srv.changes import ChangeEvent
+    from calibre.srv.handler import Context
+    from calibre.utils.config import OptionParser
 
 readonly = True
 version = 0  # change this if you change signature of implementation()
@@ -14,38 +25,24 @@ needs_srv_ctx = True
 no_remote = True
 
 
-def implementation(db, notify_changes, ctx):
+def implementation(db: Cache, notify_changes: Callable[[ChangeEvent], None] | None, ctx: Context) -> NoReturn:
     raise NotImplementedError()
 
 
-def option_parser(get_parser, args):  # {{{
+def option_parser(get_parser: Callable[[str], OptionParser], args: Sequence[str]) -> OptionParser:  # {{{
 
-    def add_plugin_parser_options(fmt, parser):
+    def add_plugin_parser_options(fmt: str, parser: OptionParser) -> None:
         # Fetch the extension-specific CLI options from the plugin
         # library.catalogs.<format>.py
         plugin = plugin_for_catalog_format(fmt)
+        assert plugin is not None  # fmt is checked against available_catalog_formats() by the caller
         p = parser.add_option_group(_('{} OPTIONS').format(fmt.upper()))
         for option in plugin.cli_options:
-            if option.action:
-                p.add_option(
-                    option.option,
-                    default=option.default,
-                    dest=option.dest,
-                    action=option.action,
-                    help=option.help
-                )
-            else:
-                p.add_option(
-                    option.option,
-                    default=option.default,
-                    dest=option.dest,
-                    help=option.help
-                )
+            p.add_option(option.option, default=option.default, dest=option.dest, action=option.action, help=option.help)
 
     # Entry point
     parser = get_parser(
-        _(
-            '''\
+        _('''\
 %prog catalog /path/to/destination.(csv|epub|mobi|xml...) [options]
 
 Export a catalog in format specified by path/to/destination extension.
@@ -53,8 +50,7 @@ Options control how entries are displayed in the generated catalog output.
 Note that different catalog formats support different sets of options. To
 see the different options, specify the name of the output file and then the
 {} option.
-'''.format('--help')
-        )
+''').format('--help')
     )
 
     # Add options common to all catalog plugins
@@ -63,11 +59,7 @@ see the different options, specify the name of the output file and then the
         '--ids',
         default=None,
         dest='ids',
-        help=_(
-            "Comma-separated list of database IDs to catalog.\n"
-            "If declared, --search is ignored.\n"
-            "Default: all"
-        )
+        help=_('Comma-separated list of database IDs to catalog.\nIf declared, --search is ignored.\nDefault: all'),
     )
     parser.add_option(
         '-s',
@@ -75,11 +67,11 @@ see the different options, specify the name of the output file and then the
         default=None,
         dest='search_text',
         help=_(
-            "Filter the results by the search query. "
-            "For the format of the search query, please see "
-            "the search-related documentation in the User Manual.\n"
-            "Default: no filtering"
-        )
+            'Filter the results by the search query. '
+            'For the format of the search query, please see '
+            'the search-related documentation in the User Manual.\n'
+            'Default: no filtering'
+        ),
     )
     parser.add_option(
         '-v',
@@ -87,9 +79,11 @@ see the different options, specify the name of the output file and then the
         default=False,
         action='store_true',
         dest='verbose',
-        help=_('Show detailed output information. Useful for debugging')
+        help=_('Show detailed output information. Useful for debugging'),
     )
     fmt = 'epub'
+    if args and args[0].startswith('-'):
+        raise SystemExit('Must specify the catalog output filename before any options')
     if args and '.' in args[0]:
         fmt = args[0].rpartition('.')[-1].lower()
         if fmt not in available_catalog_formats():
@@ -104,16 +98,14 @@ see the different options, specify the name of the output file and then the
 # }}}
 
 
-def main(opts, args, dbctx):
+def main(opts: Values, args: list[str], dbctx: DBContext) -> int:
     if len(args) < 1:
         raise SystemExit(_('You must specify a catalog output file'))
     if opts.ids:
         opts.ids = list(integers_from_string(opts.ids))
     fmt = args[0].rpartition('.')[-1].lower()
     if fmt not in available_catalog_formats():
-        raise SystemExit(
-            _('Cannot generate a catalog in the {} format').format(fmt.upper())
-        )
+        raise SystemExit(_('Cannot generate a catalog in the {} format').format(fmt.upper()))
 
     # No support for connected device in CLI environment
     # Parallel initialization in calibre.gui2.tools:generate_catalog()
@@ -127,6 +119,7 @@ def main(opts, args, dbctx):
     }
     dest = os.path.abspath(os.path.expanduser(args[0]))
     plugin = plugin_for_catalog_format(fmt)
+    assert plugin is not None  # fmt is checked against available_catalog_formats() above
     with plugin:
         plugin.run(dest, opts, dbctx.db)
     return 0

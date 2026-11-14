@@ -1,19 +1,13 @@
-# -*- coding: utf-8 -*-
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
 
-
-__license__ = 'GPL 3'
-__copyright__ = '2011, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
-
-from PyQt5.Qt import QWidget
+from qt.core import QWidget
 
 from calibre.gui2 import JSONConfig
 from calibre.gui2.store.config.search.search_widget_ui import Ui_Form
 
 
 class StoreConfigWidget(QWidget, Ui_Form):
-
-    def __init__(self, config=None):
+    def __init__(self, config=None) -> None:
         QWidget.__init__(self)
         self.setupUi(self)
 
@@ -34,7 +28,7 @@ class StoreConfigWidget(QWidget, Ui_Form):
         self.opt_cover_thread_count.setValue(self.config.get('cover_thread_count', 2))
         self.opt_details_thread_count.setValue(self.config.get('details_thread_count', 4))
 
-    def save_settings(self):
+    def save_settings(self) -> None:
         self.config['timeout'] = self.opt_timeout.value()
         self.config['hang_time'] = self.opt_hang_time.value()
         self.config['max_results'] = self.opt_max_results.value()

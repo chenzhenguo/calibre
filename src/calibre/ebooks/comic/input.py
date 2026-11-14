@@ -1,107 +1,145 @@
+# License: GPLv3 Copyright: 2008, Kovid Goyal kovid@kovidgoyal.net
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2008, Kovid Goyal kovid@kovidgoyal.net'
-__docformat__ = 'restructuredtext en'
-
-'''
+"""
 Based on ideas from comiclrf created by FangornUK.
-'''
+"""
 
-import os, traceback, time
+import os
+import time
+import traceback
+from queue import Empty
+from typing import TYPE_CHECKING, cast
 
 from calibre import extract, prints, walk
 from calibre.constants import filesystem_encoding
 from calibre.ptempfile import PersistentTemporaryDirectory
+from calibre.utils.cleantext import clean_ascii_chars
 from calibre.utils.icu import numeric_sort_key
-from calibre.utils.ipc.server import Server
 from calibre.utils.ipc.job import ParallelJob
-from polyglot.builtins import unicode_type, map
-from polyglot.queue import Empty
+from calibre.utils.ipc.server import Server
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from optparse import Values
+
+    from qt.core import QImage
 
 # If the specified screen has either dimension larger than this value, no image
 # rescaling is done (we assume that it is a tablet output profile)
 MAX_SCREEN_SIZE = 3000
 
 
-def extract_comic(path_to_comic_file):
-    '''
+def extract_comic(path_to_comic_file: str) -> str:
+    """
     Un-archive the comic file.
-    '''
+    """
     tdir = PersistentTemporaryDirectory(suffix='_comic_extract')
-    if not isinstance(tdir, unicode_type):
+    if not isinstance(tdir, str):
         # Needed in case the zip file has wrongly encoded unicode file/dir
         # names
         tdir = tdir.decode(filesystem_encoding)
     extract(path_to_comic_file, tdir)
     for x in walk(tdir):
         bn = os.path.basename(x)
-        nbn = bn.replace('#', '_')
-        if nbn != bn:
+        nbn = clean_ascii_chars(bn.replace('#', '_'))
+        if nbn and nbn != bn:
             os.rename(x, os.path.join(os.path.dirname(x), nbn))
     return tdir
 
 
-def find_pages(dir, sort_on_mtime=False, verbose=False):
-    '''
+def generate_entries_from_dir(path: str) -> dict[str, Callable[[], float]]:
+    from functools import partial
+
+    from calibre import walk
+
+    ans: dict[str, Callable[[], float]] = {}
+    for x in walk(path):
+        x = os.path.abspath(x)
+        ans[x] = partial(os.path.getmtime, x)
+    return ans
+
+
+def find_pages(dir_or_items: str | Sequence[str] | dict[str, Callable[[], float]], sort_on_mtime: bool = False, verbose: bool = False) -> list[str]:
+    """
     Find valid comic pages in a previously un-archived comic.
 
-    :param dir: Directory in which extracted comic lives
+    :param dir_or_items: Directory in which extracted comic lives or a dict of paths to function getting mtime
     :param sort_on_mtime: If True sort pages based on their last modified time.
                           Otherwise, sort alphabetically.
-    '''
-    extensions = {'jpeg', 'jpg', 'gif', 'png', 'webp'}
-    pages = []
-    for datum in os.walk(dir):
-        for name in datum[-1]:
-            path = os.path.abspath(os.path.join(datum[0], name))
-            if '__MACOSX' in path:
-                continue
-            for ext in extensions:
-                if path.lower().endswith('.'+ext):
-                    pages.append(path)
-                    break
-    sep_counts = {x.replace(os.sep, '/').count('/') for x in pages}
+    """
+    from calibre.libunzip import comic_exts
+
+    items = generate_entries_from_dir(dir_or_items) if isinstance(dir_or_items, str) else dir_or_items
+    sep_counts: set[int] = set()
+    pages: list[str] = []
+    for path in items:
+        if '__MACOSX' in path:
+            continue
+        ext = path.rpartition('.')[2].lower()
+        if ext in comic_exts:
+            sep_counts.add(path.replace('\\', '/').count('/'))
+            pages.append(path)
     # Use the full path to sort unless the files are in folders of different
     # levels, in which case simply use the filenames.
     basename = os.path.basename if len(sep_counts) > 1 else lambda x: x
     if sort_on_mtime:
-        key = lambda x:os.stat(x).st_mtime
+
+        def key(x: str) -> float:
+            return cast('dict[str, Callable[[], float]]', items)[x]()  # sort_on_mtime requires a dict of mtime getters
+
     else:
-        key = lambda x:numeric_sort_key(basename(x))
+
+        def key(x: str) -> bytes:
+            return numeric_sort_key(basename(x))
 
     pages.sort(key=key)
     if verbose:
         prints('Found comic pages...')
-        prints('\t'+'\n\t'.join([os.path.relpath(p, dir) for p in pages]))
+        try:
+            base = os.path.commonpath(pages)
+        except ValueError:
+            pass
+        else:
+            prints('\t' + '\n\t'.join([os.path.relpath(p, base) for p in pages]))
     return pages
 
 
-class PageProcessor(list):  # {{{
-
-    '''
+class PageProcessor(list[str]):  # {{{
+    """
     Contains the actual image rendering logic. See :method:`render` and
     :method:`process_pages`.
-    '''
+    """
 
-    def __init__(self, path_to_page, dest, opts, num):
+    def __init__(self, path_to_page: str, dest: str, opts: Values, num: int) -> None:
         list.__init__(self)
         self.path_to_page = path_to_page
-        self.opts         = opts
-        self.num          = num
-        self.dest         = dest
-        self.rotate       = False
+        self.opts = opts
+        self.num = num
+        self.dest = dest
+        self.rotate = False
+        self.src_img_was_grayscale = False
+        self.src_img_format: QImage.Format | None = None
         self.render()
 
-    def render(self):
-        from calibre.utils.img import image_from_data, scale_image, crop_image
-        with lopen(self.path_to_page, 'rb') as f:
+    def render(self) -> None:
+        from qt.core import QImage
+
+        from calibre.utils.filenames import make_long_path_useable
+        from calibre.utils.img import crop_image, image_from_data, scale_image
+
+        with open(make_long_path_useable(self.path_to_page), 'rb') as f:
             img = image_from_data(f.read())
         width, height = img.width(), img.height()
         if self.num == 0:  # First image so create a thumbnail from it
-            with lopen(os.path.join(self.dest, 'thumbnail.png'), 'wb') as f:
+            with open(os.path.join(self.dest, 'thumbnail.png'), 'wb') as f:
                 f.write(scale_image(img, as_png=True)[-1])
-        self.pages = [img]
+        self.src_img_format = img.format()
+        self.src_img_was_grayscale = self.src_img_format in (
+            QImage.Format.Format_Grayscale8,
+            QImage.Format.Format_Grayscale16,
+        ) or (img.format() == QImage.Format.Format_Indexed8 and img.allGray())
+        self.pages: list[QImage] = [img]
         if width > height:
             if self.opts.landscape:
                 self.rotate = True
@@ -112,12 +150,21 @@ class PageProcessor(list):  # {{{
                 self.pages = [split2, split1] if self.opts.right2left else [split1, split2]
         self.process_pages()
 
-    def process_pages(self):
+    def process_pages(self) -> None:
+        from qt.core import QImage
+
         from calibre.utils.img import (
-            image_to_data, rotate_image, remove_borders_from_image, normalize_image,
-            add_borders_to_image, resize_image, gaussian_sharpen_image, grayscale_image,
-            despeckle_image, quantize_image
+            add_borders_to_image,
+            despeckle_image,
+            gaussian_sharpen_image,
+            image_to_data,
+            normalize_image,
+            quantize_image,
+            remove_borders_from_image,
+            resize_image,
+            rotate_image,
         )
+
         for i, img in enumerate(self.pages):
             if self.rotate:
                 img = rotate_image(img, -90)
@@ -134,9 +181,8 @@ class PageProcessor(list):  # {{{
 
             try:
                 if self.opts.comic_image_size:
-                    SCRWIDTH, SCRHEIGHT = map(int, [x.strip() for x in
-                        self.opts.comic_image_size.split('x')])
-            except:
+                    SCRWIDTH, SCRHEIGHT = map(int, [x.strip() for x in self.opts.comic_image_size.split('x')])
+            except Exception:
                 pass  # Ignore
 
             if self.opts.keep_aspect_ratio:
@@ -180,41 +226,56 @@ class PageProcessor(list):  # {{{
                     # to leave it as original size
                     img = resize_image(img, newsizex, newsizey)
                     img = add_borders_to_image(img, left=deltax, right=deltax, top=deltay, bottom=deltay)
-            else:
-                if SCRWIDTH < MAX_SCREEN_SIZE and SCRHEIGHT < MAX_SCREEN_SIZE:
-                    img = resize_image(img, SCRWIDTH, SCRHEIGHT)
+            elif SCRWIDTH < MAX_SCREEN_SIZE and SCRHEIGHT < MAX_SCREEN_SIZE:
+                img = resize_image(img, SCRWIDTH, SCRHEIGHT)
 
             if not self.opts.dont_sharpen:
                 img = gaussian_sharpen_image(img, 0.0, 1.0)
 
-            if not self.opts.dont_grayscale:
-                img = grayscale_image(img)
-
             if self.opts.despeckle:
                 img = despeckle_image(img)
 
-            if self.opts.output_format.lower() == 'png' and self.opts.colors:
-                img = quantize_image(img, max_colors=min(256, self.opts.colors))
-            dest = '%d_%d.%s'%(self.num, i, self.opts.output_format)
+            img_is_grayscale = self.src_img_was_grayscale
+            if not self.opts.dont_grayscale:
+                img = img.convertToFormat(QImage.Format.Format_Grayscale16)
+                img_is_grayscale = True
+
+            if self.opts.output_format.lower() == 'png':
+                if self.opts.colors:
+                    img = quantize_image(img, max_colors=min(256, self.opts.colors))
+                elif img_is_grayscale:
+                    uses_256_colors = self.src_img_format in (
+                        QImage.Format.Format_Indexed8,
+                        QImage.Format.Format_Grayscale8,
+                    )
+                    final_fmt = QImage.Format.Format_Indexed8 if uses_256_colors else QImage.Format.Format_Grayscale16
+                    if img.format() != final_fmt:
+                        img = img.convertToFormat(final_fmt)
+            dest = f'{self.num}_{i}.{self.opts.output_format}'
             dest = os.path.join(self.dest, dest)
-            with lopen(dest, 'wb') as f:
+            with open(dest, 'wb') as f:
                 f.write(image_to_data(img, fmt=self.opts.output_format))
             self.append(dest)
+
+
 # }}}
 
 
-def render_pages(tasks, dest, opts, notification=lambda x, y: x):
-    '''
+def render_pages(
+    tasks: list[tuple[int, str]], dest: str, opts: Values, notification: Callable[[float, str], object] = lambda x, y: x
+) -> tuple[list[str], list[str]]:
+    """
     Entry point for the job server.
-    '''
-    failures, pages = [], []
+    """
+    failures: list[str] = []
+    pages: list[str] = []
     for num, path in tasks:
         try:
             pages.extend(PageProcessor(path, dest, opts, num))
-            msg = _('Rendered %s')%path
-        except:
+            msg = _('Rendered %s') % path
+        except Exception:
             failures.append(path)
-            msg = _('Failed %s')%path
+            msg = _('Failed %s') % path
             if opts.verbose:
                 msg += '\n' + traceback.format_exc()
         prints(msg)
@@ -223,31 +284,29 @@ def render_pages(tasks, dest, opts, notification=lambda x, y: x):
     return pages, failures
 
 
-class Progress(object):
-
-    def __init__(self, total, update):
-        self.total  = total
+class Progress:
+    def __init__(self, total: int, update: Callable[[float, str], object]) -> None:
+        self.total = total
         self.update = update
-        self.done   = 0
+        self.done = 0
 
-    def __call__(self, percent, msg=''):
+    def __call__(self, percent: object, msg: str = '') -> None:
         self.done += 1
         # msg = msg%os.path.basename(job.args[0])
-        self.update(float(self.done)/self.total, msg)
+        self.update(float(self.done) / self.total, msg)
 
 
-def process_pages(pages, opts, update, tdir):
-    '''
+def process_pages(pages: list[str], opts: Values, update: Callable[[float, str], object], tdir: str) -> tuple[list[str], list[str]]:
+    """
     Render all identified comic pages.
-    '''
+    """
     progress = Progress(len(pages), update)
     server = Server()
-    jobs = []
+    jobs: list[ParallelJob] = []
     tasks = [(p, os.path.join(tdir, os.path.basename(p))) for p in pages]
     tasks = server.split(pages)
     for task in tasks:
-        jobs.append(ParallelJob('render_pages', '', progress,
-                                args=[task, tdir, opts]))
+        jobs.append(ParallelJob('render_pages', '', progress, args=[task, tdir, opts]))
         server.add_job(jobs[-1])
     while True:
         time.sleep(1)
@@ -265,12 +324,12 @@ def process_pages(pages, opts, update, tdir):
         if not running:
             break
     server.close()
-    ans, failures = [], []
+    ans: list[str] = []
+    failures: list[str] = []
 
     for job in jobs:
         if job.failed or job.result is None:
-            raise Exception(_('Failed to process comic: \n\n%s')%
-                    job.log_file.read())
+            raise Exception(_('Failed to process comic: \n\n%s') % job.log_file.read())
         pages, failures_ = job.result
         ans += pages
         failures += failures_

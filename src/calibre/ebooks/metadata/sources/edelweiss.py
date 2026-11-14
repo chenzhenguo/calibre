@@ -1,45 +1,76 @@
 #!/usr/bin/env python
 # vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
-from __future__ import absolute_import, division, print_function, unicode_literals
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
-__license__   = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# annotations: the source plugins are downloaded and run by older calibre versions
+# using older Python, so annotations must not be evaluated at runtime
+from __future__ import absolute_import, annotations, division, print_function, unicode_literals
 
-import time, re
+import re
+import time
 from threading import Thread
+from typing import TYPE_CHECKING, cast
+
 try:
     from queue import Empty, Queue
+
+    from calibre.utils.localization import _
 except ImportError:
-    from Queue import Empty, Queue
+    from Queue import Empty, Queue  # type: ignore
 
 from calibre import as_unicode, random_user_agent
 from calibre.ebooks.metadata import check_isbn
 from calibre.ebooks.metadata.sources.base import Source
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+    from datetime import datetime
+    from threading import Event
+    from typing import TypedDict
 
-def clean_html(raw):
+    from lxml.etree import _Element
+
+    from calibre.ebooks.metadata.book.base import Metadata
+    from calibre.ebooks.metadata.sources.base import BookURL, CoverQueue, Identifiers, IdentifyQueue
+    from calibre.ebooks.metadata.sources.test import IdentifyTest
+    from calibre.utils.browser import Browser
+    from calibre.utils.logging import Log
+
+    class BasicData(TypedDict):
+        sku: str
+        cover: str | None
+        publisher: str
+        title: str
+        authors: list[str]
+        isbns: list[str]
+        tags: list[str]
+        pubdate: datetime | None
+        format: str
+        rating: float
+
+
+def clean_html(raw: str | bytes) -> str:
     from calibre.ebooks.chardet import xml_to_unicode
     from calibre.utils.cleantext import clean_ascii_chars
-    return clean_ascii_chars(xml_to_unicode(raw, strip_encoding_pats=True,
-                                resolve_entities=True, assume_utf8=True)[0])
+
+    return clean_ascii_chars(xml_to_unicode(raw, strip_encoding_pats=True, resolve_entities=True, assume_utf8=True)[0])
 
 
-def parse_html(raw):
+def parse_html(raw: str | bytes) -> _Element:
     raw = clean_html(raw)
     from html5_parser import parse
+
     return parse(raw)
 
 
-def astext(node):
+def astext(node: _Element) -> str:
     from lxml import etree
-    return etree.tostring(node, method='text', encoding='unicode',
-                          with_tail=False).strip()
+
+    return etree.tostring(node, method='text', encoding='unicode', with_tail=False).strip()
 
 
 class Worker(Thread):  # {{{
-
-    def __init__(self, basic_data, relevance, result_queue, br, timeout, log, plugin):
+    def __init__(self, basic_data: BasicData, relevance: int, result_queue: IdentifyQueue, br: Browser, timeout: float, log: Log, plugin: Edelweiss) -> None:
         Thread.__init__(self)
         self.daemon = True
         self.basic_data = basic_data
@@ -47,13 +78,14 @@ class Worker(Thread):  # {{{
         self.result_queue, self.plugin, self.sku = result_queue, plugin, self.basic_data['sku']
         self.relevance = relevance
 
-    def run(self):
-        url = ('https://www.edelweiss.plus/GetTreelineControl.aspx?controlName=/uc/product/two_Enhanced.ascx&'
-        'sku={0}&idPrefix=content_1_{0}&mode=0'.format(self.sku))
+    def run(self) -> None:
+        url = 'https://www.edelweiss.plus/GetTreelineControl.aspx?controlName=/uc/product/two_Enhanced.ascx&sku={0}&idPrefix=content_1_{0}&mode=0'.format(
+            self.sku
+        )
         try:
             raw = self.br.open_novisit(url, timeout=self.timeout).read()
-        except:
-            self.log.exception('Failed to load comments page: %r'%url)
+        except Exception:
+            self.log.exception('Failed to load comments page: %r' % url)
             return
 
         try:
@@ -61,12 +93,13 @@ class Worker(Thread):  # {{{
             mi.source_relevance = self.relevance
             self.plugin.clean_downloaded_metadata(mi)
             self.result_queue.put(mi)
-        except:
-            self.log.exception('Failed to parse details for sku: %s'%self.sku)
+        except Exception:
+            self.log.exception('Failed to parse details for sku: %s' % self.sku)
 
-    def parse(self, raw):
+    def parse(self, raw: bytes) -> Metadata:
         from calibre.ebooks.metadata.book.base import Metadata
         from calibre.utils.date import UNDEFINED_DATE
+
         root = parse_html(raw)
         mi = Metadata(self.basic_data['title'], self.basic_data['authors'])
 
@@ -104,47 +137,53 @@ class Worker(Thread):  # {{{
         mi.has_cover = self.plugin.cached_identifier_to_cover_url(self.sku) is not None
         return mi
 
-    def render_comments(self, desc):
+    def render_comments(self, desc: _Element) -> str:
         from lxml import etree
+
         from calibre.library.comments import sanitize_comments_html
+
         for c in desc.xpath('descendant::noscript'):
             c.getparent().remove(c)
         for a in desc.xpath('descendant::a[@href]'):
             del a.attrib['href']
             a.tag = 'span'
-        desc = etree.tostring(desc, method='html', encoding='unicode').strip()
+        html = etree.tostring(desc, method='html', encoding='unicode').strip()
 
         # remove all attributes from tags
-        desc = re.sub(r'<([a-zA-Z0-9]+)\s[^>]+>', r'<\1>', desc)
+        html = re.sub(r'<([a-zA-Z0-9]+)\s[^>]+>', r'<\1>', html)
         # Collapse whitespace
-        # desc = re.sub('\n+', '\n', desc)
-        # desc = re.sub(' +', ' ', desc)
+        # html = re.sub(r'\n+', '\n', html)
+        # html = re.sub(r' +', ' ', html)
         # Remove comments
-        desc = re.sub(r'(?s)<!--.*?-->', '', desc)
-        return sanitize_comments_html(desc)
+        html = re.sub(r'(?s)<!--.*?-->', '', html)
+        return sanitize_comments_html(html)
+
+
 # }}}
 
 
-def get_basic_data(browser, log, *skus):
-    from calibre.utils.date import parse_only_date
+def get_basic_data(browser: Browser, log: Log, *skus: str) -> Iterator[BasicData]:
     from mechanize import Request
+
+    from calibre.utils.date import parse_only_date
+
     zeroes = ','.join('0' for sku in skus)
     data = {
-            'skus': ','.join(skus),
-            'drc': zeroes,
-            'startPosition': '0',
-            'sequence': '1',
-            'selected': zeroes,
-            'itemID': '0',
-            'orderID': '0',
-            'mailingID': '',
-            'tContentWidth': '926',
-            'originalOrder': ','.join(type('')(i) for i in range(len(skus))),
-            'selectedOrderID': '0',
-            'selectedSortColumn': '0',
-            'listType': '1',
-            'resultType': '32',
-            'blockView': '1',
+        'skus': ','.join(skus),
+        'drc': zeroes,
+        'startPosition': '0',
+        'sequence': '1',
+        'selected': zeroes,
+        'itemID': '0',
+        'orderID': '0',
+        'mailingID': '',
+        'tContentWidth': '926',
+        'originalOrder': ','.join(type('')(i) for i in range(len(skus))),
+        'selectedOrderID': '0',
+        'selectedSortColumn': '0',
+        'listType': '1',
+        'resultType': '32',
+        'blockView': '1',
     }
     items_data_url = 'https://www.edelweiss.plus/GetTreelineControl.aspx?controlName=/uc/listviews/ListView_Title_Multi.ascx'
     req = Request(items_data_url, data)
@@ -160,32 +199,34 @@ def get_basic_data(browser, log, *skus):
             tags = [x.strip() for x in astext(row.xpath('descendant::*[contains(@class, "pev_categories")]')[0]).split('/')]
         except IndexError:
             tags = []
-        rating = 0
+        rating: float = 0
         for bar in row.xpath('descendant::*[contains(@class, "bgdColorCommunity")]/@style'):
             m = re.search(r'width: (\d+)px;.*max-width: (\d+)px', bar)
             if m is not None:
                 rating = float(m.group(1)) / float(m.group(2))
                 break
         try:
-            pubdate = parse_only_date(astext(row.xpath('descendant::*[contains(@class, "pev_shipDate")]')[0]
-                ).split(':')[-1].split(u'\xa0')[-1].strip(), assume_utc=True)
+            pubdate = parse_only_date(
+                astext(row.xpath('descendant::*[contains(@class, "pev_shipDate")]')[0]).split(':')[-1].split('\xa0')[-1].strip(),
+                assume_utc=True,
+            )
         except Exception:
             log.exception('Error parsing published date')
             pubdate = None
-        authors = []
+        authors: list[str] = []
         for x in [x.strip() for x in row.xpath('descendant::*[contains(@class, "pev_contributor")]/@title')]:
             authors.extend(a.strip() for a in x.split(','))
-        entry = {
-                'sku': sku,
-                'cover': row.xpath('descendant::img/@src')[0].split('?')[0],
-                'publisher': astext(row.xpath('descendant::*[contains(@class, "headerPublisher")]')[0]),
-                'title': astext(row.xpath('descendant::*[@id="title_{}"]'.format(sku))[0]),
-                'authors': authors,
-                'isbns': isbns,
-                'tags': tags,
-                'pubdate': pubdate,
-                'format': ' '.join(row.xpath('descendant::*[contains(@class, "pev_format")]/text()')).strip(),
-                'rating': rating,
+        entry: BasicData = {
+            'sku': sku,
+            'cover': row.xpath('descendant::img/@src')[0].split('?')[0],
+            'publisher': astext(row.xpath('descendant::*[contains(@class, "headerPublisher")]')[0]),
+            'title': astext(row.xpath('descendant::*[@id="title_{}"]'.format(sku))[0]),
+            'authors': authors,
+            'isbns': isbns,
+            'tags': tags,
+            'pubdate': pubdate,
+            'format': ' '.join(row.xpath('descendant::*[contains(@class, "pev_format")]/text()')).strip(),
+            'rating': rating,
         }
         if entry['cover'].startswith('/'):
             entry['cover'] = None
@@ -193,53 +234,67 @@ def get_basic_data(browser, log, *skus):
 
 
 class Edelweiss(Source):
-
     name = 'Edelweiss'
-    version = (2, 0, 1)
+    version = (2, 0, 2)
     minimum_calibre_version = (3, 6, 0)
     description = _('Downloads metadata and covers from Edelweiss - A catalog updated by book publishers')
 
     capabilities = frozenset(['identify', 'cover'])
     touched_fields = frozenset([
-        'title', 'authors', 'tags', 'pubdate', 'comments', 'publisher',
-        'identifier:isbn', 'identifier:edelweiss', 'rating'])
+        'title',
+        'authors',
+        'tags',
+        'pubdate',
+        'comments',
+        'publisher',
+        'identifier:isbn',
+        'identifier:edelweiss',
+        'rating',
+    ])
     supports_gzip_transfer_encoding = True
     has_html_comments = True
 
     @property
-    def user_agent(self):
+    def user_agent(self) -> str:
         # Pass in an index to random_user_agent() to test with a particular
         # user agent
         return random_user_agent(allow_ie=False)
 
-    def _get_book_url(self, sku):
+    def _get_book_url(self, sku: str | None) -> str | None:
         if sku:
             return 'https://www.edelweiss.plus/#sku={}&page=1'.format(sku)
 
-    def get_book_url(self, identifiers):  # {{{
+    def get_book_url(self, identifiers: Identifiers) -> BookURL | None:  # {{{
         sku = identifiers.get('edelweiss', None)
         if sku:
-            return 'edelweiss', sku, self._get_book_url(sku)
+            # _get_book_url() only returns None for an empty sku
+            return 'edelweiss', sku, cast('str', self._get_book_url(sku))
 
     # }}}
 
-    def get_cached_cover_url(self, identifiers):  # {{{
+    def get_cached_cover_url(self, identifiers: Identifiers) -> str | None:  # {{{
         sku = identifiers.get('edelweiss', None)
         if not sku:
             isbn = identifiers.get('isbn', None)
             if isbn is not None:
                 sku = self.cached_isbn_to_identifier(isbn)
         return self.cached_identifier_to_cover_url(sku)
+
     # }}}
 
-    def create_query(self, log, title=None, authors=None, identifiers={}):
+    def create_query(self, log: Log, title: str | None = None, authors: Sequence[str] | None = None, identifiers: Identifiers | None = None) -> str | None:
+        if identifiers is None:
+            identifiers = {}
         try:
             from urllib.parse import urlencode
         except ImportError:
-            from urllib import urlencode
+            from urllib import urlencode  # type: ignore
         import time
-        BASE_URL = ('https://www.edelweiss.plus/GetTreelineControl.aspx?'
-        'controlName=/uc/listviews/controls/ListView_data.ascx&itemID=0&resultType=32&dashboardType=8&itemType=1&dataType=products&keywordSearch&')
+
+        BASE_URL = (
+            'https://www.edelweiss.plus/GetTreelineControl.aspx?'
+            'controlName=/uc/listviews/controls/ListView_data.ascx&itemID=0&resultType=32&dashboardType=8&itemType=1&dataType=products&keywordSearch&'
+        )
         keywords = []
         isbn = check_isbn(identifiers.get('isbn', None))
         if isbn is not None:
@@ -248,23 +303,28 @@ class Edelweiss(Source):
             title_tokens = list(self.get_title_tokens(title))
             if title_tokens:
                 keywords.extend(title_tokens)
-            author_tokens = self.get_author_tokens(authors, only_first_author=True)
-            if author_tokens:
-                keywords.extend(author_tokens)
+            keywords.extend(self.get_author_tokens(authors, only_first_author=True))
         if not keywords:
             return None
-        params = {
-            'q': (' '.join(keywords)).encode('utf-8'),
-            '_': type('')(int(time.time()))
-        }
-        return BASE_URL+urlencode(params)
+        params = {'q': (' '.join(keywords)).encode('utf-8'), '_': type('')(int(time.time()))}
+        return BASE_URL + urlencode(params)
 
     # }}}
 
-    def identify(self, log, result_queue, abort, title=None, authors=None,  # {{{
-            identifiers={}, timeout=30):
+    def identify(
+        self,
+        log: Log,
+        result_queue: IdentifyQueue,
+        abort: Event,
+        title: str | None = None,
+        authors: Sequence[str] | None = None,  # {{{
+        identifiers: Identifiers | None = None,
+        timeout: float = 30,
+    ) -> str | None:
         import json
 
+        if identifiers is None:
+            identifiers = {}
         br = self.browser
         br.addheaders = [
             ('Referer', 'https://www.edelweiss.plus/'),
@@ -277,8 +337,7 @@ class Edelweiss(Source):
         else:
             log.error('Currently Edelweiss returns random books for search queries')
             return
-            query = self.create_query(log, title=title, authors=authors,
-                    identifiers=identifiers)
+            query = self.create_query(log, title=title, authors=authors, identifiers=identifiers)
             if not query:
                 log.error('Insufficient metadata to construct query')
                 return
@@ -286,7 +345,7 @@ class Edelweiss(Source):
             try:
                 raw = br.open(query, timeout=timeout).read().decode('utf-8')
             except Exception as e:
-                log.exception('Failed to make identify query: %r'%query)
+                log.exception('Failed to make identify query: %r' % query)
                 return as_unicode(e)
             items = re.search(r'window[.]items\s*=\s*(.+?);', raw)
             if items is None:
@@ -296,10 +355,8 @@ class Edelweiss(Source):
                 return
             items = json.loads(items.group(1))
 
-        if (not items and identifiers and title and authors and
-                not abort.is_set()):
-            return self.identify(log, result_queue, abort, title=title,
-                    authors=authors, timeout=timeout)
+        if not items and identifiers and title and authors and not abort.is_set():
+            return self.identify(log, result_queue, abort, title=title, authors=authors, timeout=timeout)
 
         if not items:
             return
@@ -338,24 +395,33 @@ class Edelweiss(Source):
 
     # }}}
 
-    def download_cover(self, log, result_queue, abort,  # {{{
-            title=None, authors=None, identifiers={}, timeout=30, get_best_cover=False):
+    def download_cover(
+        self,
+        log: Log,
+        result_queue: CoverQueue,
+        abort: Event,  # {{{
+        title: str | None = None,
+        authors: Sequence[str] | None = None,
+        identifiers: Identifiers | None = None,
+        timeout: float = 30,
+        get_best_cover: bool = False,
+    ) -> None:
+        if identifiers is None:
+            identifiers = {}
         cached_url = self.get_cached_cover_url(identifiers)
         if cached_url is None:
             log.info('No cached cover found, running identify')
-            rq = Queue()
-            self.identify(log, rq, abort, title=title, authors=authors,
-                    identifiers=identifiers)
+            rq: IdentifyQueue = Queue()
+            self.identify(log, rq, abort, title=title, authors=authors, identifiers=identifiers)
             if abort.is_set():
                 return
-            results = []
+            results: list[Metadata] = []
             while True:
                 try:
                     results.append(rq.get_nowait())
                 except Empty:
                     break
-            results.sort(key=self.identify_results_keygen(
-                title=title, authors=authors, identifiers=identifiers))
+            results.sort(key=self.identify_results_keygen(title=title, authors=authors, identifiers=identifiers))
             for mi in results:
                 cached_url = self.get_cached_cover_url(mi.identifiers)
                 if cached_url is not None:
@@ -371,37 +437,48 @@ class Edelweiss(Source):
         try:
             cdata = br.open_novisit(cached_url, timeout=timeout).read()
             result_queue.put((self, cdata))
-        except:
+        except Exception:
             log.exception('Failed to download cover from:', cached_url)
+
     # }}}
 
 
 if __name__ == '__main__':
-    from calibre.ebooks.metadata.sources.test import (
-        test_identify_plugin, title_test, authors_test, comments_test, pubdate_test)
-    tests = [
+    from calibre.ebooks.metadata.sources.test import authors_test, comments_test, pubdate_test, test_identify_plugin, title_test
+
+    tests: list[IdentifyTest] = [
         (  # A title and author search
-         {'title': 'The Husband\'s Secret', 'authors':['Liane Moriarty']},
-         [title_test('The Husband\'s Secret', exact=True),
-                authors_test(['Liane Moriarty'])]
+            {'title': "The Husband's Secret", 'authors': ['Liane Moriarty']},
+            [title_test("The Husband's Secret", exact=True), authors_test(['Liane Moriarty'])],
         ),
-
         (  # An isbn present in edelweiss
-         {'identifiers':{'isbn': '9780312621360'}, },
-         [title_test('Flame: A Sky Chasers Novel', exact=True),
-                authors_test(['Amy Kathleen Ryan'])]
+            {
+                'identifiers': {'isbn': '9780312621360'},
+            },
+            [title_test('Flame: A Sky Chasers Novel', exact=True), authors_test(['Amy Kathleen Ryan'])],
         ),
-
         # Multiple authors and two part title and no general description
-        ({'identifiers':{'edelweiss':'0321180607'}},
-        [title_test(
-        "XQuery From the Experts: A Guide to the W3C XML Query Language"
-        , exact=True), authors_test([
-            'Howard Katz', 'Don Chamberlin', 'Denise Draper', 'Mary Fernandez',
-            'Michael Kay', 'Jonathan Robie', 'Michael Rys', 'Jerome Simeon',
-            'Jim Tivy', 'Philip Wadler']), pubdate_test(2003, 8, 22),
-            comments_test('Jérôme Siméon'), lambda mi: bool(mi.comments and 'No title summary' not in mi.comments)
-        ]),
+        (
+            {'identifiers': {'edelweiss': '0321180607'}},
+            [
+                title_test('XQuery From the Experts: A Guide to the W3C XML Query Language', exact=True),
+                authors_test([
+                    'Howard Katz',
+                    'Don Chamberlin',
+                    'Denise Draper',
+                    'Mary Fernandez',
+                    'Michael Kay',
+                    'Jonathan Robie',
+                    'Michael Rys',
+                    'Jerome Simeon',
+                    'Jim Tivy',
+                    'Philip Wadler',
+                ]),
+                pubdate_test(2003, 8, 22),
+                comments_test('Jérôme Siméon'),
+                lambda mi: bool(mi.comments and 'No title summary' not in mi.comments),
+            ],
+        ),
     ]
     start, stop = 0, len(tests)
 

@@ -1,10 +1,5 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2011, Kovid Goyal <kovid@kovidgoyal.net>
 
 import struct
 
@@ -17,30 +12,49 @@ class NoRaster(Exception):
     pass
 
 
-class DIBHeader(object):
-
-    '''
+class DIBHeader:
+    """
     See http://en.wikipedia.org/wiki/BMP_file_format
-    '''
+    """
 
-    def __init__(self, raw):
+    header_size: int
+    width: int
+    height: int
+    color_planes: int
+    bits_per_pixel: int
+    compression: int
+    image_size: int
+    hres: int
+    vres: int
+    ncols: int
+    nimpcols: int
+    bitmasks_size: int
+    color_table_size: int
+
+    def __init__(self, raw: bytes) -> None:
         hsize = struct.unpack(b'<I', raw[:4])[0]
         if hsize == 40:
             parts = struct.unpack(b'<IiiHHIIIIII', raw[:hsize])
             for i, attr in enumerate((
-                'header_size', 'width', 'height', 'color_planes',
-                'bits_per_pixel', 'compression', 'image_size',
-                'hres', 'vres', 'ncols', 'nimpcols'
-                )):
+                'header_size',
+                'width',
+                'height',
+                'color_planes',
+                'bits_per_pixel',
+                'compression',
+                'image_size',
+                'hres',
+                'vres',
+                'ncols',
+                'nimpcols',
+            )):
                 setattr(self, attr, parts[i])
         elif hsize == 12:
             parts = struct.unpack(b'<IHHHH', raw[:hsize])
-            for i, attr in enumerate((
-                'header_size', 'width', 'height', 'color_planes',
-                'bits_per_pixel')):
+            for i, attr in enumerate(('header_size', 'width', 'height', 'color_planes', 'bits_per_pixel')):
                 setattr(self, attr, parts[i])
         else:
-            raise ValueError('Unsupported DIB header type of size: %d'%hsize)
+            raise ValueError(f'Unsupported DIB header type of size: {hsize}')
 
         self.bitmasks_size = 12 if getattr(self, 'compression', 0) == 3 else 0
         self.color_table_size = 0
@@ -50,18 +64,17 @@ class DIBHeader(object):
             self.color_table_size = getattr(self, 'ncols', 0) * 4
 
 
-def create_bmp_from_dib(raw):
+def create_bmp_from_dib(raw: bytes) -> bytes:
     size = len(raw) + 14
     dh = DIBHeader(raw)
-    pixel_array_offset = dh.header_size + dh.bitmasks_size + \
-                            dh.color_table_size
-    parts = [b'BM', struct.pack(b'<I', size), b'\0'*4, struct.pack(b'<I',
-        pixel_array_offset)]
+    pixel_array_offset = dh.header_size + dh.bitmasks_size + dh.color_table_size
+    parts = [b'BM', struct.pack(b'<I', size), b'\0' * 4, struct.pack(b'<I', pixel_array_offset)]
     return b''.join(parts) + raw
 
 
-def to_png(bmp):
-    from PyQt5.Qt import QImage, QByteArray, QBuffer, QIODevice
+def to_png(bmp: bytes) -> bytes:
+    from qt.core import QBuffer, QByteArray, QImage, QIODevice
+
     i = QImage()
     if not i.loadFromData(bmp):
         raise ValueError('Invalid image data')

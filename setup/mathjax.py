@@ -1,25 +1,23 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
 
 
-__license__   = 'GPL v3'
+__license__ = 'GPL v3'
 __copyright__ = '2012, Kovid Goyal <kovid at kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
-import os, json
+import json
+import os
 from hashlib import sha1
-
 
 from setup.revendor import ReVendor
 
 
 class MathJax(ReVendor):
-
     description = 'Create the MathJax bundle'
     NAME = 'mathjax'
     TAR_NAME = 'MathJax'
-    VERSION = '3.0.5'
-    DOWNLOAD_URL = 'https://github.com/mathjax/MathJax/archive/%s.tar.gz' % VERSION
+    VERSION = '3.1.4'
+    DOWNLOAD_URL = f'https://github.com/mathjax/MathJax/archive/{VERSION}.tar.gz'
 
     def add_file_pre(self, name, raw):
         self.h.update(raw)
@@ -48,8 +46,7 @@ class MathJax(ReVendor):
             self.info('Adding MathJax...')
             for x in 'core loader startup input/tex-full input/asciimath input/mml input/mml/entities output/chtml'.split():
                 self.add_file(self.j(src, x + '.js'), x + '.js')
-            self.add_tree(
-                self.j(src, 'output', 'chtml'), 'output/chtml')
+            self.add_tree(self.j(src, 'output', 'chtml'), 'output/chtml')
             etag = self.h.hexdigest()
             with open(self.j(self.RESOURCES, 'mathjax', 'manifest.json'), 'wb') as f:
                 f.write(json.dumps({'etag': etag, 'files': self.mathjax_files, 'version': self.VERSION}, indent=2).encode('utf-8'))

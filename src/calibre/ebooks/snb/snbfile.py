@@ -1,55 +1,68 @@
-# -*- coding: utf-8 -*-
+# License: GPLv3 Copyright: 2010, Li Fanxi <lifanxi@freemindworld.com>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2010, Li Fanxi <lifanxi@freemindworld.com>'
-__docformat__ = 'restructuredtext en'
-
-import sys, struct, zlib, bz2, os
+import os
+import struct
+import sys
+from compression import bz2, zlib
+from typing import IO, cast
 
 from calibre import guess_type
-from polyglot.builtins import unicode_type
+from calibre.utils import StreamOrPath
 
 
 class FileStream:
+    attr: int
+    fileNameOffset: int
+    fileSize: int
+    fileName: str
+    fileBody: bytes
+    contentOffset: int
+    blockIndex: int
 
-    def IsBinary(self):
+    def IsBinary(self) -> bool:
         return self.attr & 0x41000000 != 0x41000000
 
 
 class BlockData:
-    pass
+    Offset: int
 
 
 class SNBFile:
-
     MAGIC = b'SNBP000B'
     REV80 = 0x00008000
     REVA3 = 0x00A3A3A3
     REVZ1 = 0x00000000
     REVZ2 = 0x00000000
 
-    def __init__(self, inputFile=None):
-        self.files = []
-        self.blocks = []
+    def __init__(self, inputFile: str | None = None) -> None:
+        self.files: list[FileStream] = []
+        self.blocks: list[BlockData] = []
 
         if inputFile is not None:
             self.Open(inputFile)
 
-    def Open(self, inputFile):
+    def Open(self, inputFile: str) -> None:
         self.fileName = inputFile
 
-        with open(self.fileName, "rb") as f:
+        with open(self.fileName, 'rb') as f:
             f.seek(0)
             self.Parse(f)
 
-    def Parse(self, snbFile, metaOnly=False):
+    def Parse(self, snbFile: IO[bytes], metaOnly: bool = False) -> None:
         # Read header
         vmbr = snbFile.read(44)
-        (self.magic, self.rev80, self.revA3, self.revZ1,
-         self.fileCount, self.vfatSize, self.vfatCompressed,
-         self.binStreamSize, self.plainStreamSizeUncompressed,
-         self.revZ2) = struct.unpack('>8siiiiiiiii', vmbr)
+        (
+            self.magic,
+            self.rev80,
+            self.revA3,
+            self.revZ1,
+            self.fileCount,
+            self.vfatSize,
+            self.vfatCompressed,
+            self.binStreamSize,
+            self.plainStreamSizeUncompressed,
+            self.revZ2,
+        ) = struct.unpack('>8siiiiiiiii', vmbr)
 
         # Read FAT
         self.vfat = zlib.decompress(snbFile.read(self.vfatCompressed))
@@ -74,10 +87,10 @@ class SNBFile:
             if f.attr & 0x41000000 == 0x41000000:
                 # Compressed Files
                 if uncompressedData is None:
-                    uncompressedData = b""
+                    uncompressedData = b''
                     for i in range(self.plainBlock):
                         bzdc = bz2.BZ2Decompressor()
-                        if (i < self.plainBlock - 1):
+                        if i < self.plainBlock - 1:
                             bSize = self.blocks[self.binBlock + i + 1].Offset - self.blocks[self.binBlock + i].Offset
                         else:
                             bSize = self.tailOffset - self.blocks[self.binBlock + i].Offset
@@ -90,10 +103,11 @@ class SNBFile:
                                 uncompressedData += data
                         except Exception:
                             import traceback
+
                             print(traceback.print_exc())
                 if len(uncompressedData) != self.plainStreamSizeUncompressed:
                     raise Exception()
-                f.fileBody = uncompressedData[plainPos:plainPos+f.fileSize]
+                f.fileBody = uncompressedData[plainPos : plainPos + f.fileSize]
                 plainPos += f.fileSize
             elif f.attr & 0x01000000 == 0x01000000:
                 # Binary Files
@@ -101,34 +115,37 @@ class SNBFile:
                 f.fileBody = snbFile.read(f.fileSize)
                 binPos += f.fileSize
             else:
-                raise ValueError("Invalid file: {} {}".format(f.attr, f.fileName))
+                raise ValueError(f'Invalid file: {f.attr} {f.fileName}')
 
-    def ParseFile(self, vfat, fileCount):
-        fileNames = vfat[fileCount*12:].split(b'\0')
+    def ParseFile(self, vfat: bytes, fileCount: int) -> None:
+        fileNames = vfat[fileCount * 12 :].split(b'\0')
         for i in range(fileCount):
             f = FileStream()
-            (f.attr, f.fileNameOffset, f.fileSize) = struct.unpack('>iii', vfat[i * 12 : (i+1)*12])
-            f.fileName = fileNames[i]
+            (f.attr, f.fileNameOffset, f.fileSize) = struct.unpack('>iii', vfat[i * 12 : (i + 1) * 12])
+            # Decode to str so lookups against str keys match (see GetFileStream)
+            f.fileName = fileNames[i].decode('utf-8', 'replace')
             self.files.append(f)
 
-    def ParseTail(self, vtail, fileCount):
+    def ParseTail(self, vtail: bytes, fileCount: int) -> None:
         self.binBlock = (self.binStreamSize + 0x8000 - 1) // 0x8000
         self.plainBlock = (self.plainStreamSizeUncompressed + 0x8000 - 1) // 0x8000
         for i in range(self.binBlock + self.plainBlock):
             block = BlockData()
-            (block.Offset,) = struct.unpack('>i', vtail[i * 4 : (i+1) * 4])
+            (block.Offset,) = struct.unpack('>i', vtail[i * 4 : (i + 1) * 4])
             self.blocks.append(block)
         for i in range(fileCount):
-            (self.files[i].blockIndex, self.files[i].contentOffset) = struct.unpack('>ii', vtail[
-             (self.binBlock + self.plainBlock) * 4 + i * 8 : (self.binBlock + self.plainBlock) * 4 + (i+1) * 8])
+            (self.files[i].blockIndex, self.files[i].contentOffset) = struct.unpack(
+                '>ii',
+                vtail[(self.binBlock + self.plainBlock) * 4 + i * 8 : (self.binBlock + self.plainBlock) * 4 + (i + 1) * 8],
+            )
 
-    def IsValid(self):
+    def IsValid(self) -> bool:
         if self.magic != SNBFile.MAGIC:
             return False
         if self.rev80 != SNBFile.REV80:
             return False
-#        if self.revA3 != SNBFile.REVA3:
-#            return False
+        # if self.revA3 != SNBFile.REVA3:
+        #     return False
         if self.revZ1 != SNBFile.REVZ1:
             return False
         if self.revZ2 != SNBFile.REVZ2:
@@ -144,191 +161,183 @@ class SNBFile:
             return False
         return True
 
-    def FromDir(self, tdir):
+    def FromDir(self, tdir: str) -> None:
         for root, dirs, files in os.walk(tdir):
             for name in files:
                 p, ext = os.path.splitext(name)
-                if ext in [".snbf", ".snbc"]:
+                if ext in ['.snbf', '.snbc']:
                     self.AppendPlain(os.path.relpath(os.path.join(root, name), tdir), tdir)
                 else:
                     self.AppendBinary(os.path.relpath(os.path.join(root, name), tdir), tdir)
 
-    def AppendPlain(self, fileName, tdir):
+    def AppendPlain(self, fileName: str, tdir: str) -> None:
         f = FileStream()
         f.attr = 0x41000000
-        f.fileSize = os.path.getsize(os.path.join(tdir,fileName))
-        with open(os.path.join(tdir,fileName), 'rb') as data:
+        f.fileSize = os.path.getsize(os.path.join(tdir, fileName))
+        with open(os.path.join(tdir, fileName), 'rb') as data:
             f.fileBody = data.read()
         f.fileName = fileName.replace(os.sep, '/')
-        if isinstance(f.fileName, unicode_type):
-            f.fileName = f.fileName.encode("ascii", "ignore")
         self.files.append(f)
 
-    def AppendBinary(self, fileName, tdir):
+    def AppendBinary(self, fileName: str, tdir: str) -> None:
         f = FileStream()
         f.attr = 0x01000000
-        f.fileSize = os.path.getsize(os.path.join(tdir,fileName))
-        with open(os.path.join(tdir,fileName), 'rb') as data:
+        f.fileSize = os.path.getsize(os.path.join(tdir, fileName))
+        with open(os.path.join(tdir, fileName), 'rb') as data:
             f.fileBody = data.read()
         f.fileName = fileName.replace(os.sep, '/')
-        if isinstance(f.fileName, unicode_type):
-            f.fileName = f.fileName.encode("ascii", "ignore")
         self.files.append(f)
 
-    def GetFileStream(self, fileName):
+    def GetFileStream(self, fileName: str) -> bytes | None:
         for file in self.files:
             if file.fileName == fileName:
                 return file.fileBody
         return None
 
-    def OutputImageFiles(self, path):
-        fileNames = []
+    def OutputImageFiles(self, path: str) -> list[tuple[str, str]]:
+        fileNames: list[tuple[str, str]] = []
         for f in self.files:
             fname = os.path.basename(f.fileName)
             root, ext = os.path.splitext(fname)
             if ext in ['.jpeg', '.jpg', '.gif', '.svg', '.png']:
                 with open(os.path.join(path, fname), 'wb') as outfile:
                     outfile.write(f.fileBody)
-                fileNames.append((fname, guess_type('a'+ext)[0]))
+                fileNames.append((fname, cast('str', guess_type('a' + ext)[0])))  # all these extensions have known mimetypes
         return fileNames
 
-    def Output(self, outputFile):
+    def Output(self, outputFile: str | IO[bytes]) -> None:
 
         # Sort the files in file buffer,
-        # requried by the SNB file format
+        # required by the SNB file format
         self.files.sort(key=lambda x: x.fileName)
 
-        outputFile = open(outputFile, 'wb')
-        # File header part 1
-        vmbrp1 = struct.pack('>8siiii', SNBFile.MAGIC, SNBFile.REV80, SNBFile.REVA3, SNBFile.REVZ1, len(self.files))
+        with StreamOrPath(outputFile, 'wb') as outputFile:
+            # File header part 1
+            vmbrp1 = struct.pack('>8siiii', SNBFile.MAGIC, SNBFile.REV80, SNBFile.REVA3, SNBFile.REVZ1, len(self.files))
 
-        # Create VFAT & file stream
-        vfat = b''
-        fileNameTable = b''
-        plainStream = b''
-        binStream = b''
-        for f in self.files:
-            vfat += struct.pack('>iii', f.attr, len(fileNameTable), f.fileSize)
-            fileNameTable += (f.fileName + b'\0')
+            # Create VFAT & file stream
+            vfat = b''
+            fileNameTable = b''
+            plainStream = b''
+            binStream = b''
+            for f in self.files:
+                vfat += struct.pack('>iii', f.attr, len(fileNameTable), f.fileSize)
+                fileNameTable += f.fileName.encode('ascii', 'ignore') + b'\0'
 
-            if f.attr & 0x41000000 == 0x41000000:
-                # Plain Files
-                f.contentOffset = len(plainStream)
-                plainStream += f.fileBody
-            elif f.attr & 0x01000000 == 0x01000000:
-                # Binary Files
-                f.contentOffset = len(binStream)
-                binStream += f.fileBody
-            else:
-                raise Exception("Unknown file type: {} {}".format(f.attr, f.fileName))
-        vfatCompressed = zlib.compress(vfat+fileNameTable)
+                if f.attr & 0x41000000 == 0x41000000:
+                    # Plain Files
+                    f.contentOffset = len(plainStream)
+                    plainStream += f.fileBody
+                elif f.attr & 0x01000000 == 0x01000000:
+                    # Binary Files
+                    f.contentOffset = len(binStream)
+                    binStream += f.fileBody
+                else:
+                    raise Exception(f'Unknown file type: {f.attr} {f.fileName}')
+            vfatCompressed = zlib.compress(vfat + fileNameTable)
 
-        # File header part 2
-        vmbrp2 = struct.pack('>iiiii', len(vfat+fileNameTable), len(vfatCompressed), len(binStream), len(plainStream), SNBFile.REVZ2)
-        # Write header
-        outputFile.write(vmbrp1 + vmbrp2)
-        # Write vfat
-        outputFile.write(vfatCompressed)
+            # File header part 2
+            vmbrp2 = struct.pack('>iiiii', len(vfat + fileNameTable), len(vfatCompressed), len(binStream), len(plainStream), SNBFile.REVZ2)
+            # Write header
+            outputFile.write(vmbrp1 + vmbrp2)
+            # Write vfat
+            outputFile.write(vfatCompressed)
 
-        # Generate block information
-        binBlockOffset = 0x2C + len(vfatCompressed)
-        plainBlockOffset = binBlockOffset + len(binStream)
+            # Generate block information
+            binBlockOffset = 0x2C + len(vfatCompressed)
+            plainBlockOffset = binBlockOffset + len(binStream)
 
-        binBlock = (len(binStream) + 0x8000 - 1) // 0x8000
-        # plainBlock = (len(plainStream) + 0x8000 - 1) // 0x8000
+            binBlock = (len(binStream) + 0x8000 - 1) // 0x8000
+            # plainBlock = (len(plainStream) + 0x8000 - 1) // 0x8000
 
-        offset = 0
-        tailBlock = b''
-        for i in range(binBlock):
-            tailBlock += struct.pack('>i', binBlockOffset + offset)
-            offset += 0x8000
-        tailRec = b''
-        for f in self.files:
-            t = 0
-            if f.IsBinary():
+            offset = 0
+            tailBlock = b''
+            for i in range(binBlock):
+                tailBlock += struct.pack('>i', binBlockOffset + offset)
+                offset += 0x8000
+            tailRec = b''
+            for f in self.files:
                 t = 0
-            else:
-                t = binBlock
-            tailRec += struct.pack('>ii', f.contentOffset // 0x8000 + t, f.contentOffset % 0x8000)
+                if f.IsBinary():
+                    t = 0
+                else:
+                    t = binBlock
+                tailRec += struct.pack('>ii', f.contentOffset // 0x8000 + t, f.contentOffset % 0x8000)
 
-        # Write binary stream
-        outputFile.write(binStream)
+            # Write binary stream
+            outputFile.write(binStream)
 
-        # Write plain stream
-        pos = 0
-        offset = 0
-        while pos < len(plainStream):
-            tailBlock += struct.pack('>i', plainBlockOffset + offset)
-            block = plainStream[pos:pos+0x8000]
-            compressed = bz2.compress(block)
-            outputFile.write(compressed)
-            offset += len(compressed)
-            pos += 0x8000
+            # Write plain stream
+            pos = 0
+            offset = 0
+            while pos < len(plainStream):
+                tailBlock += struct.pack('>i', plainBlockOffset + offset)
+                block = plainStream[pos : pos + 0x8000]
+                compressed = bz2.compress(block)
+                outputFile.write(compressed)
+                offset += len(compressed)
+                pos += 0x8000
 
-        # Write tail block
-        compressedTail = zlib.compress(tailBlock + tailRec)
-        outputFile.write(compressedTail)
+            # Write tail block
+            compressedTail = zlib.compress(tailBlock + tailRec)
+            outputFile.write(compressedTail)
 
-        # Write tail pointer
-        veom = struct.pack('>ii', len(compressedTail), plainBlockOffset + offset)
-        outputFile.write(veom)
+            # Write tail pointer
+            veom = struct.pack('>ii', len(compressedTail), plainBlockOffset + offset)
+            outputFile.write(veom)
 
-        # Write file end mark
-        outputFile.write(SNBFile.MAGIC)
+            # Write file end mark
+            outputFile.write(SNBFile.MAGIC)
 
-        # Close
-        outputFile.close()
-        return
-
-    def Dump(self):
+    def Dump(self) -> None:
         if self.fileName:
-            print("File Name:\t", self.fileName)
-        print("File Count:\t", self.fileCount)
-        print("VFAT Size(Compressed):\t%d(%d)" % (self.vfatSize, self.vfatCompressed))
-        print("Binary Stream Size:\t", self.binStreamSize)
-        print("Plain Stream Uncompressed Size:\t", self.plainStreamSizeUncompressed)
-        print("Binary Block Count:\t", self.binBlock)
-        print("Plain Block Count:\t", self.plainBlock)
+            print('File Name:\t', self.fileName)
+        print('File Count:\t', self.fileCount)
+        print(f'VFAT Size(Compressed):\t{self.vfatSize}({self.vfatCompressed})')
+        print('Binary Stream Size:\t', self.binStreamSize)
+        print('Plain Stream Uncompressed Size:\t', self.plainStreamSizeUncompressed)
+        print('Binary Block Count:\t', self.binBlock)
+        print('Plain Block Count:\t', self.plainBlock)
         for i in range(self.fileCount):
-            print("File ", i)
+            print('File ', i)
             f = self.files[i]
-            print("File Name: ", f.fileName)
-            print("File Attr: ", f.attr)
-            print("File Size: ", f.fileSize)
-            print("Block Index: ", f.blockIndex)
-            print("Content Offset: ", f.contentOffset)
-            with open("/tmp/" + f.fileName, 'wb') as tempFile:
+            print('File Name: ', f.fileName)
+            print('File Attr: ', f.attr)
+            print('File Size: ', f.fileSize)
+            print('Block Index: ', f.blockIndex)
+            print('Content Offset: ', f.contentOffset)
+            with open('/tmp/' + f.fileName, 'wb') as tempFile:
                 tempFile.write(f.fileBody)
 
 
-def usage():
-    print("This unit test is for INTERNAL usage only!")
-    print("This unit test accept two parameters.")
-    print("python snbfile.py <INPUTFILE> <DESTFILE>")
-    print("The input file will be extracted and write to dest file. ")
-    print("Meta data of the file will be shown during this process.")
+def usage() -> None:
+    print('This unit test is for INTERNAL usage only!')
+    print('This unit test accept two parameters.')
+    print('python snbfile.py <INPUTFILE> <DESTFILE>')
+    print('The input file will be extracted and write to dest file. ')
+    print('Meta data of the file will be shown during this process.')
 
 
-def main():
+def main() -> int:
     if len(sys.argv) != 3:
         usage()
         sys.exit(0)
     inputFile = sys.argv[1]
     outputFile = sys.argv[2]
 
-    print("Input file: ", inputFile)
-    print("Output file: ", outputFile)
+    print('Input file: ', inputFile)
+    print('Output file: ', outputFile)
 
     snbFile = SNBFile(inputFile)
     if snbFile.IsValid():
         snbFile.Dump()
         snbFile.Output(outputFile)
     else:
-        print("The input file is invalid.")
+        print('The input file is invalid.')
         return 1
     return 0
 
 
-if __name__ == "__main__":
-    """SNB file unit test"""
+if __name__ == '__main__':
+    '''SNB file unit test'''
     sys.exit(main())

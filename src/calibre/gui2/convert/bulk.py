@@ -1,33 +1,26 @@
-# -*- coding: utf-8 -*-
-
-
-__license__ = 'GPL 3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
 
 import shutil
 
-from PyQt5.Qt import QModelIndex, QDialog, QApplication, QDialogButtonBox
+from qt.core import QDialog, QDialogButtonBox, QModelIndex
 
-from calibre.gui2.convert.single import Config, GroupModel, gprefs
-from calibre.gui2.convert.look_and_feel import LookAndFeelWidget
+from calibre.ebooks.conversion.config import get_output_formats, sort_formats_by_preference
+from calibre.ebooks.conversion.plumber import Plumber
+from calibre.gui2.convert import GuiRecommendations
 from calibre.gui2.convert.heuristics import HeuristicsWidget
-from calibre.gui2.convert.search_and_replace import SearchAndReplaceWidget
+from calibre.gui2.convert.look_and_feel import LookAndFeelWidget
 from calibre.gui2.convert.page_setup import PageSetupWidget
+from calibre.gui2.convert.search_and_replace import SearchAndReplaceWidget
+from calibre.gui2.convert.single import Config, GroupModel, gprefs
 from calibre.gui2.convert.structure_detection import StructureDetectionWidget
 from calibre.gui2.convert.toc import TOCWidget
-from calibre.gui2.convert import GuiRecommendations
-from calibre.ebooks.conversion.plumber import Plumber
-from calibre.ebooks.conversion.config import sort_formats_by_preference, get_output_formats
 from calibre.utils.config import prefs
+from calibre.utils.localization import _, ngettext
 from calibre.utils.logging import Log
-from polyglot.builtins import unicode_type, native_string_type
 
 
 class BulkConfig(Config):
-
-    def __init__(self, parent, db, preferred_output_format=None,
-            has_saved_settings=True, book_ids=()):
+    def __init__(self, parent, db, preferred_output_format=None, has_saved_settings=True, book_ids=()) -> None:
         QDialog.__init__(self, parent)
         self.widgets = []
         self.setupUi()
@@ -45,50 +38,47 @@ class BulkConfig(Config):
         self.input_formats.hide()
         self.opt_individual_saved_settings.setVisible(True)
         self.opt_individual_saved_settings.setChecked(True)
-        self.opt_individual_saved_settings.setToolTip(_('For '
-            'settings that cannot be specified in this dialog, use the '
-            'values saved in a previous conversion (if they exist) instead '
-            'of using the defaults specified in the Preferences'))
+        self.opt_individual_saved_settings.setToolTip(
+            _(
+                'For '
+                'settings that cannot be specified in this dialog, use the '
+                'values saved in a previous conversion (if they exist) instead '
+                'of using the defaults specified in the Preferences'
+            )
+        )
 
-        self.output_formats.currentIndexChanged[native_string_type].connect(self.setup_pipeline)
+        self.output_formats.currentIndexChanged.connect(self.setup_pipeline)
         self.groups.setSpacing(5)
         self.groups.activated[(QModelIndex)].connect(self.show_pane)
         self.groups.clicked[(QModelIndex)].connect(self.show_pane)
         self.groups.entered[(QModelIndex)].connect(self.show_group_help)
         rb = self.buttonBox.button(QDialogButtonBox.StandardButton.RestoreDefaults)
+        assert rb is not None
         rb.setVisible(False)
         self.groups.setMouseTracking(True)
         if not has_saved_settings:
             o = self.opt_individual_saved_settings
             o.setEnabled(False)
-            o.setToolTip(_('None of the selected books have saved conversion '
-                'settings.'))
+            o.setToolTip(_('None of the selected books have saved conversion settings.'))
             o.setChecked(False)
 
-        geom = gprefs.get('convert_bulk_dialog_geom', None)
-        if geom:
-            QApplication.instance().safe_restore_geometry(self, geom)
-        else:
-            self.resize(self.sizeHint())
+        self.restore_geometry(gprefs, 'convert_bulk_dialog_geom')
 
-    def setup_pipeline(self, *args):
+    def setup_pipeline(self, *args) -> None:
         oidx = self.groups.currentIndex().row()
         output_format = self.output_format
 
         input_path = 'dummy.epub'
-        output_path = 'dummy.'+output_format
+        output_path = 'dummy.' + output_format
         log = Log()
         log.outputs = []
         self.plumber = Plumber(input_path, output_path, log, merge_plugin_recs=False)
         self.plumber.merge_plugin_recs(self.plumber.output_plugin)
 
         def widget_factory(cls):
-            return cls(self, self.plumber.get_option_by_name,
-                self.plumber.get_option_help, self.db)
+            return cls(self, self.plumber.get_option_by_name, self.plumber.get_option_help, self.db)
 
-        self.setWindowTitle(
-            ngettext(_('Bulk convert one book'), _('Bulk convert {} books'), self.num_of_books).format(self.num_of_books)
-        )
+        self.setWindowTitle(ngettext(_('Bulk convert one book'), _('Bulk convert {} books'), self.num_of_books).format(self.num_of_books))
         lf = widget_factory(LookAndFeelWidget)
         hw = widget_factory(HeuristicsWidget)
         sr = widget_factory(SearchAndReplaceWidget)
@@ -97,9 +87,7 @@ class BulkConfig(Config):
         toc = widget_factory(TOCWidget)
         toc.manually_fine_tune_toc.hide()
 
-        output_widget = self.plumber.output_plugin.gui_configuration_widget(
-                self, self.plumber.get_option_by_name,
-                self.plumber.get_option_help, self.db)
+        output_widget = self.plumber.output_plugin.gui_configuration_widget(self, self.plumber.get_option_by_name, self.plumber.get_option_help, self.db)
 
         self.break_cycles()
         widgets = self.widgets = [lf, hw, ps, sd, toc, sr]
@@ -108,6 +96,7 @@ class BulkConfig(Config):
         for w in widgets:
             w.set_help_signal.connect(self.help.setPlainText)
             w.setVisible(False)
+            w.layout().setContentsMargins(0, 0, 0, 0)
 
         self._groups_model = GroupModel(widgets)
         self.groups.setModel(self._groups_model)
@@ -116,22 +105,25 @@ class BulkConfig(Config):
         self.groups.setCurrentIndex(self._groups_model.index(idx))
         self.show_pane(idx)
         try:
-            shutil.rmtree(self.plumber.archive_input_tdir, ignore_errors=True)
-        except:
+            aitdir = self.plumber.archive_input_tdir
+            assert aitdir is not None
+            shutil.rmtree(aitdir, ignore_errors=True)
+        except Exception:
             pass
 
-    def setup_output_formats(self, db, preferred_output_format):
+    def setup_output_formats(self, db, preferred_output_format) -> None:
         if preferred_output_format:
             preferred_output_format = preferred_output_format.upper()
         output_formats = get_output_formats(preferred_output_format)
-        preferred_output_format = preferred_output_format if \
-            preferred_output_format and preferred_output_format \
-            in output_formats else sort_formats_by_preference(output_formats,
-                    [prefs['output_format']])[0]
-        self.output_formats.addItems((unicode_type(x.upper()) for x in output_formats))
+        preferred_output_format = (
+            preferred_output_format
+            if preferred_output_format and preferred_output_format in output_formats
+            else sort_formats_by_preference(output_formats, [prefs['output_format']])[0]
+        )
+        self.output_formats.addItems(str(x.upper()) for x in output_formats)
         self.output_formats.setCurrentIndex(output_formats.index(preferred_output_format))
 
-    def accept(self):
+    def accept(self) -> None:
         recs = GuiRecommendations()
         for w in self._groups_model.widgets:
             if not w.pre_commit_check():
@@ -141,8 +133,7 @@ class BulkConfig(Config):
         self._recommendations = recs
         QDialog.accept(self)
 
-    def done(self, r):
+    def done(self, a0):
         if self.isVisible():
-            gprefs['convert_bulk_dialog_geom'] = \
-                bytearray(self.saveGeometry())
-        return QDialog.done(self, r)
+            self.save_geometry(gprefs, 'convert_bulk_dialog_geom')
+        return QDialog.done(self, a0)

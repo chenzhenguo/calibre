@@ -19,15 +19,15 @@ class LaPrensa(BasicNewsRecipe):
     no_stylesheets = True
     use_embedded_content = False
     encoding = 'utf-8'
-    language = 'en'
+    language = 'en_US'
     auto_cleanup = True
 
     feeds = [
-        (u'Homepage', u'http://www.usnews.com/rss/usnews.rss'),
-        (u'Health', u'http://www.usnews.com/rss/health'),
-        (u'Nation & World', u'http://www.usnews.com/rss/news'),
-        (u'Money & Business', u'http://www.usnews.com/rss/money'),
-        (u'Education', u'http://www.usnews.com/rss/education'),
-        (u'Opinion', u'http://www.usnews.com/rss/opinion'),
-        (u'Science', u'http://www.usnews.com/rss/science')
+        ('Homepage', 'http://www.usnews.com/rss/usnews.rss'),
+        ('Health', 'http://www.usnews.com/rss/health'),
+        ('Nation & World', 'http://www.usnews.com/rss/news'),
+        ('Money & Business', 'http://www.usnews.com/rss/money'),
+        ('Education', 'http://www.usnews.com/rss/education'),
+        ('Opinion', 'http://www.usnews.com/rss/opinion'),
+        ('Science', 'http://www.usnews.com/rss/science'),
     ]

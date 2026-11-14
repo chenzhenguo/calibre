@@ -1,15 +1,12 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2009, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
 
 import importlib
 import os
 import sys
+from queue import Queue
 from threading import Thread
+from typing import TYPE_CHECKING
 from zipimport import ZipImportError
 
 from calibre import prints
@@ -17,7 +14,9 @@ from calibre.constants import ismacos, iswindows
 from calibre.utils.ipc import eintr_retry_call
 from calibre.utils.serialize import pickle_dumps
 from polyglot.binary import from_hex_unicode
-from polyglot.queue import Queue
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 if iswindows:
     from multiprocessing.connection import PipeConnection as Connection
@@ -25,74 +24,47 @@ else:
     from multiprocessing.connection import Connection
 
 PARALLEL_FUNCS = {
-    'lrfviewer'    :
-    ('calibre.gui2.lrf_renderer.main', 'main', None),
-
-    'ebook-viewer'    :
-    ('calibre.gui_launch', 'ebook_viewer', None),
-
-    'ebook-edit' :
-    ('calibre.gui_launch', 'gui_ebook_edit', None),
-
-    'store-dialog' :
-    ('calibre.gui_launch', 'store_dialog', None),
-
-    'toc-dialog' :
-    ('calibre.gui_launch', 'toc_dialog', None),
-
-    'webengine-dialog' :
-    ('calibre.gui_launch', 'webengine_dialog', None),
-
-    'render_pages' :
-    ('calibre.ebooks.comic.input', 'render_pages', 'notification'),
-
-    'gui_convert'     :
-    ('calibre.gui2.convert.gui_conversion', 'gui_convert', 'notification'),
-
-    'gui_convert_recipe'     :
-    ('calibre.gui2.convert.gui_conversion', 'gui_convert_recipe', 'notification'),
-
-    'gui_polish'     :
-    ('calibre.ebooks.oeb.polish.main', 'gui_polish', None),
-
-    'gui_convert_override'     :
-    ('calibre.gui2.convert.gui_conversion', 'gui_convert_override', 'notification'),
-
-    'gui_catalog'     :
-    ('calibre.gui2.convert.gui_conversion', 'gui_catalog', 'notification'),
-
-    'arbitrary' :
-    ('calibre.utils.ipc.worker', 'arbitrary', None),
-
-    'arbitrary_n' :
-    ('calibre.utils.ipc.worker', 'arbitrary_n', 'notification'),
+    'lrfviewer': ('calibre.gui2.lrf_renderer.main', 'main', None),
+    'ebook-viewer': ('calibre.gui_launch', 'ebook_viewer', None),
+    'ebook-edit': ('calibre.gui_launch', 'gui_ebook_edit', None),
+    'store-dialog': ('calibre.gui_launch', 'store_dialog', None),
+    'toc-dialog': ('calibre.gui_launch', 'toc_dialog', None),
+    'cyoa': ('calibre.gui_launch', 'cyoa', None),
+    'webengine-dialog': ('calibre.gui_launch', 'webengine_dialog', None),
+    'render_pages': ('calibre.ebooks.comic.input', 'render_pages', 'notification'),
+    'gui_convert': ('calibre.gui2.convert.gui_conversion', 'gui_convert', 'notification'),
+    'gui_convert_recipe': ('calibre.gui2.convert.gui_conversion', 'gui_convert_recipe', 'notification'),
+    'gui_polish': ('calibre.ebooks.oeb.polish.main', 'gui_polish', None),
+    'gui_convert_override': ('calibre.gui2.convert.gui_conversion', 'gui_convert_override', 'notification'),
+    'gui_catalog': ('calibre.gui2.convert.gui_conversion', 'gui_catalog', 'notification'),
+    'arbitrary': ('calibre.utils.ipc.worker', 'arbitrary', None),
+    'arbitrary_n': ('calibre.utils.ipc.worker', 'arbitrary_n', 'notification'),
 }
 
 
 class Progress(Thread):
-
-    def __init__(self, conn):
+    def __init__(self, conn: Connection) -> None:
         Thread.__init__(self)
         self.daemon = True
         self.conn = conn
         self.queue = Queue()
 
-    def __call__(self, percent, msg=''):
+    def __call__(self, percent: float, msg: str = '') -> None:
         self.queue.put((percent, msg))
 
-    def run(self):
+    def run(self) -> None:
         while True:
             x = self.queue.get()
             if x is None:
                 break
             try:
                 eintr_retry_call(self.conn.send, x)
-            except:
+            except Exception:
                 break
 
 
-def arbitrary(module_name, func_name, args, kwargs={}):
-    '''
+def arbitrary(module_name: str, func_name: str, args: Sequence[object], kwargs: dict[str, object] | None = None) -> object:
+    """
     An entry point that allows arbitrary functions to be run in a parallel
     process. useful for plugin developers that want to run jobs in a parallel
     process.
@@ -121,18 +93,24 @@ def arbitrary(module_name, func_name, args, kwargs={}):
     :param name: A list (or tuple) of arguments that will be passed to the
     function ``func_name``
     :param kwargs: A dictionary of keyword arguments to pass to func_name
-    '''
+    """
+    if kwargs is None:
+        kwargs = {}
     if module_name.startswith('calibre_plugins'):
         # Initialize the plugin loader by doing this dummy import
-        from calibre.customize.ui import find_plugin
-        find_plugin
+        from calibre.customize.ui import find_plugin  # ruff: ignore[unused-import]
     module = importlib.import_module(module_name)
     func = getattr(module, func_name)
     return func(*args, **kwargs)
 
 
-def arbitrary_n(module_name, func_name, args, kwargs={},
-        notification=lambda x, y: y):
+def arbitrary_n(
+    module_name: str,
+    func_name: str,
+    args: Sequence[object],
+    kwargs: dict[str, object] | None = None,
+    notification: Callable[[float, str], object] = lambda x, y: y,
+) -> object:
     '''
     Same as :func:`arbitrary` above, except that func_name must support a
     keyword argument "notification". This will be a function that accepts two
@@ -141,43 +119,45 @@ def arbitrary_n(module_name, func_name, args, kwargs={},
     completed and the second is a string with a message (it can be an empty
     string).
     '''
+    if kwargs is None:
+        kwargs = {}
     if module_name.startswith('calibre_plugins'):
         # Initialize the plugin loader by doing this dummy import
-        from calibre.customize.ui import find_plugin
-        find_plugin
+        from calibre.customize.ui import find_plugin  # ruff: ignore[unused-import]
     module = importlib.import_module(module_name)
     func = getattr(module, func_name)
     kwargs['notification'] = notification
     return func(*args, **kwargs)
 
 
-def get_func(name):
-    module, func, notification = PARALLEL_FUNCS[name]
+def get_func(name: str) -> tuple[Callable[..., object], str | None]:
+    module_name, func, notification = PARALLEL_FUNCS[name]
     try:
-        module = importlib.import_module(module)
+        module = importlib.import_module(module_name)
     except ZipImportError:
         # Something windows weird happened, try clearing the zip import cache
-        # incase the zipfile was changed from under us
-        from zipimport import _zip_directory_cache as zdc
+        # in case the zipfile was changed from under us
+        from zipimport import _zip_directory_cache as zdc  # type: ignore
+
         zdc.clear()
-        module = importlib.import_module(module)
+        module = importlib.import_module(module_name)
     func = getattr(module, func)
     return func, notification
 
 
-def main():
-    if iswindows:
-        if '--multiprocessing-fork' in sys.argv:
-            # We are using the multiprocessing module on windows to launch a
-            # worker process
-            from multiprocessing import freeze_support
-            freeze_support()
-            return 0
+def main() -> int | None:
+    if '__multiprocessing__' in sys.argv:
+        idx = sys.argv.index('__multiprocessing__')
+        payload = sys.argv[idx + 1]
+        sys.argv = [sys.argv[0], '--multiprocessing-fork'] + sys.argv[idx + 2 :]
+        exec(payload)
+        return 0
     if ismacos and 'CALIBRE_WORKER_FD' not in os.environ and 'CALIBRE_SIMPLE_WORKER' not in os.environ and '--pipe-worker' not in sys.argv:
         # On some OS X computers launchd apparently tries to
         # launch the last run process from the bundle
         # so launch the gui as usual
         from calibre.gui2.main import main as gui_main
+
         return gui_main(['calibre'])
     niceness = os.environ.pop('CALIBRE_WORKER_NICENESS', None)
     if niceness:
@@ -216,18 +196,18 @@ def main():
         result = func(*args, **kwargs)
         if result is not None:
             os.makedirs(os.path.dirname(resultf), exist_ok=True)
-            with lopen(resultf, 'wb') as f:
+            with open(resultf, 'wb') as f:
                 f.write(pickle_dumps(result))
 
         notifier.queue.put(None)
 
     try:
         sys.stdout.flush()
-    except EnvironmentError:
+    except OSError:
         pass  # Happens sometimes on OS X for GUI processes (EPIPE)
     try:
         sys.stderr.flush()
-    except EnvironmentError:
+    except OSError:
         pass  # Happens sometimes on OS X for GUI processes (EPIPE)
     return 0
 

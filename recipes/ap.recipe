@@ -1,89 +1,154 @@
 #!/usr/bin/env python
 # vim:fileencoding=utf-8
-# License: GPLv3 Copyright: 2017, Kovid Goyal <kovid at kovidgoyal.net>
+"""
+https://apnews.com
+"""
 
-from __future__ import absolute_import, division, print_function, unicode_literals
+from datetime import datetime, timezone
 
-import json
-
-from calibre.web.feeds.news import BasicNewsRecipe
-from calibre.ebooks.BeautifulSoup import Tag
-
-
-def classes(classes):
-    q = frozenset(classes.split(' '))
-    return dict(
-        attrs={'class': lambda x: x and frozenset(x.split()).intersection(q)}
-    )
-
-
-def new_tag(soup, name, attrs=()):
-    impl = getattr(soup, 'new_tag', None)
-    if impl is not None:
-        return impl(name, attrs=dict(attrs))
-    return Tag(soup, name, attrs=attrs or None)
+from calibre.web.automate.bot_check import retry_bot_checks
+from calibre.web.feeds.news import BasicNewsRecipe, classes
 
 
 class AssociatedPress(BasicNewsRecipe):
-
-    title = u'Associated Press'
-    description = 'Global news'
-    __author__ = 'Krittika Goyal'
-    use_embedded_content = False
+    title = 'Associated Press'
+    description = (
+        'Read the latest headlines, breaking news, and videos at APNews.com, the definitive '
+        'source for independent journalism from every corner of the globe. Articles from Front Page.'
+        ' Uses the camoufox browser, which is downloaded on first use, as apnews.com blocks every lighter way of fetching its pages.'
+    )
+    __author__ = 'unkn0wn'
     language = 'en'
     encoding = 'utf-8'
     no_stylesheets = True
-    ignore_duplicate_articles = {'title', 'url'}
+    remove_javascript = True
+    ignore_duplicate_articles = {'url'}
     remove_empty_feeds = False
+    remove_attributes = ['style', 'height', 'width']
+    # apnews.com is behind Cloudflare, which answers every lighter way of
+    # fetching its pages with a 403 and a JavaScript challenge, see
+    # calibre.web.automate.bot_check
+    browser_type = 'camoufox'
+    # No delay between requests, deliberately: any delay at all makes calibre
+    # download on a single thread, and each download thread gets a tab of its
+    # own in this browser.
+    delay = 0
+    oldest_article = 1  # days; AP publishes constantly
+    cover_url = 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0c/Associated_Press_logo_2012.svg/960px-Associated_Press_logo_2012.svg.png'
+
     keep_only_tags = [
-        classes('CardHeadline LeadFeature Article'),
+        classes('StoryPage-lede-content Page-lead Page-byline-info RichTextStoryBody'),
     ]
     remove_tags = [
-        classes('ad-placeholder modalImageButton modalVideoButton'),
-        dict(name=['button', 'svg']),
+        classes('displayNone Advertisement HTMLModuleEnhancement AudioEnhancement'),
+        dict(
+            name=[
+                'source',
+                'button',
+                'svg',
+                'template',
+                'video',
+                'astro-island',
+                'iframe',
+                'document',
+            ]
+        ),
+        dict(attrs={'data-parsely-title': 'Related Stories'}),
     ]
+
+    extra_css = '''
+        .Page-byline-info, .Page-breadcrumbs, .CarouselSlide-info, .Figure-caption { font-size:small; }
+        img {display:block; margin:0 auto;}
+        em { color: #202020; }
+    '''
+
+    def get_browser(self, *args, **kwargs):
+        return retry_bot_checks(BasicNewsRecipe.get_browser(self, *args, **kwargs))
 
     def parse_index(self):
         feeds = []
-        limit = self.test[0] if self.test else 100
-        for front in (
-            'topnews sports politics entertainment usnews oddities'
-            ' Travel technology lifestyle business Health science intlnews'.split()
+        soup = self.index_to_soup('https://apnews.com')
+        # An article is linked to several times from the front page, from its
+        # headline, its image, its summary, its comment count and so on, so
+        # take the title from its headline, falling back to the first link
+        # with some text that is not just a count, and the timestamp from the
+        # promo it is in
+        titles, headlines, stamps = {}, {}, {}
+        for a in soup.findAll(
+            'a',
+            attrs={'href': lambda x: x and x.startswith('https://apnews.com/article/')},
         ):
-            name = {
-                'topnews': 'Top News',
-                'intlnews': 'International',
-                'usnews': 'U.S. News'
-            }.get(front, front).capitalize()
-            feeds.append([name, self.parse_section(front)])
-            if len(feeds) >= limit:
-                break
-        return feeds
+            url = a['href'].split('?')[0].split('#')[0]
+            title = self.tag_to_string(a).strip()
+            if title and not title.isdigit():
+                titles.setdefault(url, title)
+                if a.find_parent(**classes('PagePromo-title')) is not None:
+                    headlines.setdefault(url, title)
+            promo = a.find_parent(attrs={'data-posted-date-timestamp': True})
+            if promo is not None and url not in stamps:
+                try:
+                    stamps[url] = datetime.fromtimestamp(int(promo['data-posted-date-timestamp']) / 1000, tz=timezone.utc)
+                except ValueError as e:
+                    self.log.warn('AP bad timestamp on promo for', url, ':', e)
+        for url, title in titles.items():
+            title = headlines.get(url, title)
+            # Opening an article to read its published time is slow, as it is
+            # a full page load in the browser, so it is done only for the
+            # articles whose promos carry no timestamp
+            pub = stamps.get(url) or self._fetch_published_time(url)
+            if pub is None:
+                self.log.warn('Skipping (no published_time):', url)
+                continue
+            self.log(title, '\n\t', url, '\n\t', pub.isoformat())
+            feeds.append({
+                'title': title,
+                'url': url,
+                'date': pub.strftime('%Y-%m-%d %H:%M:%S'),
+                'timestamp': pub.timestamp(),
+            })
+        return [('Articles', feeds)]
 
-    def parse_section(self, front):
-        url = 'https://afs-prod.appspot.com/api/v2/feed/tag?tags=apf-' + front
-        self.log('Processing section:', front, 'at', url)
-        data = self.index_to_soup(url, raw=True)
-        data = json.loads(data)
-        cards = data.get('cards', ())
-        articles = []
+    def _fetch_published_time(self, url):
+        # AP has no RSS feeds, so parse_index can't filter by date without
+        # fetching each candidate article. Read <meta property="article:
+        # published_time"> from the article HTML so oldest_article applies.
+        cache = getattr(self, '_pub_time_cache', None)
+        if cache is None:
+            cache = self._pub_time_cache = {}
+        if url in cache:
+            return cache[url]
+        try:
+            soup = self.index_to_soup(url)
+        except Exception as e:
+            self.log.warn('AP published_time fetch failed for', url, ':', e)
+            cache[url] = None
+            return None
+        meta = soup.find('meta', attrs={'property': 'article:published_time'})
+        if not meta or not meta.get('content'):
+            cache[url] = None
+            return None
+        try:
+            pub = datetime.fromisoformat(meta['content'])
+        except Exception as e:
+            self.log.warn('AP bad published_time on', url, ':', e)
+            cache[url] = None
+            return None
+        if pub.tzinfo is None:
+            pub = pub.replace(tzinfo=timezone.utc)
+        cache[url] = pub
+        return pub
 
-        for card in cards:
-            for article in card['contents']:
-                url = article['localLinkUrl']
-                title = article.get('headline', article.get('flattenedFirstWords'))
-                if not title:
-                    continue
-                title = title.split('\u2014')[-1]
-                self.log('\tFound article:', title, 'at', url)
-                articles.append({'title': title, 'url': url})
-        self.log('')
-        return articles
-
-    def preprocess_html(self, soup, *a):
-        for meta in soup.findAll('meta', attrs=dict(name="twitter:image:alt")):
-            for div in soup.findAll(**classes('LeadFeature')):
-                img = new_tag(soup, 'img')
-                img['src'] = meta['content']
-                div.insert(0, img)
+    def preprocess_html(self, soup):
+        for v in soup.findAll('bsp-jw-player', attrs={'poster': True}):
+            v.name = 'img'
+            v.attrs = {'src': v.get('poster', '')}
+        for st in soup.findAll(**classes('CarouselSlide-infoDescription Figure-caption')):
+            if p := st.find('p'):
+                p.name = 'span'
+        for h in soup.findAll(['h2', 'h3']):
+            h.name = 'h4'
+        for img in soup.findAll('img', attrs={'srcset': True}):
+            img['src'] = img['srcset'].split()[0]
+        for img_ in soup.findAll('img', attrs={'data-flickity-lazyload-srcset': True, 'srcset': False}):
+            img_['src'] = img_['data-flickity-lazyload-srcset'].split()[0]
         return soup

@@ -1,46 +1,48 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-import os, glob
+import glob
+import os
+from typing import TYPE_CHECKING
 
 from calibre import CurrentDir
-from calibre.ebooks.mobi import MobiError
-from calibre.ebooks.mobi.reader.mobi6 import MobiReader
-from calibre.ebooks.mobi.reader.headers import MetadataHeader
-from calibre.utils.logging import default_log
+from calibre.customize.ui import plugin_for_input_format, plugin_for_output_format
 from calibre.ebooks import DRMError
-from calibre.ebooks.mobi.reader.mobi8 import Mobi8Reader
 from calibre.ebooks.conversion.plumber import Plumber, create_oebbook
-from calibre.customize.ui import (plugin_for_input_format,
-        plugin_for_output_format)
+from calibre.ebooks.mobi import MobiError
+from calibre.ebooks.mobi.reader.headers import MetadataHeader
+from calibre.ebooks.mobi.reader.mobi6 import MobiReader
+from calibre.ebooks.mobi.reader.mobi8 import Mobi8Reader
 from calibre.utils.ipc.simple_worker import fork_job
+from calibre.utils.localization import _
+from calibre.utils.logging import default_log
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from calibre.ebooks.oeb.base import OEBBook
 
 
 class BadFormat(ValueError):
     pass
 
 
-def do_explode(path, dest):
+def do_explode(path: str, dest: str) -> str:
     with open(path, 'rb') as stream:
         mr = MobiReader(stream, default_log, None, None)
 
         with CurrentDir(dest):
-            mr = Mobi8Reader(mr, default_log)
-            opf = os.path.abspath(mr())
+            mr8 = Mobi8Reader(mr, default_log)
+            opf = os.path.abspath(mr8())
             try:
                 os.remove('debug-raw.html')
-            except:
+            except Exception:
                 pass
 
     return opf
 
 
-def explode(path, dest, question=lambda x:True):
+def explode(path: str, dest: str, question: Callable[[str], bool] = lambda x: True) -> str | None:
     with open(path, 'rb') as stream:
         raw = stream.read(3)
         stream.seek(0)
@@ -58,23 +60,30 @@ def explode(path, dest, question=lambda x:True):
         kf8_type = header.kf8_type
 
         if kf8_type is None:
-            raise BadFormat(_('This MOBI file does not contain a KF8 format '
+            raise BadFormat(
+                _(
+                    'This MOBI file does not contain a KF8 format '
                     'book. KF8 is the new format from Amazon. calibre can '
                     'only tweak MOBI files that contain KF8 books. Older '
-                    'MOBI files without KF8 are not tweakable.'))
+                    'MOBI files without KF8 are not tweakable.'
+                )
+            )
 
         if kf8_type == 'joint':
-            if not question(_('This MOBI file contains both KF8 and '
-                'older Mobi6 data. Tweaking it will remove the Mobi6 data, which '
-                'means the file will not be usable on older Kindles. Are you '
-                'sure?')):
+            if not question(
+                _(
+                    'This MOBI file contains both KF8 and '
+                    'older Mobi6 data. Tweaking it will remove the Mobi6 data, which '
+                    'means the file will not be usable on older Kindles. Are you '
+                    'sure?'
+                )
+            ):
                 return None
 
-    return fork_job('calibre.ebooks.mobi.tweak', 'do_explode', args=(path,
-            dest), no_output=True)['result']
+    return fork_job('calibre.ebooks.mobi.tweak', 'do_explode', args=(path, dest), no_output=True)['result']
 
 
-def set_cover(oeb):
+def set_cover(oeb: OEBBook) -> None:
     if 'cover' not in oeb.guide or oeb.metadata['cover']:
         return
     cover = oeb.guide['cover']
@@ -84,11 +93,13 @@ def set_cover(oeb):
         oeb.metadata.add('cover', item.id)
 
 
-def do_rebuild(opf, dest_path):
+def do_rebuild(opf: str, dest_path: str) -> None:
     plumber = Plumber(opf, dest_path, default_log)
     plumber.setup_options()
     inp = plugin_for_input_format('azw3')
+    assert inp is not None
     outp = plugin_for_output_format('azw3')
+    assert outp is not None
 
     plumber.opts.mobi_passthrough = True
     oeb = create_oebbook(default_log, opf, plumber.opts)
@@ -96,14 +107,12 @@ def do_rebuild(opf, dest_path):
     outp.convert(oeb, dest_path, inp, plumber.opts, default_log)
 
 
-def rebuild(src_dir, dest_path):
+def rebuild(src_dir: str, dest_path: str) -> None:
     opf = glob.glob(os.path.join(src_dir, '*.opf'))
     if not opf:
-        raise ValueError('No OPF file found in %s'%src_dir)
+        raise ValueError(f'No OPF file found in {src_dir}')
     opf = opf[0]
     # For debugging, uncomment the following two lines
     # def fork_job(a, b, args=None, no_output=True):
     #     do_rebuild(*args)
-    fork_job('calibre.ebooks.mobi.tweak', 'do_rebuild', args=(opf, dest_path),
-            no_output=True)
-
+    fork_job('calibre.ebooks.mobi.tweak', 'do_rebuild', args=(opf, dest_path), no_output=True)

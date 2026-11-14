@@ -1,22 +1,30 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-import os, numbers
+import numbers
+import os
 from io import BytesIO
+from typing import TYPE_CHECKING, cast
 
 from calibre.utils.zipfile import safe_replace
-from polyglot.builtins import unicode_type, as_unicode
+from polyglot.builtins import as_unicode
 
-BM_FIELD_SEP = u'*|!|?|*'
-BM_LEGACY_ESC = u'esc-text-%&*#%(){}ads19-end-esc'
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator, MutableMapping
+    from typing import TypedDict
+
+    class Bookmark(TypedDict):
+        type: str
+        title: str
+        spine: int
+        pos: str | float
 
 
-def parse_bookmarks(raw):
+BM_FIELD_SEP = '*|!|?|*'
+BM_LEGACY_ESC = 'esc-text-%&*#%(){}ads19-end-esc'
+
+
+def parse_bookmarks(raw: str | bytes) -> Iterator[Bookmark]:
     raw = as_unicode(raw)
     for line in raw.splitlines():
         if '^' in line:
@@ -27,7 +35,7 @@ def parse_bookmarks(raw):
                 spine = int(spine.strip())
             except Exception:
                 continue
-            yield {'type':'legacy', 'title':title, 'spine':spine, 'pos':pos}
+            yield {'type': 'legacy', 'title': title, 'spine': spine, 'pos': pos}
         elif BM_FIELD_SEP in line:
             try:
                 title, spine, pos = line.strip().split(BM_FIELD_SEP)
@@ -35,42 +43,45 @@ def parse_bookmarks(raw):
             except Exception:
                 continue
             # Unescape from serialization
-            pos = pos.replace(BM_LEGACY_ESC, u'^')
+            pos = pos.replace(BM_LEGACY_ESC, '^')
             # Check for pos being a scroll fraction
             try:
                 pos = float(pos)
             except Exception:
                 pass
-            yield {'type':'cfi', 'title':title, 'pos':pos, 'spine':spine}
+            yield {'type': 'cfi', 'title': title, 'pos': pos, 'spine': spine}
 
 
-class BookmarksMixin(object):
+class BookmarksMixin:
+    config: MutableMapping[str, object]
+    pathtoebook: str
+    base: str
 
-    def __init__(self, copy_bookmarks_to_file=True):
+    def __init__(self, copy_bookmarks_to_file: bool = True) -> None:
         self.copy_bookmarks_to_file = copy_bookmarks_to_file
 
-    def parse_bookmarks(self, raw):
+    def parse_bookmarks(self, raw: str) -> None:
         for bm in parse_bookmarks(raw):
             self.bookmarks.append(bm)
 
-    def serialize_bookmarks(self, bookmarks):
-        dat = []
+    def serialize_bookmarks(self, bookmarks: Iterable[Bookmark]) -> str:
+        dat: list[str] = []
         for bm in bookmarks:
             if bm['type'] == 'legacy':
-                rec = u'%s^%d#%s'%(bm['title'], bm['spine'], bm['pos'])
+                rec = f"{bm['title']}^{bm['spine']}#{bm['pos']}"
             else:
                 pos = bm['pos']
                 if isinstance(pos, numbers.Number):
-                    pos = unicode_type(pos)
+                    pos = str(pos)
                 else:
-                    pos = pos.replace(u'^', BM_LEGACY_ESC)
-                rec = BM_FIELD_SEP.join([bm['title'], unicode_type(bm['spine']), pos])
+                    pos = pos.replace('^', BM_LEGACY_ESC)  # ty: ignore[missing-union-attribute] numbers are handled above
+                rec = BM_FIELD_SEP.join([bm['title'], str(bm['spine']), pos])
             dat.append(rec)
-        return (u'\n'.join(dat) +u'\n')
+        return '\n'.join(dat) + '\n'
 
-    def read_bookmarks(self):
-        self.bookmarks = []
-        raw = self.config['bookmarks_'+self.pathtoebook] or ''
+    def read_bookmarks(self) -> None:
+        self.bookmarks: list[Bookmark] = []
+        raw = cast('str | bytes', self.config['bookmarks_' + self.pathtoebook] or '')  # stored by save_bookmarks() as str
         if not raw:
             # Look for bookmarks saved inside the ebook
             bmfile = os.path.join(self.base, 'META-INF', 'calibre_bookmarks.txt')
@@ -81,26 +92,27 @@ class BookmarksMixin(object):
             raw = raw.decode('utf-8')
         self.parse_bookmarks(raw)
 
-    def save_bookmarks(self, bookmarks=None, no_copy_to_file=False):
+    def save_bookmarks(self, bookmarks: list[Bookmark] | None = None, no_copy_to_file: bool = False) -> None:
         if bookmarks is None:
             bookmarks = self.bookmarks
         dat = self.serialize_bookmarks(bookmarks)
-        self.config['bookmarks_'+self.pathtoebook] = dat
-        if not no_copy_to_file and self.copy_bookmarks_to_file and os.path.splitext(
-                self.pathtoebook)[1].lower() == '.epub' and os.access(self.pathtoebook, os.W_OK):
+        self.config['bookmarks_' + self.pathtoebook] = dat
+        if (
+            not no_copy_to_file
+            and self.copy_bookmarks_to_file
+            and os.path.splitext(self.pathtoebook)[1].lower() == '.epub'
+            and os.access(self.pathtoebook, os.W_OK)
+        ):
             try:
-                with open(self.pathtoebook, 'r+b') as zf:
-                    safe_replace(zf, 'META-INF/calibre_bookmarks.txt',
-                            BytesIO(dat.encode('utf-8')),
-                            add_missing=True)
-            except IOError:
+                safe_replace(self.pathtoebook, 'META-INF/calibre_bookmarks.txt', BytesIO(dat.encode('utf-8')), add_missing=True)
+            except OSError:
                 return
 
-    def add_bookmark(self, bm, no_copy_to_file=False):
-        self.bookmarks = [x for x in self.bookmarks if x['title'] !=
-                bm['title']]
+    def add_bookmark(self, bm: Bookmark, no_copy_to_file: bool = False) -> None:
+        self.bookmarks = [x for x in self.bookmarks if x['title'] != bm['title']]
         self.bookmarks.append(bm)
         self.save_bookmarks(no_copy_to_file=no_copy_to_file)
 
-    def set_bookmarks(self, bookmarks):
+    def set_bookmarks(self, bookmarks: list[Bookmark]) -> None:
+
         self.bookmarks = bookmarks

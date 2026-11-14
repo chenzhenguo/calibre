@@ -1,44 +1,130 @@
 #!/usr/bin/env python
-__license__ = 'GPL v3'
-__copyright__ = '2009, Darko Miletic <darko.miletic at gmail.com>'
-'''
-www.nakedcapitalism.com
-'''
+# vim:fileencoding=utf-8
+import re
+from urllib.parse import quote
 
 from calibre.web.feeds.news import BasicNewsRecipe
 
 
-class nakedcapitalism(BasicNewsRecipe):
+class NakedCapitalism(BasicNewsRecipe):
     title = 'Naked Capitalism'
-    __author__ = 'Darko Miletic'
-    description = 'Commentary on current economic and financial news.'
-    publisher = 'Aurora Advisors, Inc.'
-    category = 'news, business, finances, money, banking'
     oldest_article = 7
     max_articles_per_feed = 100
-    no_stylesheets = True
-    use_embedded_content = False
-    encoding = 'utf-8'
-    language = 'en'
-    extra_css = (' #BlogTitle{font-size: x-large; font-weight: bold}'
-                 ' #BlogDate{font-size: small} ')
-    auto_claenup = False
+    # auto_cleanup removes the comments section as "clutter", so it is disabled.
+    # Page chrome is stripped explicitly below instead, leaving the comments intact.
+    auto_cleanup = False
+    remove_tags = [
+        dict(name=['header', 'footer', 'nav', 'aside', 'form', 'noscript']),
+        dict(
+            attrs={
+                'class': [
+                    'sidebar',
+                    'widget-area',
+                    'site-header',
+                    'site-footer',
+                    'navigation',
+                    'post-navigation',
+                    'sharedaddy',
+                    'comment-respond',
+                    'jp-relatedposts',
+                ]
+            }
+        ),
+        dict(attrs={'id': ['sidebar', 'secondary', 'respond', 'masthead', 'colophon']}),
+    ]
 
-    conversion_options = {
-        'comment': description,
-        'tags': category,
-        'publisher': publisher,
-        'language': language
-    }
+    extra_css = '''
+        body { font-family: serif !important; color: black !important; }
+        p { display: block !important; margin-bottom: 1em !important; line-height: 1.4 !important; }
+        img { max-width: 100% !important; height: auto !important; display: block !important; margin: 10px auto !important; }
+        div, article, section {
+            width: auto !important;
+            height: auto !important;
+            overflow: visible !important;
+            display: block !important;
+        }
+    '''
+
+    # Render embedded tweets as a plain image using a screenshot service.
+    # Set to False to keep the tweet as a normal text blockquote instead.
+    tweets_as_images = True
+
+    def _best_image_url(self, img):
+        # 1. Largest candidate listed in srcset
+        srcset = img.get('srcset') or img.get('data-lazy-srcset') or img.get('data-srcset')
+        if srcset:
+            best, best_w = None, -1
+            for part in srcset.split(','):
+                bits = part.strip().split()
+                if not bits:
+                    continue
+                m = re.match(r'(\d+)w', bits[1]) if len(bits) > 1 else None
+                w = int(m.group(1)) if m else 0
+                if w > best_w:
+                    best, best_w = bits[0], w
+            if best:
+                return best.split('?')[0]
+        # 2. WordPress/Jetpack attribute pointing at the original upload
+        for attr in ('data-orig-file', 'data-large-file', 'data-full-url', 'data-lazy-src', 'data-src'):
+            if img.get(attr):
+                return img[attr].split('?')[0]
+        # 3. Strip the "-300x200" resize suffix and any ?resize= query
+        src = img.get('src')
+        if src:
+            src = src.split('?')[0]
+            return re.sub(r'-\d+x\d+(\.[A-Za-z]{3,4})$', r'\1', src)
+        return None
+
+    def preprocess_html(self, soup):
+        # Tweets first, before scripts/iframes are removed
+        if self.tweets_as_images:
+            for bq in soup.findAll('blockquote'):
+                if 'twitter-tweet' not in (bq.get('class') or []):
+                    continue
+                tweet_id = None
+                for a in bq.findAll('a', href=True):
+                    m = re.search(r'/status(?:es)?/(\d+)', a['href'])
+                    if m:
+                        tweet_id = m.group(1)
+                if not tweet_id:
+                    continue
+                embed = 'https://platform.twitter.com/embed/Tweet.html?id=' + tweet_id
+                shot = (
+                    'https://api.microlink.io/?url=' + quote(embed, safe='') + '&screenshot=true&meta=false&embed=screenshot.url'
+                    '&viewport.width=550&viewport.height=450'
+                    '&viewport.deviceScaleFactor=2&waitUntil=networkidle2'
+                )
+                img = soup.new_tag('img', src=shot, alt=bq.get_text(' ', strip=True))
+                bq.replace_with(img)
+
+        # Full-resolution images
+        for img in soup.findAll('img'):
+            if 'api.microlink.io' in (img.get('src') or ''):
+                continue
+            url = self._best_image_url(img)
+            if url:
+                img['src'] = url
+
+        for tag in soup.findAll(['script', 'style', 'iframe', 'picture', 'source']):
+            tag.decompose()
+        for tag in soup.findAll(True):
+            for attr in ('style', 'srcset', 'sizes', 'width', 'height', 'data-lazy-srcset', 'data-srcset', 'data-lazy-src', 'data-src'):
+                if tag.has_attr(attr):
+                    del tag[attr]
+        return soup
+
+    def get_browser(self):
+        br = BasicNewsRecipe.get_browser(self)
+        br.set_handle_robots(False)
+        br.addheaders = [
+            ('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0'),
+            ('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'),
+            ('Accept-Language', 'en-US,en;q=0.5'),
+            ('Accept-Encoding', 'gzip, deflate, br'),
+            ('Connection', 'keep-alive'),
+        ]
+        return br
 
     feeds = [
-        (u'Articles', u'http://www.nakedcapitalism.com/feed'),
-        (u'Comments', u'http://www.nakedcapitalism.com/comments/feed'),
+        ('Naked Capitalism', 'https://www.nakedcapitalism.com/feed'),
     ]
-
-    keep_only_tags = [
-        dict(name='header', attrs={'class': 'entry-header'}),
-        dict(name='div', attrs={'class': 'pf-content'})
-    ]
-
-    remove_tags = [dict(name=['object', 'link', 'base'])]

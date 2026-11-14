@@ -1,42 +1,48 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-
-from PyQt5.Qt import QToolButton
+from qt.core import QToolButton
 
 from calibre.gui2.actions import InterfaceAction
-from polyglot.builtins import string_or_bytes
+from calibre.startup import connect_lambda
+from calibre.utils.config import tweaks
+from calibre.utils.icu import lower as icu_lower
+from calibre.utils.localization import _
 
 
 class SimilarBooksAction(InterfaceAction):
-
     name = 'Similar Books'
-    action_spec = (_('Similar books...'), 'similar.png', _('Show books similar to the current book'), None)
+    action_spec = (_('Similar books'), 'similar.png', _('Show books similar to the current book'), None)
     popup_type = QToolButton.ToolButtonPopupMode.InstantPopup
     action_type = 'current'
     action_add_menu = True
 
-    def genesis(self):
+    def genesis(self) -> None:
         m = self.qaction.menu()
+        assert m is not None
         for text, icon, target, shortcut in [
-        (_('Books by same author'), 'user_profile.png', 'authors', 'Alt+A'),
-        (_('Books in this series'), 'books_in_series.png', 'series',
-            'Alt+Shift+S'),
-        (_('Books by this publisher'), 'publisher.png', 'publisher', 'Alt+P'),
-        (_('Books with the same tags'), 'tags.png', 'tags', 'Alt+T'),]:
-            ac = self.create_action(spec=(text, icon, None, shortcut),
-                    attr=target)
+            (_('Books by same author'), 'user_profile.png', 'authors', 'Alt+A'),
+            (_('Books in this series'), 'books_in_series.png', 'series', 'Alt+Shift+S'),
+            (_('Books by this publisher'), 'publisher.png', 'publisher', 'Alt+P'),
+            (_('Books with the same tags'), 'tags.png', 'tags', 'Alt+T'),
+        ]:
+            ac = self.create_action(spec=(text, icon, None, shortcut), attr=target)
             ac.setObjectName(target)
             m.addAction(ac)
             connect_lambda(ac.triggered, self, lambda self: self.show_similar_books(self.gui.sender().objectName()))
+        ac = self.create_action(spec=(_('Ask AI for what to read next'), 'ai.png', None, 'Ctrl+Shift+A'), attr='ai')
+        ac.setObjectName('ai')
+        m.addAction(ac)
+        ac.triggered.connect(self.ask_ai)
+        ac.setVisible(not tweaks['hide_ai_features'])
         self.qaction.setMenu(m)
 
-    def show_similar_books(self, typ, *args):
+    def ask_ai(self) -> None:
+        from calibre.gui2.dialogs.llm_book import read_next_action
+
+        self.gui.iactions['Discuss book with AI'].ask_ai_with_action(read_next_action())
+
+    def show_similar_books(self, typ, *args) -> None:
         idx = self.gui.library_view.currentIndex()
         if not idx.isValid():
             return
@@ -44,7 +50,8 @@ class SimilarBooksAction(InterfaceAction):
         row = idx.row()
 
         # Get the parameters for this search
-        col = db.prefs['similar_' + typ + '_search_key']
+        key = 'similar_' + typ + '_search_key'
+        col = db.prefs[key]
         match = db.prefs['similar_' + typ + '_match_kind']
         if match == 'match_all':
             join = ' and '
@@ -66,19 +73,30 @@ class SimilarBooksAction(InterfaceAction):
                 v = mi.get(f, None)
                 if not v:
                     continue
+                v = db.new_api.split_if_is_multiple_composite(f, v)
                 if isinstance(v, list):
                     val.update(v)
                 else:
                     val.add(v)
         else:
-            # Get the value of the requested field. Can be a list or a simple val
-            val = mi.get(col, None)
+            # Get the value of the requested field. Can be a list or a simple
+            # val. It is possible that col no longer exists, in which case fall
+            # back to the default
+            if col not in mi.all_field_keys():
+                col = db.prefs.defaults[key]
+            val = db.new_api.split_if_is_multiple_composite(col, mi.get(col, None))
         if not val:
             return
 
-        if isinstance(val, string_or_bytes):
+        if isinstance(val, (str, bytes)):
             val = [val]
-        search = [col + ':"='+t.replace('"', '\\"')+'"' for t in val]
+        if typ == 'authors':
+            import re
+
+            def remove_et_al(au):
+                return re.sub(r'\s+et al\.$', '', au)
+
+            val = list(map(remove_et_al, val))
+        search = [col + ':"=' + str(t).replace('"', '\\"') + '"' for t in val]
         if search:
-            self.gui.search.set_search_string(join.join(search),
-                    store_in_history=True)
+            self.gui.search.set_search_string(join.join(search), store_in_history=True)

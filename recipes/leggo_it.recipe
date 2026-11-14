@@ -8,6 +8,7 @@ description = 'Italian daily newspaper - v1.00 05-05-2010'
 http://www.leggo.it
 '''
 import time
+
 from calibre.web.feeds.news import BasicNewsRecipe
 
 
@@ -15,8 +16,8 @@ class LeggoIT(BasicNewsRecipe):
     __author__ = 'Gabriele Marini'
     description = 'Italian Free daily newspaper'
 
-#    cover_url      = 'http://www.leggo.it/img/logo-leggo2.gif'
-    title = u'Leggo.it'
+    # cover_url      = 'http://www.leggo.it/img/logo-leggo2.gif'
+    title = 'Leggo.it'
     publisher = 'Ced Caltagirone Editore S.p.A.'
     category = 'News, politics, culture, economy, general interest'
 
@@ -32,38 +33,35 @@ class LeggoIT(BasicNewsRecipe):
     remove_javascript = True
     conversion_options = {'linearize_tables': True}
 
-    keep_only_tags = [
-        dict(name='h1', attrs={'class': 'nero22'}),
-        dict(name='div', attrs={'id': 'testodim'})
-    ]
+    keep_only_tags = [dict(name='h1', attrs={'class': 'nero22'}), dict(name='div', attrs={'id': 'testodim'})]
     feeds = [
-        (u'Home Page', u'http://www.leggo.it/rss/home.xml'),
-        (u'Italia', u'http://www.leggo.it/rss/italia.xml'),
-        (u'Esteri', u'http://www.leggo.it/rss/esteri.xml'),
-        (u'Economia', u'http://www.leggo.it/rss/economia.xml'),
-        (u'Sport', u'http://www.leggo.it/rss/sport.xml'),
-        (u'Gossip', u'http://www.leggo.it/rss/gossip.xml'),
-        (u'Spettacoli', u'http://www.leggo.it/rss/spettacoli.xml'),
-        (u'Salute', u'http://www.leggo.it/rss/salute.xml'),
-        (u'Scienza', u'http://www.leggo.it/rss/scienza.xml')
+        ('Home Page', 'http://www.leggo.it/rss/home.xml'),
+        ('Italia', 'http://www.leggo.it/rss/italia.xml'),
+        ('Esteri', 'http://www.leggo.it/rss/esteri.xml'),
+        ('Economia', 'http://www.leggo.it/rss/economia.xml'),
+        ('Sport', 'http://www.leggo.it/rss/sport.xml'),
+        ('Gossip', 'http://www.leggo.it/rss/gossip.xml'),
+        ('Spettacoli', 'http://www.leggo.it/rss/spettacoli.xml'),
+        ('Salute', 'http://www.leggo.it/rss/salute.xml'),
+        ('Scienza', 'http://www.leggo.it/rss/scienza.xml'),
     ]
 
     def get_cover_url(self):
         cover = None
         st = time.localtime()
         year = str(st.tm_year)
-        month = "%.2d" % st.tm_mon
-        day = "%.2d" % st.tm_mday
+        month = '%.2d' % st.tm_mon
+        day = '%.2d' % st.tm_mday
         cover = 'http://www.leggo.it/' + year + month + day + '/jpeg/LEGGO_ROMA_1.jpg'
         br = BasicNewsRecipe.get_browser(self)
         try:
             br.open(cover)
-        except:
+        except Exception:
             cover = 'http://www.leggo.it/' + year + month + day + '/jpeg/LEGGO_ROMA_3.jpg'
             br = BasicNewsRecipe.get_browser(self)
             try:
                 br.open(cover)
-            except:
-                self.log("\nCover unavailable")
+            except Exception:
+                self.log('\nCover unavailable')
                 cover = 'http://www.leggo.it/img/logo-leggo2.gif'
         return cover

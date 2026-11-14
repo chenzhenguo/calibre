@@ -1,69 +1,86 @@
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
 
-__license__   = 'GPL v3'
-__copyright__ = '2008, Kovid Goyal <kovid at kovidgoyal.net>'
-
-import os, glob, re, textwrap
+import glob
+import os
+import re
+import textwrap
+from typing import IO, TYPE_CHECKING
 
 from calibre.customize.conversion import InputFormatPlugin, OptionRecommendation
-from polyglot.builtins import iteritems, filter, getcwd, as_bytes
+from calibre.utils.localization import _
+from calibre.utils.resources import get_path as P
+from polyglot.builtins import as_bytes
+
+if TYPE_CHECKING:
+    import unittest
+    from optparse import Values
+
+    from lxml.etree import _Element
+
+    from calibre.ebooks.oeb.base import OEBBook
+    from calibre.ebooks.rtf.input import InlineClass
+    from calibre.utils.logging import Log
 
 border_style_map = {
-        'single' : 'solid',
-        'double-thickness-border' : 'double',
-        'shadowed-border': 'outset',
-        'double-border': 'double',
-        'dotted-border': 'dotted',
-        'dashed': 'dashed',
-        'hairline': 'solid',
-        'inset': 'inset',
-        'dash-small': 'dashed',
-        'dot-dash': 'dotted',
-        'dot-dot-dash': 'dotted',
-        'outset': 'outset',
-        'tripple': 'double',
-        'triple': 'double',
-        'thick-thin-small': 'solid',
-        'thin-thick-small': 'solid',
-        'thin-thick-thin-small': 'solid',
-        'thick-thin-medium': 'solid',
-        'thin-thick-medium': 'solid',
-        'thin-thick-thin-medium': 'solid',
-        'thick-thin-large': 'solid',
-        'thin-thick-thin-large': 'solid',
-        'wavy': 'ridge',
-        'double-wavy': 'ridge',
-        'striped': 'ridge',
-        'emboss': 'inset',
-        'engrave': 'inset',
-        'frame': 'ridge',
+    'single': 'solid',
+    'double-thickness-border': 'double',
+    'shadowed-border': 'outset',
+    'double-border': 'double',
+    'dotted-border': 'dotted',
+    'dashed': 'dashed',
+    'hairline': 'solid',
+    'inset': 'inset',
+    'dash-small': 'dashed',
+    'dot-dash': 'dotted',
+    'dot-dot-dash': 'dotted',
+    'outset': 'outset',
+    'tripple': 'double',
+    'triple': 'double',
+    'thick-thin-small': 'solid',
+    'thin-thick-small': 'solid',
+    'thin-thick-thin-small': 'solid',
+    'thick-thin-medium': 'solid',
+    'thin-thick-medium': 'solid',
+    'thin-thick-thin-medium': 'solid',
+    'thick-thin-large': 'solid',
+    'thin-thick-thin-large': 'solid',
+    'wavy': 'ridge',
+    'double-wavy': 'ridge',
+    'striped': 'ridge',
+    'emboss': 'inset',
+    'engrave': 'inset',
+    'frame': 'ridge',
 }
 
 
 class RTFInput(InputFormatPlugin):
-
-    name        = 'RTF Input'
-    author      = 'Kovid Goyal'
-    description = 'Convert RTF files to HTML'
-    file_types  = {'rtf'}
+    name = 'RTF Input'
+    author = 'Kovid Goyal'
+    description = _('Convert RTF files to HTML')
+    file_types = {'rtf'}
     commit_name = 'rtf_input'
 
     options = {
-        OptionRecommendation(name='ignore_wmf', recommended_value=False,
-            help=_('Ignore WMF images instead of replacing them with a placeholder image.')),
+        OptionRecommendation(
+            name='ignore_wmf',
+            recommended_value=False,
+            help=_('Ignore WMF images instead of replacing them with a placeholder image.'),
+        ),
     }
 
-    def generate_xml(self, stream):
+    def generate_xml(self, stream: str) -> bytes:
         from calibre.ebooks.rtf2xml.ParseRtf import ParseRtf
-        ofile = u'dataxml.xml'
+
+        ofile = 'dataxml.xml'
         run_lev, debug_dir, indent_out = 1, None, 0
         if getattr(self.opts, 'debug_pipeline', None) is not None:
             try:
-                os.mkdir(u'rtfdebug')
-                debug_dir = u'rtfdebug'
+                os.mkdir('rtfdebug')
+                debug_dir = 'rtfdebug'
                 run_lev = 4
                 indent_out = 1
                 self.log('Running RTFParser in debug mode')
-            except:
+            except Exception:
                 self.log.warn('Impossible to run RTFParser in debug mode')
         parser = ParseRtf(
             in_file=stream,
@@ -71,44 +88,32 @@ class RTFInput(InputFormatPlugin):
             # Convert symbol fonts to unicode equivalents. Default
             # is 1
             convert_symbol=1,
-
             # Convert Zapf fonts to unicode equivalents. Default
             # is 1.
             convert_zapf=1,
-
             # Convert Wingding fonts to unicode equivalents.
             # Default is 1.
             convert_wingdings=1,
-
             # Convert RTF caps to real caps.
             # Default is 1.
             convert_caps=1,
-
             # Indent resulting XML.
             # Default is 0 (no indent).
             indent=indent_out,
-
             # Form lists from RTF. Default is 1.
             form_lists=1,
-
             # Convert headings to sections. Default is 0.
             headings_to_sections=1,
-
             # Group paragraphs with the same style name. Default is 1.
             group_styles=1,
-
             # Group borders. Default is 1.
             group_borders=1,
-
             # Write or do not write paragraphs. Default is 0.
             empty_paragraphs=1,
-
             # Debug
             deb_dir=debug_dir,
-
             # Default encoding
             default_encoding=getattr(self.opts, 'input_encoding', 'cp1252') or 'cp1252',
-
             # Run level
             run_level=run_lev,
         )
@@ -116,28 +121,28 @@ class RTFInput(InputFormatPlugin):
         with open(ofile, 'rb') as f:
             return f.read()
 
-    def extract_images(self, picts):
-        from calibre.utils.imghdr import what
+    def extract_images(self, picts: str) -> dict[int, str]:
         from binascii import unhexlify
+
+        from calibre.utils.imghdr import what
+
         self.log('Extracting images...')
 
         with open(picts, 'rb') as f:
             raw = f.read()
-        picts = filter(len, re.findall(br'\{\\pict([^}]+)\}', raw))
-        hex_pat = re.compile(br'[^a-fA-F0-9]')
-        encs = [hex_pat.sub(b'', pict) for pict in picts]
+        pict_data = filter(len, re.findall(rb'\{\\pict([^}]+)\}', raw))
+        hex_pat = re.compile(rb'[^a-fA-F0-9]')
+        encs = [hex_pat.sub(b'', pict) for pict in pict_data]
 
-        count = 0
-        imap = {}
-        for enc in encs:
+        imap: dict[int, str] = {}
+        for count, enc in enumerate(encs, 1):
             if len(enc) % 2 == 1:
                 enc = enc[:-1]
             data = unhexlify(enc)
             fmt = what(None, data)
             if fmt is None:
                 fmt = 'wmf'
-            count += 1
-            name = u'%04d.%s' % (count, fmt)
+            name = f'{count:04}.{fmt}'
             with open(name, 'wb') as f:
                 f.write(data)
             imap[count] = name
@@ -145,40 +150,42 @@ class RTFInput(InputFormatPlugin):
             #     f.write(enc)
         return self.convert_images(imap)
 
-    def convert_images(self, imap):
+    def convert_images(self, imap: dict[int, str]) -> dict[int, str]:
         self.default_img = None
-        for count, val in iteritems(imap):
+        for count, val in imap.items():
             try:
                 imap[count] = self.convert_image(val)
-            except:
+            except Exception:
                 self.log.exception('Failed to convert', val)
         return imap
 
-    def convert_image(self, name):
+    def convert_image(self, name: str) -> str:
         if not name.endswith('.wmf'):
             return name
         try:
             return self.rasterize_wmf(name)
         except Exception:
-            self.log.exception('Failed to convert WMF image %r'%name)
+            self.log.exception(f'Failed to convert WMF image {name!r}')
         return self.replace_wmf(name)
 
-    def replace_wmf(self, name):
+    def replace_wmf(self, name: str) -> str:
         if self.opts.ignore_wmf:
             os.remove(name)
             return '__REMOVE_ME__'
         from calibre.ebooks.covers import message_image
+
         if self.default_img is None:
-            self.default_img = message_image('Conversion of WMF images is not supported.'
-            ' Use Microsoft Word or OpenOffice to save this RTF file'
-            ' as HTML and convert that in calibre.')
+            self.default_img = message_image(
+                'Conversion of WMF images is not supported. Use Microsoft Word or LibreOffice to save this RTF file as HTML and convert that in calibre.'
+            )
         name = name.replace('.wmf', '.jpg')
-        with lopen(name, 'wb') as f:
+        with open(name, 'wb') as f:
             f.write(self.default_img)
         return name
 
-    def rasterize_wmf(self, name):
+    def rasterize_wmf(self, name: str) -> str:
         from calibre.utils.wmf.parse import wmf_unwrap
+
         with open(name, 'rb') as f:
             data = f.read()
         data = wmf_unwrap(data)
@@ -187,11 +194,9 @@ class RTFInput(InputFormatPlugin):
             f.write(data)
         return name
 
-    def write_inline_css(self, ic, border_styles):
-        font_size_classes = ['span.fs%d { font-size: %spt }'%(i, x) for i, x in
-                enumerate(ic.font_sizes)]
-        color_classes = ['span.col%d { color: %s }'%(i, x) for i, x in
-                enumerate(ic.colors) if x != 'false']
+    def write_inline_css(self, ic: InlineClass, border_styles: dict[str, str]) -> None:
+        font_size_classes = [f'span.fs{i} {{ font-size: {x}pt }}' for i, x in enumerate(ic.font_sizes)]
+        color_classes = [f'span.col{i} {{ color: {x} }}' for i, x in enumerate(ic.colors) if x != 'false']
         css = textwrap.dedent('''
         span.none {
             text-decoration: none; font-weight: normal;
@@ -209,49 +214,49 @@ class RTFInput(InputFormatPlugin):
         span.strike-through { text-decoration: line-through }
 
         ''')
-        css += '\n'+'\n'.join(font_size_classes)
-        css += '\n' +'\n'.join(color_classes)
+        css += '\n' + '\n'.join(font_size_classes)
+        css += '\n' + '\n'.join(color_classes)
 
-        for cls, val in iteritems(border_styles):
-            css += '\n\n.%s {\n%s\n}'%(cls, val)
+        for cls, val in border_styles.items():
+            css += f'\n\n.{cls} {{\n{val}\n}}'
 
-        with open(u'styles.css', 'ab') as f:
+        with open('styles.css', 'ab') as f:
             f.write(css.encode('utf-8'))
 
-    def convert_borders(self, doc):
+    def convert_borders(self, doc: _Element) -> dict[str, str]:
         border_styles = []
         style_map = {}
         for elem in doc.xpath(r'//*[local-name()="cell"]'):
-            style = ['border-style: hidden', 'border-width: 1px',
-                    'border-color: black']
+            style = ['border-style: hidden', 'border-width: 1px', 'border-color: black']
             for x in ('bottom', 'top', 'left', 'right'):
-                bs = elem.get('border-cell-%s-style'%x, None)
+                bs = elem.get(f'border-cell-{x}-style', None)
                 if bs:
                     cbs = border_style_map.get(bs, 'solid')
-                    style.append('border-%s-style: %s'%(x, cbs))
-                bw = elem.get('border-cell-%s-line-width'%x, None)
+                    style.append(f'border-{x}-style: {cbs}')
+                bw = elem.get(f'border-cell-{x}-line-width', None)
                 if bw:
-                    style.append('border-%s-width: %spt'%(x, bw))
-                bc = elem.get('border-cell-%s-color'%x, None)
+                    style.append(f'border-{x}-width: {bw}pt')
+                bc = elem.get(f'border-cell-{x}-color', None)
                 if bc:
-                    style.append('border-%s-color: %s'%(x, bc))
+                    style.append(f'border-{x}-color: {bc}')
             style = ';\n'.join(style)
             if style not in border_styles:
                 border_styles.append(style)
             idx = border_styles.index(style)
-            cls = 'border_style%d'%idx
+            cls = f'border_style{idx}'
             style_map[cls] = style
             elem.set('class', cls)
         return style_map
 
-    def convert(self, stream, options, file_ext, log,
-                accelerators):
+    def convert(self, stream: IO[bytes], options: Values, file_ext: str, log: Log, accelerators: dict[str, str]) -> str:
         from lxml import etree
+
         from calibre.ebooks.metadata.meta import get_metadata
         from calibre.ebooks.metadata.opf2 import OPFCreator
-        from calibre.ebooks.rtf2xml.ParseRtf import RtfInvalidCodeException
         from calibre.ebooks.rtf.input import InlineClass
+        from calibre.ebooks.rtf2xml.ParseRtf import RtfInvalidCodeException
         from calibre.utils.xml_parse import safe_xml_fromstring
+
         self.opts = options
         self.log = log
         self.log('Converting RTF to XML...')
@@ -259,22 +264,20 @@ class RTFInput(InputFormatPlugin):
             xml = self.generate_xml(stream.name)
         except RtfInvalidCodeException as e:
             self.log.exception('Unable to parse RTF')
-            raise ValueError(_('This RTF file has a feature calibre does not '
-            'support. Convert it to HTML first and then try it.\n%s')%e)
+            raise ValueError(_('This RTF file has a feature calibre does not support. Convert it to HTML first and then try it.\n%s') % e)
 
         d = glob.glob(os.path.join('*_rtf_pict_dir', 'picts.rtf'))
         if d:
             imap = {}
             try:
                 imap = self.extract_images(d[0])
-            except:
+            except Exception:
                 self.log.exception('Failed to extract images...')
 
         self.log('Parsing XML...')
         doc = safe_xml_fromstring(xml)
         border_styles = self.convert_borders(doc)
-        for pict in doc.xpath('//rtf:pict[@num]',
-                namespaces={'rtf':'http://rtf2xml.sourceforge.net/'}):
+        for pict in doc.xpath('//rtf:pict[@num]', namespaces={'rtf': 'http://rtf2xml.sourceforge.net/'}):
             num = int(pict.get('num'))
             name = imap.get(num, None)
             if name is not None:
@@ -283,19 +286,19 @@ class RTFInput(InputFormatPlugin):
         self.log('Converting XML to HTML...')
         inline_class = InlineClass(self.log)
         styledoc = safe_xml_fromstring(P('templates/rtf.xsl', data=True), recover=False)
-        extensions = {('calibre', 'inline-class') : inline_class}
+        extensions = {('calibre', 'inline-class'): inline_class}
         transform = etree.XSLT(styledoc, extensions=extensions)
         result = transform(doc)
-        html = u'index.xhtml'
+        html = 'index.xhtml'
         with open(html, 'wb') as f:
-            res = as_bytes(transform.tostring(result))
+            res = as_bytes(str(result))
             # res = res[:100].replace('xmlns:html', 'xmlns') + res[100:]
             # clean multiple \n
-            res = re.sub(b'\n+', b'\n', res)
+            res = re.sub(rb'\n+', b'\n', res)
             # Replace newlines inserted by the 'empty_paragraphs' option in rtf2xml with html blank lines
-            # res = re.sub('\s*<body>', '<body>', res)
-            # res = re.sub('(?<=\n)\n{2}',
-            # u'<p>\u00a0</p>\n'.encode('utf-8'), res)
+            # res = re.sub(br'\s*<body>', '<body>', res)
+            # res = re.sub(br'(?<=\n)\n{2}',
+            # '<p>\u00a0</p>\n'.encode('utf-8'), res)
             f.write(res)
         self.write_inline_css(inline_class, border_styles)
         stream.seek(0)
@@ -304,15 +307,20 @@ class RTFInput(InputFormatPlugin):
             mi.title = _('Unknown')
         if not mi.authors:
             mi.authors = [_('Unknown')]
-        opf = OPFCreator(getcwd(), mi)
-        opf.create_manifest([(u'index.xhtml', None)])
-        opf.create_spine([u'index.xhtml'])
-        opf.render(open(u'metadata.opf', 'wb'))
-        return os.path.abspath(u'metadata.opf')
+        opf = OPFCreator(os.getcwd(), mi)
+        opf.create_manifest([('index.xhtml', None)])
+        opf.create_spine(['index.xhtml'])
+        with open('metadata.opf', 'wb') as f:
+            opf.render(f)
+        return os.path.abspath('metadata.opf')
 
-    def postprocess_book(self, oeb, opts, log):
+    def postprocess_book(self, oeb: OEBBook, opts: Values, log: Log) -> None:
+        from lxml import etree
+
         for item in oeb.spine:
-            for img in item.data.xpath('//*[local-name()="img" and @src="__REMOVE_ME__"]'):
+            root = item.data
+            assert isinstance(root, etree._Element)
+            for img in root.xpath('//*[local-name()="img" and @src="__REMOVE_ME__"]'):
                 p = img.getparent()
                 idx = p.index(img)
                 p.remove(img)
@@ -320,4 +328,127 @@ class RTFInput(InputFormatPlugin):
                     if idx == 0:
                         p.text = (p.text or '') + img.tail
                     else:
-                        p[idx-1].tail = (p[idx-1].tail or '') + img.tail
+                        p[idx - 1].tail = (p[idx - 1].tail or '') + img.tail
+
+
+def find_tests() -> unittest.TestSuite:
+    import unittest
+    from optparse import Values
+
+    from calibre import CurrentDir
+    from calibre.ptempfile import TemporaryDirectory
+    from calibre.utils.xml_parse import safe_xml_fromstring
+
+    def rtf(code_page: str, body: str, fonts: str = '{\\f0\\fnil Font;}', deff: int = 0) -> str:
+        cpg = f'\\ansicpg{code_page}' if code_page else ''
+        return '{\\rtf1\\ansi' + cpg + f'\\deff{deff}{{\\fonttbl' + fonts + '}\n\\pard ' + body + '\\par\n}\n'
+
+    def hex_escapes(text: str, codec: str) -> str:
+        # As written by WordPad: bytes above 0x7f as hex escapes, the others as
+        # plain text
+        ans = []
+        for b in text.encode(codec):
+            c = chr(b)
+            ans.append(f"\\'{b:02x}" if b > 0x7F else ('\\' + c if c in '\\{}' else c))
+        return ''.join(ans)
+
+    def unicode_escapes(text: str, codec: str) -> str:
+        # As written by Word: \uN followed by the bytes of the character in the
+        # code page, for readers that do not understand \uN
+        ans = []
+        for c in text:
+            if ord(c) < 0x80:
+                ans.append(c)
+            else:
+                fallback = c.encode(codec)
+                ans.append(f'\\uc{len(fallback)}\\u{ord(c)}' + ''.join(f"\\'{b:02x}" for b in fallback))
+        return ''.join(ans)
+
+    def convert(rtf: str, input_encoding: str | None = None) -> str:
+        with TemporaryDirectory() as tdir, CurrentDir(tdir):
+            with open('input.rtf', 'w', encoding='ascii') as f:
+                f.write(rtf)
+            plugin = RTFInput(None)
+            plugin.opts = Values({'input_encoding': input_encoding, 'debug_pipeline': None})
+            root = safe_xml_fromstring(plugin.generate_xml('input.rtf'))
+            return ''.join(root.xpath('//*[local-name()="para"]//text()')).strip()
+
+    class RTFInputTest(unittest.TestCase):
+        def test_code_pages_without_table(self) -> None:
+            for code_page, codec, text in (
+                ('932', 'cp932', '日本語の文章'),
+                ('936', 'gbk', '简体中文'),
+                ('949', 'cp949', '한국어 문장'),
+                ('874', 'cp874', 'ภาษาไทย'),
+                ('1258', 'cp1258', 'Xin chào'),
+            ):
+                self.assertEqual(convert(rtf(code_page, 'Hello ' + unicode_escapes(text, codec))), 'Hello ' + text, code_page)
+                self.assertEqual(convert(rtf(code_page, 'Hello')), 'Hello', code_page)
+
+        def test_double_byte_hex_escapes(self) -> None:
+            # trail bytes below 0x80 are written as plain text, including \ { }
+            for code_page, codec, text in (
+                ('932', 'cp932', 'こんにちは、表示ソフトのアイコン'),
+                ('936', 'gbk', '你好，世界'),
+                ('949', 'cp949', '안녕하세요 똠방각하'),
+                ('950', 'cp950', '許功蓋你好，世界'),
+            ):
+                self.assertEqual(convert(rtf(code_page, 'Hello ' + hex_escapes(text, codec) + ' end')), f'Hello {text} end', code_page)
+            # a lead byte without a trail byte
+            self.assertEqual(convert(rtf('932', "a\\'82 b")), 'a' + chr(0xFFFD) + ' b')
+
+        def test_multibyte_control_bytes(self) -> None:
+            # bytes that are not lead bytes are converted with the character map,
+            # which leaves out control characters
+            self.assertEqual(convert(rtf('932', "x\\'00y a\\'0bb \\'80")), 'xy ab')
+
+        def test_utf8_code_page(self) -> None:
+            self.assertEqual(convert(rtf('65001', "caf\\'c3\\'a9 \\'e2\\'82\\'ac")), 'café €')
+            self.assertEqual(convert(rtf('65001', "a\\'c3x")), 'a' + chr(0xFFFD) + 'x')
+
+        def test_font_charset(self) -> None:
+            fonts = (
+                '{\\f0\\fnil\\fcharset128 Mincho;}{\\f1\\fswiss\\fcharset0 Arial;}{\\f2\\fnil\\fcharset204 Cyr;}'
+                '{\\f3\\fnil\\fcharset134 Song;}{\\f4\\fnil\\fcharset2 Webdings;}'
+            )
+            latin = "{\\f1 caf\\'e9t\\'e9}"
+
+            def all_hex(text: str, codec: str) -> str:
+                # As written by Word: all bytes of multibyte characters as hex escapes
+                return ''.join(f"\\'{b:02x}" if c > '\x7f' else c for c in text for b in c.encode(codec))
+
+            japanese = '{\\f0 ' + all_hex('日本語', 'cp932') + '}'
+            chinese = '{\\f3 ' + all_hex('你好', 'gbk') + '}'
+            # the text of a Latin font in a document with a multibyte code page
+            self.assertEqual(convert(rtf('932', f'x{latin}y {japanese}', fonts)), 'xcafétéy 日本語')
+            # Word writes double byte characters in runs of a Latin font, with
+            # the trail bytes as hex escapes
+            self.assertEqual(convert(rtf('932', '{\\f1 ' + all_hex('表示', 'cp932') + '}', fonts)), '表示')
+            self.assertEqual(convert(rtf('932', "{\\f4 x\\'e0abc}", fonts)), 'xàabc')
+            # the text of multibyte fonts in a document with a single byte code page
+            self.assertEqual(convert(rtf('1252', f'{latin} {japanese} {chinese}', fonts)), 'cafété 日本語 你好')
+            # text in the default font
+            self.assertEqual(convert(rtf('1252', all_hex('日本語', 'cp932') + f' {latin}', fonts, deff=0)), '日本語 cafété')
+            # single byte characters in a multibyte font in a document with a
+            # single byte code page are converted as before
+            self.assertEqual(convert(rtf('1252', "caf\\'e9 na\\'efve", fonts, deff=0)), 'café naïve')
+            # single byte fonts in documents with a single byte code page are
+            # converted with the code page of the document, as before
+            self.assertEqual(convert(rtf('1252', "{\\f2 \\'e9}", fonts)), 'é')
+            # UTF-8 documents with Latin fonts
+            self.assertEqual(convert(rtf('65001', "caf\\'c3\\'a9 \\'e2\\'82\\'ac", '{\\f0\\fswiss\\fcharset0 Helvetica;}')), 'café €')
+
+        def test_code_page_extras(self) -> None:
+            self.assertEqual(convert(rtf('936', "a\\'80b")), 'a€b')
+            self.assertEqual(convert(rtf('10001', hex_escapes('日本語', 'cp932'))), '日本語')
+
+        def test_input_encoding(self) -> None:
+            self.assertEqual(convert(rtf('', hex_escapes('日本語', 'cp932')), input_encoding='shift_jis'), '日本語')
+
+    return unittest.defaultTestLoader.loadTestsFromTestCase(RTFInputTest)
+
+
+if __name__ == '__main__':
+    from calibre.utils.run_tests import run_tests
+
+    run_tests(find_tests)

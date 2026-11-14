@@ -1,50 +1,51 @@
-# -*- coding: utf-8 -*-
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2009, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-'''
+"""
 Device driver for the Netronix EB600
 
 Windows PNP strings:
  ('USBSTOR\\DISK&VEN_NETRONIX&PROD_EBOOK&REV_062E\\6&1A275569&0&EB6001009
-2W00000&0', 2, u'F:\\')
+2W00000&0', 2, 'F:\\')
         ('USBSTOR\\DISK&VEN_NETRONIX&PROD_EBOOK&REV_062E\\6&1A275569&0&EB6001009
-2W00000&1', 3, u'G:\\')
+2W00000&1', 3, 'G:\\')
 
-'''
+"""
+
 import re
+from typing import TYPE_CHECKING
 
 from calibre.devices.usbms.driver import USBMS
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from calibre.devices.interface import DeviceInformation, USBDeviceInfo
 
 
 class EB600(USBMS):
-
-    name           = 'Netronix EB600 Device Interface'
-    gui_name       = 'Netronix EB600'
-    description    = _('Communicate with the EB600 e-book reader.')
-    author         = 'Kovid Goyal'
+    name = 'Netronix EB600 Device Interface'
+    gui_name = 'Netronix EB600'
+    description = _('Communicate with the EB600 e-book reader.')
+    author = 'Kovid Goyal'
     supported_platforms = ['windows', 'osx', 'linux']
 
     # Ordered list of supported formats
-    FORMATS     = ['epub', 'mobi', 'prc', 'chm', 'djvu', 'html', 'rtf', 'txt',
-        'pdf']
+    FORMATS = ['epub', 'mobi', 'prc', 'chm', 'djvu', 'html', 'rtf', 'txt', 'pdf']
     DRM_FORMATS = ['prc', 'mobi', 'html', 'pdf', 'txt']
 
-    VENDOR_ID   = [0x1f85]
-    PRODUCT_ID  = [0x1688]
-    BCD         = [0x110]
+    EB600_VENDOR_ID = [0x1F85]
+    EB600_PRODUCT_ID = [0x1688]
+    VENDOR_ID = EB600_VENDOR_ID
+    PRODUCT_ID = EB600_PRODUCT_ID
+    BCD = [0x110]
 
-    VENDOR_NAME      = ['NETRONIX', 'WOLDER', 'MD86371']
+    VENDOR_NAME = ['NETRONIX', 'WOLDER', 'MD86371']
     WINDOWS_MAIN_MEM = ['EBOOK', 'MIBUK_GAMMA_6.2', 'MD86371']
     WINDOWS_CARD_A_MEM = ['EBOOK', 'MD86371']
 
     OSX_MAIN_MEM = 'EB600 Internal Storage Media'
     OSX_CARD_A_MEM = 'EB600 Card Storage Media'
 
-    MAIN_MEMORY_VOLUME_LABEL  = 'EB600 Main Memory'
+    MAIN_MEMORY_VOLUME_LABEL = 'EB600 Main Memory'
     STORAGE_CARD_VOLUME_LABEL = 'EB600 Storage Card'
 
     EBOOK_DIR_MAIN = ''
@@ -53,21 +54,30 @@ class EB600(USBMS):
 
 
 class TOLINO(EB600):
-
     name = 'Tolino Shine Device Interface'
-    gui_name = 'tolino shine'
-    description    = _('Communicate with the tolino shine and vision readers')
+    gui_name = 'Tolino Shine'
+    description = _('Communicate with the Tolino Shine and Vision readers')
     FORMATS = ['epub', 'pdf', 'txt']
-    PRODUCT_ID  = EB600.PRODUCT_ID + [0x6033, 0x6052, 0x6053]
-    BCD         = [0x226, 0x9999]
-    VENDOR_NAME      = ['DEUTSCHE', 'LINUX']
+
+    EPOS_PRODUCT_ID = [0x6053]
+    VISION6_PRODUCT_ID = [0x8000]
+    OTHER_TOLINO_PRODUCT_ID = [0x6033, 0x6052]
+    PRODUCT_ID = EB600.EB600_PRODUCT_ID + OTHER_TOLINO_PRODUCT_ID + EPOS_PRODUCT_ID + VISION6_PRODUCT_ID
+
+    KOBO_VENDOR_ID = [0x4173]  # Some newer Tolino devices have the Kobo Vendor ID. But, they still use different software.
+    VENDOR_ID = EB600.EB600_VENDOR_ID + KOBO_VENDOR_ID
+    BCD = [0x226, 0x9999]
+    VENDOR_NAME = ['DEUTSCHE', 'LINUX']
     WINDOWS_MAIN_MEM = WINDOWS_CARD_A_MEM = ['_TELEKOMTOLINO', 'FILE-CD_GADGET']
+    EBOOK_DIR_MAIN = ''
 
     EXTRA_CUSTOMIZATION_MESSAGE = [
-        _('Swap main and card A') +
-        ':::' +
-        _('Check this box if the device\'s main memory is being seen as card a and the card '
-            'is being seen as main memory. Some tolino devices may need this option.'),
+        _('Swap main and card A')
+        + ':::'
+        + _(
+            "Check this box if the device's main memory is being seen as card a and the card "
+            'is being seen as main memory. Some tolino devices may need this option.'
+        ),
     ]
 
     EXTRA_CUSTOMIZATION_DEFAULT = [
@@ -76,9 +86,13 @@ class TOLINO(EB600):
 
     OPT_SWAP_MEMORY = 0
 
+    def get_device_information(self, end_session: bool = True) -> DeviceInformation:
+        self.set_device_name()
+        return super().get_device_information(end_session)
+
     # There are apparently two versions of this device, one with swapped
     # drives and one without, see https://bugs.launchpad.net/bugs/1240504
-    def linux_swap_drives(self, drives):
+    def linux_swap_drives(self, drives: list[str | None]) -> list[str | None]:
         e = self.settings().extra_customization
         if len(drives) < 2 or not drives[0] or not drives[1] or not e[self.OPT_SWAP_MEMORY]:
             return drives
@@ -86,9 +100,9 @@ class TOLINO(EB600):
         t = drives[0]
         drives[0] = drives[1]
         drives[1] = t
-        return tuple(drives)
+        return drives
 
-    def windows_sort_drives(self, drives):
+    def windows_sort_drives(self, drives: dict[str, str]) -> dict[str, str]:
         e = self.settings().extra_customization
         if len(drives) < 2 or not e[self.OPT_SWAP_MEMORY]:
             return drives
@@ -99,7 +113,7 @@ class TOLINO(EB600):
             drives['carda'] = main
         return drives
 
-    def osx_sort_names(self, names):
+    def osx_sort_names(self, names: dict[str, str]) -> dict[str, str]:
         e = self.settings().extra_customization
         if len(names) < 2 or not e[self.OPT_SWAP_MEMORY]:
             return names
@@ -112,20 +126,40 @@ class TOLINO(EB600):
 
         return names
 
-    def post_open_callback(self):
+    def post_open_callback(self) -> None:
         # The tolino vision only handles books inside the Books folder
-        product_id, bcd = self.device_being_opened[1], self.device_being_opened[2]
+        device_info = self.device_being_opened
+        product_id = device_info[1] if device_info is not None else 0
+        bcd = device_info[2] if device_info is not None else 0
         is_tolino = product_id in (0x6033, 0x6052, 0x6053) or (product_id == 0x1688 and bcd == 0x226)
         self.ebook_dir_for_upload = 'Books' if is_tolino else ''
 
-    def get_main_ebook_dir(self, for_upload=False):
+    def get_main_ebook_dir(self, for_upload: bool = False) -> str | list[str]:
         if for_upload:
             return getattr(self, 'ebook_dir_for_upload', self.EBOOK_DIR_MAIN)
         return self.EBOOK_DIR_MAIN
 
+    def isEpos(self) -> bool:
+        detected_device = self.detected_device
+        assert detected_device is not None
+        return detected_device.idProduct in self.EPOS_PRODUCT_ID
+
+    def isVision6(self) -> bool:
+        detected_device = self.detected_device
+        assert detected_device is not None
+        return detected_device.idProduct in self.VISION6_PRODUCT_ID
+
+    def set_device_name(self) -> str:
+        device_name = self.gui_name
+        if self.isEpos():
+            device_name = 'tolino epos'
+        elif self.isVision6():
+            device_name = 'tolino vision 6'
+        self.__class__.gui_name = device_name
+        return device_name
+
 
 class COOL_ER(EB600):
-
     name = 'Cool-er device interface'
     gui_name = 'Cool-er'
 
@@ -140,68 +174,63 @@ class COOL_ER(EB600):
 
 
 class SHINEBOOK(EB600):
-
     name = 'ShineBook device Interface'
 
     gui_name = 'ShineBook'
 
     FORMATS = ['epub', 'prc', 'rtf', 'pdf', 'txt']
 
-    VENDOR_NAME      = 'LONGSHIN'
+    VENDOR_NAME = 'LONGSHIN'
     WINDOWS_MAIN_MEM = 'ESHINEBOOK'
-    MAIN_MEMORY_VOLUME_LABEL  = 'ShineBook Main Memory'
+    MAIN_MEMORY_VOLUME_LABEL = 'ShineBook Main Memory'
     STORAGE_CARD_VOLUME_LABEL = 'ShineBook Storage Card'
 
     @classmethod
-    def can_handle(cls, dev, debug=False):
-        return dev[4] == 'ShineBook'
+    def can_handle(cls, device_info: USBDeviceInfo, debug: bool = False) -> bool:
+        return device_info[4] == 'ShineBook'
 
 
 class POCKETBOOK360(EB600):
-
     # Device info on OS X
-    # (8069L, 5768L, 272L, u'', u'', u'1.00')
+    # (8069L, 5768L, 272L,'', '', '1.00')
 
     name = 'PocketBook 360 Device Interface'
 
     gui_name = 'PocketBook 360'
-    VENDOR_ID   = [0x1f85, 0x525]
-    PRODUCT_ID  = [0x1688, 0xa4a5]
-    BCD         = [0x110]
+    VENDOR_ID = [0x1F85, 0x525]
+    PRODUCT_ID = [0x1688, 0xA4A5]
+    BCD = [0x110]
 
     FORMATS = ['epub', 'fb2', 'prc', 'mobi', 'pdf', 'djvu', 'rtf', 'chm', 'txt']
 
     VENDOR_NAME = ['PHILIPS', '__POCKET', 'POCKETBO']
-    WINDOWS_MAIN_MEM = WINDOWS_CARD_A_MEM = ['MASS_STORGE', 'BOOK_USB_STORAGE',
-            'OK_POCKET_611_61', 'OK_POCKET_360+61']
+    WINDOWS_MAIN_MEM = WINDOWS_CARD_A_MEM = ['MASS_STORAGE', 'BOOK_USB_STORAGE', 'OK_POCKET_611_61', 'OK_POCKET_360+61']
 
-    OSX_MAIN_MEM = OSX_CARD_A_MEM = 'Philips Mass Storge Media'
+    OSX_MAIN_MEM = OSX_CARD_A_MEM = 'Philips Mass Storage Media'
     OSX_MAIN_MEM_VOL_PAT = re.compile(r'/Pocket')
 
     @classmethod
-    def can_handle(cls, dev, debug=False):
-        return dev[-1] == '1.00' and not dev[-2] and not dev[-3]
+    def can_handle(cls, device_info: USBDeviceInfo, debug: bool = False) -> bool:
+        return device_info[-1] == '1.00' and not device_info[-2] and not device_info[-3]
 
 
 class POCKETBOOKHD(EB600):
-
     name = 'Pocket Touch HD Device Interface'
     gui_name = 'PocketBook HD'
-    PRODUCT_ID  = [0x6a42]
-    BCD         = [0x9999]
+    PRODUCT_ID = [0x6A42]
+    BCD = [0x9999]
     FORMATS = ['epub', 'fb2', 'prc', 'mobi', 'docx', 'doc', 'pdf', 'djvu', 'rtf', 'chm', 'txt']
 
 
 class GER2(EB600):
-
     name = 'Ganaxa GeR2 Device Interface'
     gui_name = 'Ganaxa GeR2'
 
     FORMATS = ['pdf']
 
-    VENDOR_ID   = [0x3034]
-    PRODUCT_ID  = [0x1795]
-    BCD         = [0x132]
+    VENDOR_ID = [0x3034]
+    PRODUCT_ID = [0x1795]
+    BCD = [0x132]
 
     VENDOR_NAME = 'GANAXA'
     WINDOWS_MAIN_MEN = 'GER2_________-FD'
@@ -209,10 +238,9 @@ class GER2(EB600):
 
 
 class ITALICA(EB600):
-
     name = 'Italica Device Interface'
     gui_name = 'Italica'
-    icon = I('devices/italica.png')
+    icon = 'devices/italica.png'
 
     FORMATS = ['epub', 'rtf', 'fb2', 'html', 'prc', 'mobi', 'pdf', 'txt']
 
@@ -223,12 +251,11 @@ class ITALICA(EB600):
     OSX_MAIN_MEM = 'Italica eReader Media'
     OSX_CARD_A_MEM = OSX_MAIN_MEM
 
-    MAIN_MEMORY_VOLUME_LABEL  = 'Italica Main Memory'
+    MAIN_MEMORY_VOLUME_LABEL = 'Italica Main Memory'
     STORAGE_CARD_VOLUME_LABEL = 'Italica Storage Card'
 
 
 class ECLICTO(EB600):
-
     name = 'eClicto Device Interface'
     gui_name = 'eClicto'
 
@@ -243,7 +270,6 @@ class ECLICTO(EB600):
 
 
 class DBOOK(EB600):
-
     name = 'Airis Dbook Device Interface'
     gui_name = 'Airis Dbook'
 
@@ -255,21 +281,19 @@ class DBOOK(EB600):
 
 
 class INVESBOOK(EB600):
-
     name = 'Inves Book Device Interface'
     gui_name = 'Inves Book 600'
 
     FORMATS = ['epub', 'mobi', 'prc', 'fb2', 'html', 'pdf', 'rtf', 'txt']
-    BCD         = [0x110, 0x323]
+    BCD = [0x110, 0x323]
 
     VENDOR_NAME = ['INVES_E6', 'INVES-WI', 'POCKETBO']
-    WINDOWS_MAIN_MEM = WINDOWS_CARD_A_MEM = ['00INVES_E600', 'INVES-WIBOOK',
-            'OK_POCKET_611_61']
+    WINDOWS_MAIN_MEM = WINDOWS_CARD_A_MEM = ['00INVES_E600', 'INVES-WIBOOK', 'OK_POCKET_611_61']
 
 
 class BOOQ(EB600):
     name = 'Booq Device Interface'
-    gui_name = 'bq Reader'
+    gui_name = 'Bq Reader'
 
     FORMATS = ['epub', 'mobi', 'prc', 'fb2', 'pdf', 'doc', 'rtf', 'txt', 'html']
 
@@ -278,7 +302,6 @@ class BOOQ(EB600):
 
 
 class MENTOR(EB600):
-
     name = 'Astak Mentor EB600'
     gui_name = 'Mentor'
     description = _('Communicate with the Astak Mentor EB600')
@@ -288,7 +311,6 @@ class MENTOR(EB600):
 
 
 class ELONEX(EB600):
-
     name = 'Elonex 600EB'
     gui_name = 'Elonex'
 
@@ -299,70 +321,67 @@ class ELONEX(EB600):
     WINDOWS_CARD_A_MEM = 'EBOOK'
 
     @classmethod
-    def can_handle(cls, dev, debug=False):
-        return dev[3] == 'Elonex' and dev[4] == 'eBook'
+    def can_handle(cls, device_info: USBDeviceInfo, debug: bool = False) -> bool:
+        return device_info[3] == 'Elonex' and device_info[4] == 'eBook'
 
 
 class POCKETBOOK301(USBMS):
-
-    name           = 'PocketBook 301 Device Interface'
-    description    = _('Communicate with the PocketBook 301 Reader.')
-    author         = 'Kovid Goyal'
+    name = 'PocketBook 301 Device Interface'
+    gui_name = 'PocketBook 301'
+    description = _('Communicate with the PocketBook 301 Reader.')
+    author = 'Kovid Goyal'
     supported_platforms = ['windows', 'osx', 'linux']
     FORMATS = ['epub', 'fb2', 'prc', 'mobi', 'pdf', 'djvu', 'rtf', 'chm', 'txt']
 
     SUPPORTS_SUB_DIRS = True
 
-    MAIN_MEMORY_VOLUME_LABEL  = 'PocketBook 301 Main Memory'
+    MAIN_MEMORY_VOLUME_LABEL = 'PocketBook 301 Main Memory'
     STORAGE_CARD_VOLUME_LABEL = 'PocketBook 301 Storage Card'
 
-    VENDOR_ID   = [0x1]
-    PRODUCT_ID  = [0x301]
-    BCD         = [0x132]
+    VENDOR_ID = [0x1]
+    PRODUCT_ID = [0x301]
+    BCD = [0x132]
 
 
 class POCKETBOOK602(USBMS):
-
     name = 'PocketBook Pro 602/902 Device Interface'
-    gui_name = 'PocketBook'
-    description    = _('Communicate with the PocketBook 515/602/603/902/903/Pro 912 reader.')
-    author         = 'Kovid Goyal'
+    gui_name = 'PocketBook Pro'
+    description = _('Communicate with the PocketBook 515/602/603/902/903/Pro 912 reader.')
+    author = 'Kovid Goyal'
     supported_platforms = ['windows', 'osx', 'linux']
-    FORMATS = ['epub', 'fb2', 'prc', 'mobi', 'pdf', 'djvu', 'rtf', 'chm',
-            'doc', 'tcr', 'txt']
+    FORMATS = ['epub', 'fb2', 'prc', 'mobi', 'pdf', 'djvu', 'rtf', 'chm', 'doc', 'tcr', 'txt']
 
     EBOOK_DIR_MAIN = 'books'
     SUPPORTS_SUB_DIRS = True
     SCAN_FROM_ROOT = True
 
-    VENDOR_ID   = [0x0525]
-    PRODUCT_ID  = [0xa4a5]
-    BCD         = [0x0324, 0x0330, 0x0399]
+    VENDOR_ID = [0x0525]
+    PRODUCT_ID = [0xA4A5]
+    BCD = [0x0324, 0x0330, 0x0399]
 
     VENDOR_NAME = ['', 'LINUX']
-    WINDOWS_MAIN_MEM = WINDOWS_CARD_A_MEM = ['PB602', 'PB603', 'PB902',
-            'PB903', 'Pocket912', 'PB', 'FILE-STOR_GADGET']
+    WINDOWS_MAIN_MEM = WINDOWS_CARD_A_MEM = ['PB602', 'PB603', 'PB902', 'PB903', 'Pocket912', 'PB', 'FILE-STOR_GADGET']
 
 
 class POCKETBOOK622(POCKETBOOK602):
-
     name = 'PocketBook 622 Device Interface'
-    description    = _('Communicate with the PocketBook 622 and 623 readers.')
+    gui_name = 'PocketBook 622'
+    description = _('Communicate with the PocketBook 622 and 623 readers.')
     EBOOK_DIR_MAIN = ''
 
-    VENDOR_ID   = [0x0489]
-    PRODUCT_ID  = [0xe107, 0xcff1]
-    BCD         = [0x0326]
+    VENDOR_ID = [0x0489]
+    PRODUCT_ID = [0xE107, 0xCFF1]
+    BCD = [0x0326]
 
     VENDOR_NAME = 'LINUX'
     WINDOWS_MAIN_MEM = WINDOWS_CARD_A_MEM = 'FILE-STOR_GADGET'
 
 
 class POCKETBOOK360P(POCKETBOOK602):
-
     name = 'PocketBook 360+ Device Interface'
-    description    = _('Communicate with the PocketBook 360+ reader.')
-    BCD         = [0x0323]
+    gui_name = 'PocketBook 360+'
+    description = _('Communicate with the PocketBook 360+ reader.')
+    BCD = [0x0323]
     EBOOK_DIR_MAIN = ''
 
     VENDOR_NAME = '__POCKET'
@@ -370,27 +389,25 @@ class POCKETBOOK360P(POCKETBOOK602):
 
 
 class POCKETBOOK701(USBMS):
-
     name = 'PocketBook 701 Device Interface'
-    gui_name = 'PocketBook'
+    gui_name = 'PocketBook 701'
     description = _('Communicate with the PocketBook 701')
     author = _('Kovid Goyal')
 
     supported_platforms = ['windows', 'osx', 'linux']
-    FORMATS = ['epub', 'fb2', 'prc', 'mobi', 'pdf', 'djvu', 'rtf', 'chm',
-            'doc', 'tcr', 'txt']
+    FORMATS = ['epub', 'fb2', 'prc', 'mobi', 'pdf', 'djvu', 'rtf', 'chm', 'doc', 'tcr', 'txt']
 
     EBOOK_DIR_MAIN = 'books'
     SUPPORTS_SUB_DIRS = True
 
-    VENDOR_ID   = [0x18d1]
-    PRODUCT_ID  = [0xa004]
-    BCD         = [0x0224]
+    VENDOR_ID = [0x18D1]
+    PRODUCT_ID = [0xA004]
+    BCD = [0x0224]
 
     VENDOR_NAME = 'ANDROID'
     WINDOWS_MAIN_MEM = WINDOWS_CARD_A_MEM = '__UMS_COMPOSITE'
 
-    def windows_sort_drives(self, drives):
+    def windows_sort_drives(self, drives: dict[str, str]) -> dict[str, str]:
         if len(drives) < 2:
             return drives
         main = drives.get('main', None)
@@ -402,35 +419,31 @@ class POCKETBOOK701(USBMS):
 
 
 class POCKETBOOK740(USBMS):
-
-    name = 'PocketBook 701 Device Interface'
-    gui_name = 'PocketBook'
+    name = 'PocketBook 740 Device Interface'
+    gui_name = 'PocketBook 740'
     description = _('Communicate with the PocketBook 740')
     supported_platforms = ['windows', 'osx', 'linux']
-    FORMATS = ['epub', 'fb2', 'prc', 'mobi', 'pdf', 'djvu', 'rtf', 'chm',
-            'doc', 'tcr', 'txt']
+    FORMATS = ['epub', 'fb2', 'prc', 'mobi', 'pdf', 'djvu', 'rtf', 'chm', 'doc', 'tcr', 'txt']
     EBOOK_DIR_MAIN = 'books'
     SUPPORTS_SUB_DIRS = True
     SCAN_FROM_ROOT = True
 
-    VENDOR_ID   = [0x18d1]
-    PRODUCT_ID  = [0x0001]
-    BCD         = [0x0101]
+    VENDOR_ID = [0x18D1]
+    PRODUCT_ID = [0x0001]
+    BCD = [0x0101]
 
 
 class PI2(EB600):
-
-    name           = 'Infibeam Pi2 Device Interface'
-    gui_name       = 'Infibeam Pi2'
-    author         = 'Michael Scalet'
-    description    = _('Communicate with the Infibeam Pi2 reader.')
-    version        = (1,0,1)
+    name = 'Infibeam Pi2 Device Interface'
+    gui_name = 'Infibeam Pi2'
+    author = 'Michael Scalet'
+    description = _('Communicate with the Infibeam Pi2 reader.')
+    version = (1, 0, 1)
 
     # Ordered list of supported formats
-    FORMATS     = ['epub', 'mobi', 'prc', 'html', 'htm', 'doc', 'pdf', 'rtf',
-            'txt']
+    FORMATS = ['epub', 'mobi', 'prc', 'html', 'htm', 'doc', 'pdf', 'rtf', 'txt']
 
-    VENDOR_NAME      = 'INFIBEAM'
+    VENDOR_NAME = 'INFIBEAM'
     WINDOWS_MAIN_MEM = 'INFIBEAM_PI'
     WINDOWS_CARD_A_MEM = 'INFIBEAM_PI'
 

@@ -1,63 +1,78 @@
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
 
+import collections
+import copy
+import numbers
+import operator
+import re
+import sys
+from typing import cast
 
-__license__   = 'GPL v3'
-__copyright__ = '2008, Kovid Goyal <kovid at kovidgoyal.net>'
+from qt.core import QBrush, QColor, QFont, QFontMetrics, QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem, QPen, QPixmap, QRectF, Qt
 
-import sys, collections, operator, copy, re, numbers
-
-from PyQt5.Qt import (
-    Qt, QRectF, QFont, QColor, QPixmap, QGraphicsPixmapItem, QGraphicsItem,
-    QFontMetrics, QPen, QBrush, QGraphicsRectItem)
-
-from calibre.ebooks.lrf.fonts import LIBERATION_FONT_MAP
 from calibre.ebooks.hyphenate import hyphenate_word
-from polyglot.builtins import unicode_type, string_or_bytes
+from calibre.ebooks.lrf.fonts import LIBERATION_FONT_MAP
 
-WEIGHT_MAP = lambda wt : int((wt/10)-1)
-NULL       = lambda a, b: a
-COLOR      = lambda a, b: QColor(*a)
-WEIGHT     = lambda a, b: WEIGHT_MAP(a)
+
+def WEIGHT_MAP(wt):
+    return int(wt / 10 - 1)
+
+
+def NULL(a, b):
+    return a
+
+
+def COLOR(a, b):
+    return QColor(*a)
+
+
+def WEIGHT(a, b):
+    return WEIGHT_MAP(a)
 
 
 class PixmapItem(QGraphicsPixmapItem):
-
-    def __init__(self, data, encoding, x0, y0, x1, y1, xsize, ysize):
+    def __init__(self, data, encoding, x0, y0, x1, y1, xsize, ysize) -> None:
         p = QPixmap()
         p.loadFromData(data, encoding, Qt.ImageConversionFlag.AutoColor)
         w, h = p.width(), p.height()
-        p = p.copy(x0, y0, min(w, x1-x0), min(h, y1-y0))
+        p = p.copy(x0, y0, min(w, x1 - x0), min(h, y1 - y0))
         if p.width() != xsize or p.height() != ysize:
-            p = p.scaled(xsize, ysize, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            p = p.scaled(int(xsize), int(ysize), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
         QGraphicsPixmapItem.__init__(self, p)
         self.height, self.width = ysize, xsize
         self.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         self.setShapeMode(QGraphicsPixmapItem.ShapeMode.BoundingRectShape)
 
-    def resize(self, width, height):
+    def resize(self, width, height) -> None:
         p = self.pixmap()
-        self.setPixmap(p.scaled(width, height, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self.setPixmap(
+            p.scaled(
+                int(width),
+                int(height),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
         self.width, self.height = width, height
 
 
 class Plot(PixmapItem):
-
-    def __init__(self, plot, dpi):
+    def __init__(self, plot, dpi) -> None:
         img = plot.refobj
-        xsize, ysize = dpi*plot.attrs['xsize']/720, dpi*plot.attrs['ysize']/720
+        xsize, ysize = dpi * plot.attrs['xsize'] / 720, dpi * plot.attrs['ysize'] / 720
         x0, y0, x1, y1 = img.x0, img.y0, img.x1, img.y1
         data, encoding = img.data, img.encoding
         PixmapItem.__init__(self, data, encoding, x0, y0, x1, y1, xsize, ysize)
 
 
-class FontLoader(object):
-
+class FontLoader:
     font_map = {
-                'Swis721 BT Roman'     : 'Liberation Sans',
-                'Dutch801 Rm BT Roman' : 'Liberation Serif',
-                'Courier10 BT Roman'   : 'Liberation Mono',
-                }
+        'Swis721 BT Roman': 'Liberation Sans',
+        'Dutch801 Rm BT Roman': 'Liberation Serif',
+        'Courier10 BT Roman': 'Liberation Mono',
+    }
 
-    def __init__(self, font_map, dpi):
+    def __init__(self, font_map, dpi) -> None:
         self.face_map = {}
         self.cache = {}
         self.dpi = dpi
@@ -76,14 +91,19 @@ class FontLoader(object):
         sz = text_style.fontsize
         wt = text_style.fontweight
         style = text_style.fontstyle
-        font = (face, wt, style, sz,)
+        font = (
+            face,
+            wt,
+            style,
+            sz,
+        )
         if font in self.cache:
             rfont = self.cache[font]
         else:
             italic = font[2] == QFont.Style.StyleItalic
-            rfont = QFont(font[0], font[3], font[1], italic)
-            rfont.setPixelSize(font[3])
-            rfont.setBold(wt>=69)
+            rfont = QFont(font[0], int(font[3]), int(font[1]), italic)
+            rfont.setPixelSize(int(font[3]))
+            rfont.setBold(wt >= 69)
             self.cache[font] = rfont
         qfont = rfont
         if text_style.emplinetype != 'none':
@@ -93,14 +113,14 @@ class FontLoader(object):
         return qfont
 
 
-class Style(object):
-    map = collections.defaultdict(lambda : NULL)
+class Style:
+    map = collections.defaultdict(lambda: NULL)
 
-    def __init__(self, style, dpi):
-        self.fdpi = dpi/720
+    def __init__(self, style, dpi) -> None:
+        self.fdpi = dpi / 720
         self.update(style.as_dict())
 
-    def update(self, *args, **kwds):
+    def update(self, *args, **kwds) -> None:
         if len(args) > 0:
             kwds = args[0]
         for attr in kwds:
@@ -111,8 +131,8 @@ class Style(object):
 
 
 class TextStyle(Style):
-
-    map = collections.defaultdict(lambda : NULL,
+    map = collections.defaultdict(
+        lambda: NULL,
         fontsize=operator.mul,
         fontwidth=operator.mul,
         fontweight=WEIGHT,
@@ -127,62 +147,57 @@ class TextStyle(Style):
         textlinewidth=operator.mul,
         charspace=operator.mul,
         linecolor=COLOR,
-        )
+    )
 
-    def __init__(self, style, font_loader, ruby_tags):
+    def __init__(self, style, font_loader, ruby_tags) -> None:
         self.font_loader = font_loader
-        self.fontstyle   = QFont.Style.StyleNormal
+        self.fontstyle = QFont.Style.StyleNormal
         for attr in ruby_tags:
             setattr(self, attr, ruby_tags[attr])
         Style.__init__(self, style, font_loader.dpi)
         self.emplinetype = 'none'
         self.font = self.font_loader.font(self)
 
-    def update(self, *args, **kwds):
+    def update(self, *args, **kwds) -> None:
         Style.update(self, *args, **kwds)
         self.font = self.font_loader.font(self)
 
 
 class BlockStyle(Style):
-    map = collections.defaultdict(lambda : NULL,
+    map = collections.defaultdict(
+        lambda: NULL,
         bgcolor=COLOR,
         framecolor=COLOR,
-        )
+    )
+    blockwidth: int
+    blockheight: int
+    sidemargin: int
+    blockrule: str
 
 
-class ParSkip(object):
-
-    def __init__(self, parskip):
+class ParSkip:
+    def __init__(self, parskip) -> None:
         self.height = parskip
 
-    def __str__(self):
-        return 'Parskip: '+unicode_type(self.height)
+    def __str__(self) -> str:
+        return 'Parskip: ' + str(self.height)
 
 
-class TextBlock(object):
-
+class TextBlock:
     class HeightExceeded(Exception):
         pass
 
-    has_content = property(fget=lambda self: self.peek_index < len(self.lines)-1)
-    XML_ENTITIES = {
-            "apos" : "'",
-            "quot" : '"',
-            "amp" : "&",
-            "lt" : "<",
-            "gt" : ">"
-    }
+    has_content = property(fget=lambda self: self.peek_index < len(self.lines) - 1)
+    XML_ENTITIES = {'apos': "'", 'quot': '"', 'amp': '&', 'lt': '<', 'gt': '>'}
 
-    def __init__(self, tb, font_loader, respect_max_y, text_width, logger,
-                 opts, ruby_tags, link_activated):
+    def __init__(self, tb, font_loader, respect_max_y, text_width, logger, opts, ruby_tags, link_activated) -> None:
         self.block_id = tb.id
-        self.bs, self.ts = BlockStyle(tb.style, font_loader.dpi), \
-                            TextStyle(tb.textstyle, font_loader, ruby_tags)
+        self.bs, self.ts = BlockStyle(tb.style, font_loader.dpi), TextStyle(tb.textstyle, font_loader, ruby_tags)
         self.bs.update(tb.attrs)
         self.ts.update(tb.attrs)
         self.lines = collections.deque()
         self.line_length = min(self.bs.blockwidth, text_width)
-        self.line_length -= 2*self.bs.sidemargin
+        self.line_length -= 2 * self.bs.sidemargin
         self.line_offset = self.bs.sidemargin
         self.first_line = True
         self.current_style = self.ts.copy()
@@ -202,34 +217,35 @@ class TextBlock(object):
             # logger.warning('TextBlock height exceeded, skipping line:\n%s'%(err,))
 
     def peek(self):
-        return self.lines[self.peek_index+1]
+        return self.lines[self.peek_index + 1]
 
-    def commit(self):
+    def commit(self) -> None:
         self.peek_index += 1
 
-    def reset(self):
+    def reset(self) -> None:
         self.peek_index = -1
 
-    def create_link(self, refobj):
+    def create_link(self, refobj) -> None:
         if self.current_line is None:
             self.create_line()
+        assert self.current_line is not None
         self.current_line.start_link(refobj, self.link_activated)
         self.link_activated(refobj, on_creation=True)
 
-    def end_link(self):
+    def end_link(self) -> None:
         if self.current_line is not None:
             self.current_line.end_link()
 
-    def close_valign(self):
+    def close_valign(self) -> None:
         if self.current_line is not None:
             self.current_line.valign = None
 
-    def populate(self, tb):
+    def populate(self, tb) -> None:
         self.create_line()
         open_containers = collections.deque()
         self.in_para = False
         for i in tb.content:
-            if isinstance(i, string_or_bytes):
+            if isinstance(i, (str, bytes)):
                 self.process_text(i)
             elif i is None:
                 if len(open_containers) > 0:
@@ -265,13 +281,16 @@ class TextBlock(object):
                 plot = Plot(i, self.font_loader.dpi)
                 if self.current_line is None:
                     self.create_line()
+                assert self.current_line is not None
                 if not self.current_line.can_add_plot(plot):
                     self.end_line()
                     self.create_line()
+                assert self.current_line is not None
                 self.current_line.add_plot(plot)
             elif i.name in ['Sup', 'Sub']:
                 if self.current_line is None:
                     self.create_line()
+                assert self.current_line is not None
                 self.current_line.valign = i.name
                 open_containers.append(((self.close_valign, []),))
             elif i.name == 'Space' and self.current_line is not None:
@@ -281,38 +300,41 @@ class TextBlock(object):
                     open_containers.append((('current_style', self.current_style.copy()),))
                     self.current_style.update(i.attrs)
             else:
-                self.logger.warning('Unhandled TextTag %s'%(i.name,))
+                self.logger.warning(f'Unhandled TextTag {i.name}')
                 if not i.self_closing:
                     open_containers.append([])
 
-    def end_line(self):
+    def end_line(self) -> None:
         if self.current_line is not None:
-            self.height += self.current_line.finalize(self.current_style.baselineskip,
-                                                      self.current_style.linespace,
-                                                      self.opts.visual_debug)
-            if self.height > self.max_y+10:
-                raise TextBlock.HeightExceeded(unicode_type(self.current_line))
+            self.height += self.current_line.finalize(self.current_style.baselineskip, self.current_style.linespace, self.opts.visual_debug)
+            if self.height > self.max_y + 10:
+                raise TextBlock.HeightExceeded(str(self.current_line))
             self.lines.append(self.current_line)
             self.current_line = None
 
-    def create_line(self):
+    def create_line(self) -> None:
         line_length = self.line_length
         line_offset = self.line_offset
         if self.first_line:
             line_length -= self.current_style.parindent
             line_offset += self.current_style.parindent
-        self.current_line = Line(line_length, line_offset,
-                                 self.current_style.linespace,
-                                 self.current_style.align,
-                                 self.opts.hyphenate, self.block_id)
+        self.current_line = Line(
+            line_length,
+            line_offset,
+            self.current_style.linespace,
+            self.current_style.align,
+            self.opts.hyphenate,
+            self.block_id,
+        )
         self.first_line = False
 
-    def process_text(self, raw):
+    def process_text(self, raw) -> None:
         for ent, rep in TextBlock.XML_ENTITIES.items():
-            raw = raw.replace('&%s;'%ent, rep)
+            raw = raw.replace(f'&{ent};', rep)
         while len(raw) > 0:
             if self.current_line is None:
                 self.create_line()
+            assert self.current_line is not None
             pos, line_filled = self.current_line.populate(raw, self.current_style)
             raw = raw[pos:]
             if line_filled:
@@ -321,38 +343,41 @@ class TextBlock(object):
                 break
 
     def __iter__(self):
-        for line in self.lines:
-            yield line
+        yield from self.lines
 
-    def __str__(self):
+    def __str__(self) -> str:
         s = ''
         for line in self:
-            s += unicode_type(line) + '\n'
+            s += str(line) + '\n'
         return s
 
 
 class Link(QGraphicsRectItem):
-    inactive_brush = QBrush(QColor(0xff, 0xff, 0xff, 0xff))
-    active_brush   = QBrush(QColor(0x00, 0x00, 0x00, 0x59))
+    inactive_brush = QBrush(QColor(0xFF, 0xFF, 0xFF, 0xFF))
+    active_brush = QBrush(QColor(0x00, 0x00, 0x00, 0x59))
 
-    def __init__(self, parent, start, stop, refobj, slot):
-        QGraphicsRectItem.__init__(self, start, 0, stop-start, parent.height, parent)
+    def __init__(self, parent, start, stop, refobj, slot) -> None:
+        QGraphicsRectItem.__init__(self, start, 0, stop - start, parent.height, parent)
         self.refobj = refobj
         self.slot = slot
-        self.brush = self.__class__.inactive_brush
+        self._brush = self.__class__.inactive_brush
         self.setPen(QPen(Qt.PenStyle.NoPen))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAcceptHoverEvents(True)
 
-    def hoverEnterEvent(self, event):
-        self.brush = self.__class__.active_brush
-        self.parentItem().update()
+    def hoverEnterEvent(self, event) -> None:
+        self._brush = self.__class__.active_brush
+        parent_item = self.parentItem()
+        assert parent_item is not None
+        parent_item.update()
 
-    def hoverLeaveEvent(self, event):
-        self.brush = self.__class__.inactive_brush
-        self.parentItem().update()
+    def hoverLeaveEvent(self, event) -> None:
+        self._brush = self.__class__.inactive_brush
+        parent_item = self.parentItem()
+        assert parent_item is not None
+        parent_item.update()
 
-    def mousePressEvent(self, event):
+    def mousePressEvent(self, event) -> None:
         self.hoverLeaveEvent(None)
         self.slot(self.refobj)
 
@@ -360,7 +385,7 @@ class Link(QGraphicsRectItem):
 class Line(QGraphicsItem):
     whitespace = re.compile(r'\s+')
 
-    def __init__(self, line_length, offset, linespace, align, hyphenate, block_id):
+    def __init__(self, line_length, offset, linespace, align, hyphenate, block_id) -> None:
         QGraphicsItem.__init__(self)
 
         self.line_length, self.offset, self.line_space = line_length, offset, linespace
@@ -372,14 +397,12 @@ class Line(QGraphicsItem):
         self.height, self.descent, self.width = 0, 0, 0
         self.links = collections.deque()
         self.current_link = None
-        self.valign = None
-        if not hasattr(self, 'children'):
-            self.children = self.childItems
+        self.valign: str | None = None
 
-    def start_link(self, refobj, slot):
+    def start_link(self, refobj, slot) -> None:
         self.current_link = [self.current_width, sys.maxsize, refobj, slot]
 
-    def end_link(self):
+    def end_link(self) -> None:
         if self.current_link is not None:
             self.current_link[1] = self.current_width
             self.links.append(self.current_link)
@@ -388,7 +411,7 @@ class Line(QGraphicsItem):
     def can_add_plot(self, plot):
         return self.line_length - self.current_width >= plot.width
 
-    def add_plot(self, plot):
+    def add_plot(self, plot) -> None:
         self.tokens.append(plot)
         self.current_width += plot.width
         self.height = max(self.height, plot.height)
@@ -400,18 +423,18 @@ class Line(QGraphicsItem):
         matches = self.__class__.whitespace.finditer(phrase)
         font = QFont(ts.font)
         if self.valign is not None:
-            font.setPixelSize(font.pixelSize()/1.5)
+            font.setPixelSize(int(font.pixelSize() / 1.5))
         fm = QFontMetrics(font)
-        single_space_width = fm.width(' ')
+        single_space_width = fm.horizontalAdvance(' ')
         height, descent = fm.height(), fm.descent()
         for match in matches:
             processed = True
             left, right = match.span()
             if not process_space:
                 right = left
-            space_width = single_space_width * (right-left)
+            space_width = single_space_width * (right - left)
             word = phrase[phrase_pos:left]
-            width = fm.width(word)
+            width = fm.horizontalAdvance(word)
             if self.current_width + width < self.line_length:
                 self.commit(word, width, height, descent, ts, font)
                 if space_width > 0 and self.current_width + space_width < self.line_length:
@@ -422,42 +445,42 @@ class Line(QGraphicsItem):
             # Word doesn't fit on line
             if self.hyphenate and len(word) > 3:
                 tokens = hyphenate_word(word)
-                for i in range(len(tokens)-2, -1, -1):
-                    word = ''.join(tokens[0:i+1])+'-'
-                    width = fm.width(word)
+                for i in range(len(tokens) - 2, -1, -1):
+                    word = ''.join(tokens[0 : i + 1]) + '-'
+                    width = fm.horizontalAdvance(word)
                     if self.current_width + width < self.line_length:
                         self.commit(word, width, height, descent, ts, font)
-                        return phrase_pos + len(word)-1, True
+                        return phrase_pos + len(word) - 1, True
             if self.current_width < 5:  # Force hyphenation as word is longer than line
-                for i in range(len(word)-5, 0, -5):
+                for i in range(len(word) - 5, 0, -5):
                     part = word[:i] + '-'
-                    width = fm.width(part)
+                    width = fm.horizontalAdvance(part)
                     if self.current_width + width < self.line_length:
                         self.commit(part, width, height, descent, ts, font)
-                        return phrase_pos + len(part)-1, True
+                        return phrase_pos + len(part) - 1, True
             # Failed to add word.
             return phrase_pos, True
 
         if not processed:
-            return self.populate(phrase+' ', ts, False)
+            return self.populate(phrase + ' ', ts, False)
 
         return phrase_pos, False
 
-    def commit(self, word, width, height, descent, ts, font):
+    def commit(self, word, width, height, descent, ts, font) -> None:
         self.tokens.append(Word(word, width, height, ts, font, self.valign))
         self.current_width += width
         self.height = max(self.height, height)
         self.descent = max(self.descent, descent)
 
-    def add_space(self, min_width):
+    def add_space(self, min_width) -> None:
         self.tokens.append(min_width)
         self.current_width += min_width
         self.length_in_space += min_width
 
-    def justify(self):
+    def justify(self) -> None:
         delta = self.line_length - self.current_width
         if self.length_in_space > 0:
-            frac = 1 + float(delta)/self.length_in_space
+            frac = 1 + float(delta) / self.length_in_space
             for i in range(len(self.tokens)):
                 if isinstance(self.tokens[i], numbers.Number):
                     self.tokens[i] *= frac
@@ -488,8 +511,8 @@ class Line(QGraphicsItem):
     def boundingRect(self):
         return QRectF(0, 0, self.width, self.height)
 
-    def paint(self, painter, option, widget):
-        x, y = 0, 0+self.height-self.descent
+    def paint(self, painter, option, widget=None) -> None:
+        x, y = 0, 0 + self.height - self.descent
         if self.vdebug:
             painter.save()
             painter.setPen(QPen(Qt.GlobalColor.yellow, 1, Qt.PenStyle.DotLine))
@@ -497,8 +520,8 @@ class Line(QGraphicsItem):
             painter.restore()
         painter.save()
         painter.setPen(QPen(Qt.PenStyle.NoPen))
-        for c in self.children():
-            painter.setBrush(c.brush)
+        for c in self.childItems():
+            painter.setBrush(cast('Link', c)._brush)
             painter.drawRect(c.boundingRect())
         painter.restore()
         painter.save()
@@ -511,18 +534,18 @@ class Line(QGraphicsItem):
                     painter.save()
                     painter.setPen(QPen(Qt.PenStyle.NoPen))
                     painter.setBrush(QBrush(Qt.GlobalColor.yellow))
-                    painter.drawRect(x, 0, tok.width, tok.height)
+                    painter.drawRect(int(x), 0, tok.width, tok.height)
                     painter.restore()
                 painter.setPen(QPen(tok.text_color))
                 if tok.valign is None:
-                    painter.drawText(x, y, tok.string)
+                    painter.drawText(int(x), int(y), tok.string)
                 elif tok.valign == 'Sub':
-                    painter.drawText(x+1, y+self.descent/1.5, tok.string)
+                    painter.drawText(int(x + 1), int(y + self.descent / 1.5), tok.string)
                 elif tok.valign == 'Sup':
-                    painter.drawText(x+1, y-2.*self.descent, tok.string)
+                    painter.drawText(int(x + 1), int(y - 2.0 * self.descent), tok.string)
                 x += tok.width
             else:
-                painter.drawPixmap(x, 0, tok.pixmap())
+                painter.drawPixmap(int(x), 0, tok.pixmap())
                 x += tok.width
         painter.restore()
 
@@ -542,12 +565,12 @@ class Line(QGraphicsItem):
             while True:
                 word = next(words)
                 word.highlight = False
-                if tokens[0] in unicode_type(word.string).lower():
+                if tokens[0] in str(word.string).lower():
                     matches.append(word)
                     for c in range(1, len(tokens)):
                         word = next(words)
                         print(tokens[c], word.string)
-                        if tokens[c] not in unicode_type(word.string):
+                        if tokens[c] not in str(word.string):
                             return None
                         matches.append(word)
                     for w in matches:
@@ -562,7 +585,7 @@ class Line(QGraphicsItem):
         if self.align == 'foot':
             return textwidth - self.width
         if self.align == 'center':
-            return (textwidth-self.width)/2.
+            return (textwidth - self.width) / 2.0
 
     def __unicode__(self):
         s = ''
@@ -570,16 +593,15 @@ class Line(QGraphicsItem):
             if isinstance(tok, numbers.Number):
                 s += ' '
             elif isinstance(tok, Word):
-                s += unicode_type(tok.string)
+                s += str(tok.string)
         return s
 
-    def __str__(self):
-        return unicode_type(self).encode('utf-8')
+    def __str__(self) -> str:
+        return self.__unicode__()
 
 
-class Word(object):
-
-    def __init__(self, string, width, height, ts, font, valign):
+class Word:
+    def __init__(self, string, width, height, ts, font, valign) -> None:
         self.string, self.width, self.height = string, width, height
         self.font = font
         self.text_color = ts.textcolor
@@ -587,7 +609,7 @@ class Word(object):
         self.valign = valign
 
 
-def main(args=sys.argv):
+def main(args=sys.argv) -> int:
     return 0
 
 

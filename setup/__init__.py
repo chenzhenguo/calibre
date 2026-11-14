@@ -1,23 +1,31 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
 
 
-__license__   = 'GPL v3'
+__license__ = 'GPL v3'
 __copyright__ = '2009, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
-import sys, re, os, platform, subprocess, time, errno, tempfile, shutil
-from contextlib import contextmanager
+import errno
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from contextlib import contextmanager, suppress
+from functools import lru_cache
 
-is64bit = platform.architecture()[0] == '64bit'
-iswindows = re.search('win(32|64)', sys.platform)
+iswindows = re.search(r'win(32|64)', sys.platform)
 ismacos = 'darwin' in sys.platform
 isfreebsd = 'freebsd' in sys.platform
 isnetbsd = 'netbsd' in sys.platform
 isdragonflybsd = 'dragonfly' in sys.platform
 isbsd = isnetbsd or isfreebsd or isdragonflybsd
-ishaiku = 'haiku1' in sys.platform
+ishaiku = 'haiku' in sys.platform
 islinux = not ismacos and not iswindows and not isbsd and not ishaiku
+is_ci = os.environ.get('CI', '').lower() == 'true'
 sys.setup_dir = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.abspath(os.path.join(os.path.dirname(sys.setup_dir), 'src'))
 sys.path.insert(0, SRC)
@@ -38,14 +46,19 @@ def newer(targets, sources):
     for f in targets:
         if not os.path.exists(f):
             return True
-    ttimes = map(lambda x: os.stat(x).st_mtime, targets)
-    stimes = map(lambda x: os.stat(x).st_mtime, sources)
-    newest_source, oldest_target = max(stimes), min(ttimes)
+    ttimes = (os.stat(x).st_mtime for x in targets)
+    oldest_target = min(ttimes)
+    try:
+        stimes = (os.stat(x).st_mtime for x in sources)
+        newest_source = max(stimes)
+    except FileNotFoundError:
+        newest_source = oldest_target + 1
     return newest_source > oldest_target
 
 
 def dump_json(obj, path, indent=4):
     import json
+
     with open(path, 'wb') as f:
         data = json.dumps(obj, indent=indent)
         if not isinstance(data, bytes):
@@ -53,11 +66,55 @@ def dump_json(obj, path, indent=4):
         f.write(data)
 
 
-def download_securely(url):
+@lru_cache
+def curl_supports_etags():
+    return '--etag-compare' in subprocess.check_output(['curl', '--help', 'all']).decode('utf-8')
+
+
+def _download_securely(url, ignore_cache):
     # We use curl here as on some OSes (OS X) when bootstrapping calibre,
     # python will be unable to validate certificates until after cacerts is
     # installed
-    return subprocess.check_output(['curl', '-fsSL', url])
+    if is_ci and iswindows:
+        # curl is failing for wikipedia urls on CI (used for browser_data)
+        from urllib.request import urlopen
+
+        with urlopen(url) as f:
+            return f.read()
+    if not curl_supports_etags():
+        return subprocess.check_output(['curl', '-fsSL', url])
+    url_hash = hashlib.sha1(url.encode('utf-8')).hexdigest()
+    cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.cache', 'download', url_hash)
+    os.makedirs(cache_dir, exist_ok=True)
+    staging = os.path.join(cache_dir, 'data.bin.staging')
+    etag = os.path.join(cache_dir, 'etag.txt')
+    if ignore_cache:
+        with suppress(FileNotFoundError):
+            os.remove(etag)
+    try:
+        subprocess.check_call(['curl', '-fsSL', '--etag-compare', etag, '--etag-save', etag, '-o', staging, url])
+    except Exception:
+        if os.path.exists(staging):
+            os.remove(staging)
+        if os.path.exists(etag):
+            os.remove(etag)
+        raise
+    final = os.path.join(cache_dir, 'data.bin')
+    if os.path.exists(staging):
+        os.replace(staging, final)
+    with open(final, 'rb') as f:
+        return f.read()
+
+
+def download_securely(url, retry_count: int = 5 if is_ci else 3, sleep_time: float = 1, ignore_cache: bool = False) -> bytes:
+    for i in range(retry_count):
+        try:
+            return _download_securely(url, ignore_cache)
+        except Exception as err:
+            if i >= retry_count - 1:
+                raise
+            print(f'Download of {url} failed with error {err}, retrying...', file=sys.stderr)
+            time.sleep(sleep_time)
 
 
 def build_cache_dir():
@@ -67,7 +124,7 @@ def build_cache_dir():
         _cache_dir_built = True
         try:
             os.mkdir(ans)
-        except EnvironmentError as err:
+        except OSError as err:
             if err.errno != errno.EEXIST:
                 raise
     return ans
@@ -75,7 +132,7 @@ def build_cache_dir():
 
 def require_git_master(branch='master'):
     if subprocess.check_output(['git', 'symbolic-ref', '--short', 'HEAD']).decode('utf-8').strip() != branch:
-        raise SystemExit('You must be in the {} git branch'.format(branch))
+        raise SystemExit(f'You must be in the {branch} git branch')
 
 
 def require_clean_git():
@@ -95,24 +152,23 @@ def initialize_constants():
     with open(os.path.join(SRC, 'calibre/constants.py'), 'rb') as f:
         src = f.read().decode('utf-8')
     nv = re.search(r'numeric_version\s+=\s+\((\d+), (\d+), (\d+)\)', src)
-    __version__ = '%s.%s.%s'%(nv.group(1), nv.group(2), nv.group(3))
-    __appname__ = re.search(r'__appname__\s+=\s+(u{0,1})[\'"]([^\'"]+)[\'"]',
-            src).group(2)
-    epsrc = re.compile(r'entry_points = (\{.*?\})', re.DOTALL).\
-            search(open(os.path.join(SRC, 'calibre/linux.py'), 'rb').read().decode('utf-8')).group(1)
+    __version__ = '.'.join((nv.group(1), nv.group(2), nv.group(3)))
+    __appname__ = re.search(r'__appname__\s+=\s+(u{0,1})[\'"]([^\'"]+)[\'"]', src).group(2)
+    with open(os.path.join(SRC, 'calibre/linux.py'), 'rb') as sf:
+        epsrc = re.compile(r'entry_points = (\{.*?\})', re.DOTALL).search(sf.read().decode('utf-8')).group(1)
     entry_points = eval(epsrc, {'__appname__': __appname__})
 
     def e2b(ep):
         return re.search(r'\s*(.*?)\s*=', ep).group(1).strip()
 
     def e2s(ep, base='src'):
-        return (base+os.path.sep+re.search(r'.*=\s*(.*?):', ep).group(1).replace('.', '/')+'.py').strip()
+        return (base + os.path.sep + re.search(r'.*=\s*(.*?):', ep).group(1).replace('.', '/') + '.py').strip()
 
     def e2m(ep):
         return re.search(r'.*=\s*(.*?)\s*:', ep).group(1).strip()
 
     def e2f(ep):
-        return ep[ep.rindex(':')+1:].strip()
+        return ep[ep.rindex(':') + 1 :].strip()
 
     basenames, functions, modules, scripts = {}, {}, {}, {}
     for x in ('console', 'gui'):
@@ -134,16 +190,18 @@ def get_warnings():
 
 
 def edit_file(path):
-    return subprocess.Popen([
-        'vim', '-c', 'SyntasticCheck', '-c', 'll', '-S', os.path.join(SRC, '../session.vim'), '-f', path
-    ]).wait() == 0
+    return subprocess.Popen([os.environ.get('EDITOR', 'vim'), '-S', os.path.join(SRC, '../session.vim'), '-f', path]).wait() == 0
 
 
-class Command(object):
-
+class Command:
     SRC = SRC
-    RESOURCES = os.path.join(os.path.dirname(SRC), 'resources')
+    PROJECT_ROOT = os.path.dirname(SRC)
+    RESOURCES = os.path.join(PROJECT_ROOT, 'resources')
+
     description = ''
+    usage_help = ''
+    drop_privileges_for_subcommands = False
+    require_venv = False
 
     sub_commands = []
 
@@ -158,54 +216,61 @@ class Command(object):
         self.real_uid = os.environ.get('SUDO_UID', None)
         self.real_gid = os.environ.get('SUDO_GID', None)
         self.real_user = os.environ.get('SUDO_USER', None)
-
-    def drop_privileges(self):
-        if not islinux or ismacos or isfreebsd:
-            return
-        if self.real_user is not None:
-            self.info('Dropping privileges to those of', self.real_user+':',
-                    self.real_uid)
-        if self.real_gid is not None:
-            os.setegid(int(self.real_gid))
-        if self.real_uid is not None:
-            os.seteuid(int(self.real_uid))
-
-    def regain_privileges(self):
-        if not islinux or ismacos or isfreebsd:
-            return
-        if os.geteuid() != 0 and self.orig_euid == 0:
-            self.info('Trying to get root privileges')
-            os.seteuid(0)
-            if os.getegid() != 0:
-                os.setegid(0)
+        self._venv_instaled = False
 
     def pre_sub_commands(self, opts):
         pass
 
     def running(self, cmd):
         from setup.commands import command_names
+
+        if is_ci:
+            self.info('::group::' + command_names[cmd])
         self.info('\n*')
         self.info('* Running', command_names[cmd])
         self.info('*\n')
 
     def run_cmd(self, cmd, opts):
         from setup.commands import command_names
+
         cmd.pre_sub_commands(opts)
-        for scmd in cmd.sub_commands:
-            self.run_cmd(scmd, opts)
+        if self.drop_privileges_for_subcommands and self.orig_euid is not None and os.getuid() == 0 and self.real_uid is not None:
+            if self.real_user is not None:
+                self.info('Dropping privileges to those of', self.real_user + ':', self.real_uid)
+
+            pid = os.fork()
+            if pid == 0:
+                if self.real_gid is not None:
+                    os.setgid(int(self.real_gid))
+                if self.real_uid is not None:
+                    os.setuid(int(self.real_uid))
+                for scmd in cmd.sub_commands:
+                    self.run_cmd(scmd, opts)
+                raise SystemExit(0)
+            else:
+                rpid, st = os.waitpid(pid, 0)
+                if code := os.waitstatus_to_exitcode(st) != 0:
+                    sys.exit(code)
+        else:
+            for scmd in cmd.sub_commands:
+                self.run_cmd(scmd, opts)
 
         st = time.time()
         self.running(cmd)
+        if cmd.require_venv:
+            self.ensure_venv()
         cmd.run(opts)
-        self.info('* %s took %.1f seconds' % (command_names[cmd], time.time() - st))
+        self.info(f'* {command_names[cmd]} took {time.time() - st:.1f} seconds')
+        if is_ci:
+            self.info('::endgroup::')
 
     def run_all(self, opts):
         self.run_cmd(self, opts)
 
     def add_command_options(self, command, parser):
-        import setup.commands as commands
-        command.sub_commands = [getattr(commands, cmd) for cmd in
-                command.sub_commands]
+        from setup import commands
+
+        command.sub_commands = [getattr(commands, cmd) for cmd in command.sub_commands]
         for cmd in command.sub_commands:
             self.add_command_options(cmd, parser)
 
@@ -223,12 +288,22 @@ class Command(object):
     def clean(self):
         pass
 
+    def ensure_venv(self) -> None:
+        if self._venv_instaled:
+            return
+        venv_dir = self.j(self.PROJECT_ROOT, '.venv')
+        if not self.e(venv_dir):
+            subprocess.check_call(['uv', 'venv', '--relocatable'], cwd=self.PROJECT_ROOT)
+        deps = subprocess.check_output(['uv', 'pip', 'compile', 'pyproject.toml', '--group', 'dev'], cwd=self.PROJECT_ROOT)
+        subprocess.run(['uv', 'pip', 'sync', '-'], check=True, input=deps, cwd=self.PROJECT_ROOT)
+        self._venv_instaled = True
+
     @classmethod
     def newer(cls, targets, sources):
-        '''
+        """
         Return True if sources is newer that targets or if targets
         does not exist.
-        '''
+        """
         return newer(targets, sources)
 
     def info(self, *args, **kwargs):
@@ -236,9 +311,9 @@ class Command(object):
         sys.stdout.flush()
 
     def warn(self, *args, **kwargs):
-        print('\n'+'_'*20, 'WARNING','_'*20)
+        print('\n' + '_' * 20, 'WARNING', '_' * 20)
         prints(*args, **kwargs)
-        print('_'*50)
+        print('_' * 50)
         warnings.append((args, kwargs))
         sys.stdout.flush()
 
@@ -251,17 +326,18 @@ class Command(object):
             shutil.rmtree(ans)
 
 
-def installer_name(ext, is64bit=False):
-    if is64bit and ext == 'msi':
-        return 'dist/%s-64bit-%s.msi'%(__appname__, __version__)
-    if ext in ('exe', 'msi'):
-        return 'dist/%s-%s.%s'%(__appname__, __version__, ext)
-    if ext == 'dmg':
-        if is64bit:
-            return 'dist/%s-%s-x86_64.%s'%(__appname__, __version__, ext)
-        return 'dist/%s-%s.%s'%(__appname__, __version__, ext)
+def installer_names(include_source=True):
+    base = f'dist/{__appname__}'
+    yield f'{base}-64bit-{__version__}.msi'
+    yield f'{base}-{__version__}.dmg'
+    yield f'{base}-portable-installer-{__version__}.exe'
+    for arch in ('x86_64', 'arm64'):
+        yield f'{base}-{__version__}-{arch}.txz'
+    if include_source:
+        yield f'{base}-{__version__}.tar.xz'
 
-    ans = 'dist/%s-%s-i686.%s'%(__appname__, __version__, ext)
-    if is64bit:
-        ans = ans.replace('i686', 'x86_64')
-    return ans
+
+@lru_cache
+def manual_build_dir():
+    # cant use tempfile.gettempdir() as calibre.startup overrides it
+    return os.path.join('/tmp', 'user-manual-build')

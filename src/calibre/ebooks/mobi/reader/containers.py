@@ -1,22 +1,17 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
-
-from struct import unpack_from, error
+from struct import error, unpack_from
 
 from calibre.utils.imghdr import what
 
 
-def find_imgtype(data):
+def find_imgtype(data: bytes) -> str:
     return what(None, data) or 'unknown'
 
 
-class Container(object):
-
-    def __init__(self, data):
+class Container:
+    def __init__(self, data: bytes) -> None:
         self.is_image_container = False
         self.resource_index = 0
 
@@ -33,11 +28,11 @@ class Container(object):
                 if size < 0:
                     break
                 if idx == 539:
-                    self.is_image_container = data[pos:pos+size] == b'application/image'
+                    self.is_image_container = data[pos : pos + size] == b'application/image'
                     break
                 pos += size
 
-    def load_image(self, data):
+    def load_image(self, data: bytes) -> tuple[bytes, str] | tuple[None, None]:
         self.resource_index += 1
         if self.is_image_container:
             data = data[12:]
@@ -45,5 +40,3 @@ class Container(object):
             if imgtype != 'unknown':
                 return data, imgtype
         return None, None
-
-

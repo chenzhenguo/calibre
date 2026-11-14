@@ -3,8 +3,7 @@ from calibre.web.feeds.recipes import BasicNewsRecipe
 
 def classes(classes):
     q = frozenset(classes.split(' '))
-    return dict(attrs={
-        'class': lambda x: x and frozenset(x.split()).intersection(q)})
+    return dict(attrs={'class': lambda x: x and frozenset(x.split()).intersection(q)})
 
 
 def prefix_classes(classes):
@@ -17,15 +16,15 @@ def prefix_classes(classes):
                     if cls.startswith(c):
                         return True
         return False
+
     return dict(attrs={'class': test})
 
 
 class Fortune(BasicNewsRecipe):
-
     title = 'Fortune Magazine'
     __author__ = 'Rick Shang'
 
-    description = 'FORTUNE is a global business magazine that has been revered in its content and credibility since 1930. FORTUNE covers the entire field of business, including specific companies and business trends, prominent business leaders, and new ideas shaping the global marketplace.'  # noqa
+    description = 'FORTUNE is a global business magazine that has been revered in its content and credibility since 1930. FORTUNE covers the entire field of business, including specific companies and business trends, prominent business leaders, and new ideas shaping the global marketplace.'  # ruff: ignore[line-too-long]
     language = 'en'
     category = 'news'
     encoding = 'UTF-8'
@@ -40,7 +39,7 @@ class Fortune(BasicNewsRecipe):
     def get_browser(self):
         br = BasicNewsRecipe.get_browser(self)
         if self.username and self.password:
-            br.open('http://fortune.com/sitemap/')
+            br.open('https://fortune.com/')
             br.select_form(id='sign-in-form')
             br['username'] = self.username
             br['password'] = self.password
@@ -65,7 +64,7 @@ class Fortune(BasicNewsRecipe):
             div = li.find(attrs={'class': lambda x: x and 'termArchiveContentListItem__title--' in x})
             title = self.tag_to_string(div)
             if title.startswith('Magazine'):
-                title = title[len('Magazine'):]
+                title = title[len('Magazine') :]
             desc = ''
             div = li.find(attrs={'class': lambda x: x and 'termArchiveContentListItem__excerpt--' in x})
             if div is not None:

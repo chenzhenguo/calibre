@@ -1,18 +1,14 @@
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
 
+from qt.core import QDialog, QListWidgetItem, Qt
 
-__license__   = 'GPL v3'
-__copyright__ = '2008, Kovid Goyal <kovid at kovidgoyal.net>'
-
-from PyQt5.Qt import Qt, QDialog, QListWidgetItem
-
+from calibre.gui2 import error_dialog, question_dialog
 from calibre.gui2.dialogs.device_category_editor_ui import Ui_DeviceCategoryEditor
-from calibre.gui2 import question_dialog, error_dialog
-from polyglot.builtins import unicode_type
+from calibre.utils.localization import _
 
 
 class ListWidgetItem(QListWidgetItem):
-
-    def __init__(self, txt):
+    def __init__(self, txt) -> None:
         QListWidgetItem.__init__(self, txt)
         self.initial_value = txt
         self.current_value = txt
@@ -21,8 +17,7 @@ class ListWidgetItem(QListWidgetItem):
     def data(self, role):
         if role == Qt.ItemDataRole.DisplayRole:
             if self.initial_value != self.current_value:
-                return _('%(curr)s (was %(initial)s)')%dict(
-                        curr=self.current_value, initial=self.initial_value)
+                return _('%(curr)s (was %(initial)s)') % dict(curr=self.current_value, initial=self.initial_value)
             else:
                 return self.current_value
         elif role == Qt.ItemDataRole.EditRole:
@@ -30,11 +25,11 @@ class ListWidgetItem(QListWidgetItem):
         else:
             return QListWidgetItem.data(self, role)
 
-    def setData(self, role, data):
+    def setData(self, role, value) -> None:
         if role == Qt.ItemDataRole.EditRole:
             self.previous_value = self.current_value
-            self.current_value = data
-        QListWidgetItem.setData(self, role, data)
+            self.current_value = value
+        QListWidgetItem.setData(self, role, value)
 
     def text(self):
         return self.current_value
@@ -45,20 +40,19 @@ class ListWidgetItem(QListWidgetItem):
     def previous_text(self):
         return self.previous_value
 
-    def setText(self, txt):
-        self.current_value = txt
-        QListWidgetItem.setText(txt)
+    def setText(self, atext) -> None:
+        self.current_value = atext
+        QListWidgetItem.setText(self, atext)
 
 
 class DeviceCategoryEditor(QDialog, Ui_DeviceCategoryEditor):
-
-    def __init__(self, window, tag_to_match, data, key):
+    def __init__(self, window, tag_to_match, data, key) -> None:
         QDialog.__init__(self, window)
         Ui_DeviceCategoryEditor.__init__(self)
         self.setupUi(self)
         # Remove help icon on title bar
         icon = self.windowIcon()
-        self.setWindowFlags(self.windowFlags()&(~Qt.WindowType.WindowContextHelpButtonHint))
+        self.setWindowFlags(self.windowFlags() & (~Qt.WindowType.WindowContextHelpButtonHint))
         self.setWindowIcon(icon)
 
         self.to_rename = {}
@@ -66,7 +60,7 @@ class DeviceCategoryEditor(QDialog, Ui_DeviceCategoryEditor):
         self.original_names = {}
         self.all_tags = {}
 
-        for k,v in data:
+        for k, v in data:
             self.all_tags[v] = k
             self.original_names[k] = v
         for tag in sorted(self.all_tags.keys(), key=key):
@@ -85,36 +79,32 @@ class DeviceCategoryEditor(QDialog, Ui_DeviceCategoryEditor):
         self.available_tags.itemDoubleClicked.connect(self._rename_tag)
         self.available_tags.itemChanged.connect(self.finish_editing)
 
-    def finish_editing(self, item):
+    def finish_editing(self, item) -> None:
         if not item.text():
-            error_dialog(self, _('Item is blank'),
-                            _('An item cannot be set to nothing. Delete it instead.')).exec_()
+            error_dialog(self, _('Item is blank'), _('An item cannot be set to nothing. Delete it instead.')).exec()
             item.setText(item.previous_text())
             return
         if item.text() != item.initial_text():
             id_ = int(item.data(Qt.ItemDataRole.UserRole))
-            self.to_rename[id_] = unicode_type(item.text())
+            self.to_rename[id_] = str(item.text())
 
-    def rename_tag(self):
+    def rename_tag(self) -> None:
         item = self.available_tags.currentItem()
         self._rename_tag(item)
 
-    def _rename_tag(self, item):
+    def _rename_tag(self, item) -> None:
         if item is None:
-            error_dialog(self, _('No item selected'),
-                         _('You must select one item from the list of Available items.')).exec_()
+            error_dialog(self, _('No item selected'), _('You must select one item from the list of available items.')).exec()
             return
         self.available_tags.editItem(item)
 
-    def delete_tags(self):
+    def delete_tags(self) -> None:
         deletes = self.available_tags.selectedItems()
         if not deletes:
-            error_dialog(self, _('No items selected'),
-                         _('You must select at least one item from the list.')).exec_()
+            error_dialog(self, _('No items selected'), _('You must select at least one item from the list.')).exec()
             return
-        ct = ', '.join([unicode_type(item.text()) for item in deletes])
-        if not question_dialog(self, _('Are you sure?'),
-            '<p>'+_('Are you sure you want to delete the following items?')+'<br>'+ct):
+        ct = ', '.join([str(item.text()) for item in deletes])
+        if not question_dialog(self, _('Are you sure?'), '<p>' + _('Are you sure you want to delete the following items?') + '<br>' + ct):
             return
         row = self.available_tags.row(deletes[0])
         for item in deletes:

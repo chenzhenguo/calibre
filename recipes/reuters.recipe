@@ -1,83 +1,193 @@
 #!/usr/bin/env python
 # vim:fileencoding=utf-8
-# License: GPLv3 Copyright: 2020, Kovid Goyal <kovid at kovidgoyal.net>
+import json
+import time
+from datetime import datetime, timedelta
 
-from __future__ import absolute_import, division, print_function, unicode_literals
-
-from calibre.web.feeds.news import BasicNewsRecipe, classes
-
-country = 'us'
-country_defs = {
-    'us': ('www.reuters.com', {
-        'Business': 'finance',
-        'Markets': 'finance/markets',
-        'World': 'news/world',
-        'Politics': 'politics',
-        'Tech': 'news/technology',
-        'Wealth': 'finance/wealth',
-    })
-}
+from calibre.web.automate.bot_check import retry_bot_checks
+from calibre.web.feeds.news import BasicNewsRecipe
 
 
-def prefixed_classes(classes):
-    q = frozenset(classes.split(' '))
-
-    def matcher(x):
-        if x:
-            for candidate in frozenset(x.split()):
-                for x in q:
-                    if candidate.startswith(x):
-                        return True
-        return False
-    return {'attrs': {'class': matcher}}
+def p_dt(x):
+    dt = datetime.fromisoformat(x[:-1]) + timedelta(seconds=time.timezone)
+    return dt.strftime('%b %d, %Y, %I:%M %p')
 
 
 class Reuters(BasicNewsRecipe):
     title = 'Reuters'
-    description = 'News from all over'
-    __author__ = 'Kovid Goyal'
+    __author__ = 'unkn0wn'
+    description = (
+        'Reuters, the news and media division of Thomson Reuters, is the world’s largest multimedia news provider, '
+        'reaching billions of people worldwide every day. Reuters provides business, financial, national and international '
+        'news to professionals via desktop terminals, the world’s media organizations, industry events and directly to consumers. '
+        'Uses the camoufox browser, which is downloaded on first use, as reuters.com blocks every lighter way of fetching its pages.'
+    )
+    masthead_url = 'https://upload.wikimedia.org/wikipedia/commons/9/9e/Reuters_logo_2024.svg'
+    cover_url = 'https://yt3.googleusercontent.com/ytc/AIdro_mk43b9eQwN15ZBDyMPDaElxvw4V-oUS9XDUvVnYB3gA9yA=s1024'
     language = 'en'
+    encoding = 'utf-8'
+    oldest_article = 1.2  # days
+    no_javascript = True
+    no_stylesheets = True
+    remove_attributes = ['style', 'height', 'width']
+    resolve_internal_links = True
+    ignore_duplicate_articles = {'url'}
+    remove_empty_feeds = True
 
-    keep_only_tags = [
-        prefixed_classes('ArticlePage-article-header ArticlePage-article-body'),
-    ]
-    remove_tags = [
-        prefixed_classes('ArticleBody-read-time-and-social Slideshow-expand-button- TwoColumnsLayout-footer-'),
-        dict(name=['button', 'link']),
-    ]
+    # reuters.com is behind an anti-bot service that answers every lighter way
+    # of asking for a page, the mobile API included, with a 401 and an
+    # interstitial, see calibre.web.automate.bot_check
+    browser_type = 'camoufox'
+    # No delay between requests, deliberately: any delay at all makes calibre
+    # download on a single thread, and a browser that navigates to every
+    # article is slow enough that that would take hours. Looking like a real
+    # browser, not pacing, is what gets this recipe through, and each download
+    # thread gets a tab of its own to do it in.
+    delay = 0
 
-    def preprocess_html(self, soup, *a):
-        meta = soup.find(attrs={'name': "sailthru.image.full"})
-        if meta is not None:
-            url = meta['content']
-            body = soup.find(**prefixed_classes('ArticlePage-article-body'))
-            if body is not None:
-                div = soup.new_tag('div')
-                div.append(soup.new_tag('img', src=url))
-                body.insert(0, div)
-        return soup
+    extra_css = '''
+        .label, .auth { font-size:small; color:#202020; }
+        .desc { font-style: italic; }
+        .figc { font-size:small; }
+        img {display:block; margin:0 auto;}
+    '''
+
+    recipe_specific_options = {
+        'days': {
+            'short': 'Oldest article to download from this news source. In days ',
+            'long': 'For example, 0.5, gives you articles from the past 12 hours',
+            'default': str(oldest_article),
+        },
+        'res': {
+            'short': 'For hi-res images, select a resolution from the\nfollowing options: 960, 1080, 1200',
+            'long': 'This is useful for non e-ink devices',
+            'default': '480',
+        },
+        'spr': {
+            'short': 'Include Sports sections?',
+            'long': 'Yes/No',
+            'default': 'No',
+        },
+    }
+
+    def __init__(self, *args, **kwargs):
+        BasicNewsRecipe.__init__(self, *args, **kwargs)
+        d = self.recipe_specific_options.get('days')
+        if d and isinstance(d, str):
+            self.oldest_article = float(d)
 
     def parse_index(self):
-        base, sections = country_defs[country]
-        ans = []
+        index = 'https://www.reuters.com'
+        today = datetime.now()
 
-        for section_title in sorted(sections):
-            slug = sections[section_title]
-            self.log(section_title)
-            articles = list(self.parse_reuters_section(base, slug))
+        sections = []
+
+        sec_api = json.loads(self.index_to_soup(index + '/mobile/api/v1/menu/?outputType=json', raw=True))
+
+        for s in sec_api[0]['data']['hierarchy']['children']:
+            if s.get('type', '') == 'section':
+                sections.append((s['name'], s['id']))
+                sections.extend((s['name'] + ' - ' + s2['name'], s2['id']) for s2 in s.get('children', []) if s2.get('type', '') == 'section')
+
+        feeds = []
+
+        for sec, link in sections:
+            sp = self.recipe_specific_options.get('spr')
+            if sp and isinstance(sp, str):
+                if sp.lower().strip() != 'yes':
+                    if sec.lower().startswith('sport'):
+                        continue
+
+            self.log(sec)
+
+            articles = []
+
+            data = json.loads(self.index_to_soup(index + '/mobile/v1' + link + '?outputType=json', raw=True))
+
+            for st in (story for x in data if isinstance(x, dict) for story in x.get('data', {}).get('stories', [])):
+                title = st['title']
+
+                date = datetime.fromisoformat(st['display_time'][:-1]) + timedelta(seconds=time.timezone)
+                if (today - date) > timedelta(self.oldest_article):
+                    continue
+
+                desc = st['description']
+                url = index + st['url']
+                self.log('            ', title, '\n\t', desc, '\n\t', url)
+                articles.append({'title': title, 'description': desc, 'url': url})
             if articles:
-                ans.append((section_title, articles))
-            if self.test and len(ans) >= self.test[0]:
-                break
-        return ans
+                feeds.append((sec, articles))
+        return feeds
 
-    def parse_reuters_section(self, base, slug):
-        url = 'https://' + base + '/' + slug
-        soup = self.index_to_soup(url)
-        for div in soup.findAll(**classes('news-headline-list')):
-            h3 = div.find(**classes('story-title'))
-            a = h3.parent
-            title = self.tag_to_string(h3)
-            url = 'https://{}{}'.format(base, a['href'])
-            self.log('\t', title, url)
-            yield {'title': title, 'url': url}
+    def preprocess_raw_html(self, raw, url):
+        res = '&width=480'
+        w = self.recipe_specific_options.get('res')
+        if w and isinstance(w, str):
+            res = '&width=' + w
+
+        body = ''
+
+        for det in json.loads(raw):
+            if det.get('type', '') != 'article_detail':
+                continue
+            data = det['data']['article']
+            body += '<h1>' + data['title'] + '</h1>'
+            if data.get('description'):
+                body += '<p class="desc">' + data['description'] + '</p>'
+            if data.get('authors'):
+                body += '<p class="auth">' + 'By ' + ', '.join(at.get('byline', '') for at in data.get('authors', [])) + '</p>'
+
+            if data.get('thumbnail') and data['thumbnail'].get('type', '') == 'image':
+                th = data['thumbnail']
+                body += '<img src="{}"><div class="figc">{}</div>'.format(
+                    th['resizer_url'].split('&')[0] + res,
+                    th.get('caption', ''),
+                )
+
+            body += (
+                '<p class="auth">'
+                + str(data.get('read_minutes', '_'))
+                + ' minute read | '
+                + str(data['word_count'])
+                + ' words | '
+                + p_dt(data['updated_time'] if data.get('updated_time') else data['display_time'])
+                + '</p>'
+            )
+
+            if data.get('summary'):
+                body += '<blockquote>' + ''.join(f'<li>{su["description"]}</li>' for su in data['summary']) + '</blockquote>'
+
+            for y in data['content_elements']:
+                ty = y.get('type', '')
+                if ty == 'placeholder':
+                    continue
+
+                elif ty == 'paragraph':
+                    body += '<p>' + y['content'] + '</p>'
+                elif ty == 'header':
+                    body += '<h4>' + y['content'] + '</h4>'
+                elif ty == 'graphic':
+                    body += '<img src="{}"><div class="figc">{}</div>'.format(
+                        y['resizer_url'].split('&')[0] + res,
+                        y.get('description', ''),
+                    )
+                else:
+                    self.log('**', ty)
+
+            if data.get('sign_off'):
+                body += '<p class="auth">' + data['sign_off'] + '</p>'
+
+        return '<html><body><div>' + body + '</div></body></html>'
+
+    def get_browser(self, *args, **kwargs):
+        br = BasicNewsRecipe.get_browser(self, *args, **kwargs)
+        # Reuters tailors, and in some regions withholds, its coverage based on
+        # where it thinks the reader is. This is the same opt out of that as
+        # the mobile app sends, set as a cookie rather than as a raw Cookie
+        # header, which with this browser would replace the cookies the site
+        # itself sets, the anti-bot service's among them.
+        br.set_cookie('reuters-geo', '{"country":"-","region":"-"}', domain='.reuters.com')
+        return retry_bot_checks(br)
+
+    def print_version(self, url):
+        return url.replace('https://www.reuters.com', 'https://www.reuters.com/mobile/v1') + '?outputType=json'

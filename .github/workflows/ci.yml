@@ -1,5 +1,7 @@
 name: CI
 on: [push, pull_request]
+permissions:
+    contents: read # to fetch code (actions/checkout)
 
 jobs:
     test:
@@ -7,17 +9,18 @@ jobs:
         runs-on: ${{ matrix.os }}
         strategy:
             matrix:
-                os: [ubuntu-20.04, macos-latest, windows-latest]
+                os: [ubuntu-latest, macos-latest, windows-latest]
         steps:
             - name: Checkout source code
-              uses: actions/checkout@master
+              uses: actions/checkout@v7.0.1
               with:
                 fetch-depth: 10
+                persist-credentials: false
 
             - name: Set up Python
-              uses: actions/setup-python@master
+              uses: actions/setup-python@v7.1.0
               with:
-                python-version: 3.8
+                python-version: "3.14"
 
             - name: Install calibre dependencies
               run:
@@ -27,36 +30,64 @@ jobs:
               run:
                   python setup/unix-ci.py bootstrap
 
+            # Downloads the Camoufox browser, without which the browser
+            # automation tests skip themselves
+            - name: Download browser automation dependencies
+              env:
+                # Needed to avoid 403 errors from the GitHub API, whose
+                # unauthenticated rate limit is shared with every other job
+                # running on the same runner IP address
+                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run:
+                  python setup/unix-ci.py browser-deps
+
             - name: Test calibre
+              env:
+                PYTHONWARNINGS: error
+                CALIBRE_SHOW_DEPRECATION_WARNINGS: 1
               run:
                   python setup/unix-ci.py test
 
     archtest:
         name: Test on Arch
-        runs-on: ubuntu-20.04
+        runs-on: ubuntu-latest
         container:
-            image: 'archlinux/base:latest'
+            image: 'archlinux/archlinux:latest'
             env:
                 CI: 'true'
         steps:
-            - name: Prepare the container
+            - name: Setup container
               run: |
                 pacman -Syu --noconfirm
                 pacman -S --noconfirm tar
 
             - name: Checkout source code
-              uses: actions/checkout@master
+              uses: actions/checkout@v7.0.1
               with:
                 fetch-depth: 10
+                persist-credentials: false
 
             - name: Install calibre dependencies
               run: setup/arch-ci.sh
 
             - name: Bootstrap calibre
-              run: runuser -u ci -- python setup.py bootstrap --ephemeral
+              run: runuser -u ci -- python setup.py bootstrap --ephemeral --debug --sanitize
+
+            - name: Run type checker
+              run: ./setup.py type_check
+
+            - name: Run linter
+              run: ./setup.py check
+
+            - name: Run format checker
+              run: ./setup.py fmt --check-only
 
             - name: Test calibre
+              env:
+                PYTHONWARNINGS: error
+                CALIBRE_SHOW_DEPRECATION_WARNINGS: 1
               run: |
                   set -xe
-                  runuser -u ci -- python setup.py test
+                  runuser -u ci -- python setup.py test --under-sanitize
+                  echo "Running test_rs"
                   runuser -u ci -- python setup.py test_rs

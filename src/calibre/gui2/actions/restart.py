@@ -1,22 +1,16 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
 
 from calibre.gui2.actions import InterfaceAction
+from calibre.utils.localization import _
 
 
 class RestartAction(InterfaceAction):
-
     name = 'Restart'
     action_spec = (_('Restart'), 'restart.png', _('Restart calibre'), 'Ctrl+R')
 
-    def genesis(self):
+    def genesis(self) -> None:
         self.qaction.triggered.connect(self.restart)
 
-    def restart(self, *args):
+    def restart(self, *args) -> None:
         self.gui.quit(restart=True)

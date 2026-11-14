@@ -3,6 +3,7 @@
 # -*- coding: utf-8 -*-
 
 from __future__ import unicode_literals
+
 __license__ = 'GPL v3'
 __copyright__ = '2008-2016, Darko Miletic <darko.miletic at gmail.com>'
 '''
@@ -34,19 +35,16 @@ class Clarin(BasicNewsRecipe):
     needs_subscription = 'optional'
     INDEX = 'http://www.clarin.com'
     LOGIN = 'https://app-pase.clarin.com/pase-registracion/app/pase/ingresarNavegable?execution=e1s1'
-    masthead_url = 'http://www.clarin.com/images/logo_clarin.svg'
     cover_url = strftime('http://tapas.clarin.com/tapa/%Y/%m/%d/%Y%m%d_thumb.jpg')
 
     compress_news_images = True
     scale_news_images_to_device = True
     compress_news_images_max_size = 10  # kB
-    scale_news_images = True
-    handle_gzip = True
 
     # To get all the data (images)
     auto_cleanup = False
 
-    extra_css = """
+    extra_css = '''
       h1#title {
         line-height: 1em;
         margin: 0 0 .5em 0;
@@ -66,19 +64,30 @@ class Clarin(BasicNewsRecipe):
         font-size: .9em;
         margin-bottom: .5em;
       }
-    """
+    '''
 
-    conversion_options = {
-      'comment': description, 'tags': category, 'publisher': publisher, 'language': language
+    conversion_options = {'comment': description, 'tags': category, 'publisher': publisher, 'language': language}
+
+    recipe_specific_options = {
+        'days': {
+            'short': 'Oldest article to download from this news source. In days ',
+            'long': 'For example, 0.5, gives you articles from the past 12 hours',
+            'default': str(oldest_article),
+        }
     }
 
-    keep_only_tags = [
-      dict(name='p'  , attrs={'class'   : 'volanta'}),
-      dict(name='h1' , attrs={'id': 'title'}),
-      dict(name='div', attrs={'class'   : 'bajada'}),
-      dict(name='div', attrs={'id'   : 'galeria-trigger'}),
-      dict(name='div', attrs={'class'   : 'body-nota'})
+    def __init__(self, *args, **kwargs):
+        BasicNewsRecipe.__init__(self, *args, **kwargs)
+        d = self.recipe_specific_options.get('days')
+        if d and isinstance(d, str):
+            self.oldest_article = float(d)
 
+    keep_only_tags = [
+        dict(name='p', attrs={'class': 'volanta'}),
+        dict(name='h1', attrs={'id': 'title'}),
+        dict(name='div', attrs={'class': 'bajada'}),
+        dict(name='div', attrs={'id': 'galeria-trigger'}),
+        dict(name='div', attrs={'class': 'body-nota'}),
     ]
 
     remove_tags = [
@@ -86,14 +95,14 @@ class Clarin(BasicNewsRecipe):
         dict(attrs={'class': ['tags-bar', 'breadcrumb', 'share-bar', 'share', 'sp__SM']}),
         dict(name='div', attrs={'class': lambda x: x and 'r-nota' in x.split()}),
         dict(attrs={'id': ['relacionadas']}),
-        dict(name='a', attrs={'class':'content-new'})
+        dict(name='a', attrs={'class': 'content-new'}),
     ]
 
     remove_tags_after = dict(name='div', attrs={'id': 'relacionadas'})
 
     remove_attributes = ['lang']
 
-    # Images on hightlights view
+    # Images on highlights view
     def populate_article_metadata(self, article, soup, first):
         if first and hasattr(self, 'add_toc_thumbnail'):
             picdiv = soup.find('img')
@@ -101,38 +110,39 @@ class Clarin(BasicNewsRecipe):
                 self.add_toc_thumbnail(article, picdiv['src'])
 
     feeds = [
-      (u'Lo Ultimo', u'http://www.clarin.com/rss/lo-ultimo/'),
-      (u'Politica', u'http://www.clarin.com/rss/politica/'),
-      (u'Opinion', u'https://www.clarin.com/rss/opinion/'),
-      (u'Cultura', u'https://www.clarin.com/rss/cultura/'),
-      (u'Economia', u'https://www.clarin.com/rss/economia/'),
-      (u'Tecnologia', u'https://www.clarin.com/rss/tecnologia/'),
-      (u'RevistaN', u'https://www.clarin.com/rss/revista-enie/'),
-      (u'Viva', u'https://www.clarin.com/rss/viva/'),
-      (u'Deportes', u'http://www.clarin.com/rss/deportes/'),
-      (u'Mundo', u'http://www.clarin.com/rss/mundo/'),
-      (u'Espectaculos', u'http://www.clarin.com/rss/espectaculos/'),
-      (u'Sociedad', u'http://www.clarin.com/rss/sociedad/'),
-      (u'Ciudades', u'http://www.clarin.com/rss/ciudades/'),
-      (u'Policiales', u'http://www.clarin.com/rss/policiales/'),
-      (u'Internet', u'http://www.clarin.com/rss/internet/')
+        ('Lo Ultimo', 'http://www.clarin.com/rss/lo-ultimo/'),
+        ('Politica', 'http://www.clarin.com/rss/politica/'),
+        ('Opinion', 'https://www.clarin.com/rss/opinion/'),
+        ('Cultura', 'https://www.clarin.com/rss/cultura/'),
+        ('Economia', 'https://www.clarin.com/rss/economia/'),
+        ('Tecnologia', 'https://www.clarin.com/rss/tecnologia/'),
+        ('RevistaN', 'https://www.clarin.com/rss/revista-enie/'),
+        ('Viva', 'https://www.clarin.com/rss/viva/'),
+        ('Deportes', 'http://www.clarin.com/rss/deportes/'),
+        ('Mundo', 'http://www.clarin.com/rss/mundo/'),
+        ('Espectaculos', 'http://www.clarin.com/rss/espectaculos/'),
+        ('Sociedad', 'http://www.clarin.com/rss/sociedad/'),
+        ('Ciudades', 'http://www.clarin.com/rss/ciudades/'),
+        ('Policiales', 'http://www.clarin.com/rss/policiales/'),
+        ('Internet', 'http://www.clarin.com/rss/internet/'),
     ]
 
     def get_browser(self):
         br = BasicNewsRecipe.get_browser(self)
         br.open(self.INDEX)
         if self.username is not None and self.password is not None:
-            data = urlencode({'ingresar_ingresar_paseForm': 'ingresar_ingresar_paseForm',
-                                     'ingresar_ingresar_email_paseInputComponent': self.username,
-                                     'ingresar_ingresar_palabraClave_paseInputComponent': self.password,
-                                     'ingresar_ingresar_ingresar_paseButton': 'Ingresar',
-                                     'javax.faces.ViewState': 'e1s1'  # noqa
-                                     })
+            data = urlencode({
+                'ingresar_ingresar_paseForm': 'ingresar_ingresar_paseForm',
+                'ingresar_ingresar_email_paseInputComponent': self.username,
+                'ingresar_ingresar_palabraClave_paseInputComponent': self.password,
+                'ingresar_ingresar_ingresar_paseButton': 'Ingresar',
+                'javax.faces.ViewState': 'e1s1',
+            })
             br.open(self.LOGIN, data)
         return br
 
     def preprocess_html(self, soup):
-        for img in soup.findAll(['img']):
+        for img in soup.findAll(['img'], attrs={'data-big': True}):
             img['src'] = img['data-big']
 
         for figCaption in soup.findAll(['figcaption']):
@@ -145,7 +155,7 @@ class Clarin(BasicNewsRecipe):
         for t in soup.findAll(['a']):
             t.name = 'strong'
 
-        nonBreakSpace = u'\xa0'
+        nonBreakSpace = '\xa0'
         for empty in soup.findAll('p', string=nonBreakSpace):
             empty.extract()
 

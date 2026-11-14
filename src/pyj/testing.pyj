@@ -4,6 +4,7 @@ from __python__ import bound_methods, hash_literals
 
 from dom import clear
 
+
 def raise_fail(preamble, msg, call_site):
     if msg:
         msg = '. ' + msg
@@ -26,7 +27,6 @@ def repr_of(a):
 
 
 def assert_equal(a, b, msg, call_site=None):
-
     def fail():
         ra = repr_of(a)
         rb = repr_of(b)
@@ -78,7 +78,7 @@ def assert_true(x, msg, call_site=None):
         raise_fail(f'{x} is not truthy', msg, call_site)
 
 
-def assert_fale(x, msg, call_site=None):
+def assert_false(x, msg, call_site=None):
     if x:
         raise_fail(f'{x} is truthy', msg, call_site)
 

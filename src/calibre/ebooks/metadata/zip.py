@@ -1,19 +1,21 @@
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2008, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
 
 import os
+from typing import IO, TYPE_CHECKING
 
-from calibre.utils.zipfile import ZipFile
-from calibre.ptempfile import TemporaryDirectory
 from calibre import CurrentDir
-from polyglot.builtins import getcwd
+from calibre.ptempfile import TemporaryDirectory
+from calibre.utils import StreamOrPath
+from calibre.utils.zipfile import ZipFile
+
+if TYPE_CHECKING:
+    from calibre.ebooks.metadata.book.base import Metadata
 
 
-def get_metadata(stream):
-    from calibre.ebooks.metadata.meta import get_metadata
+def get_metadata(stream: IO[bytes]) -> Metadata:
     from calibre.ebooks.metadata.archive import is_comic
+    from calibre.ebooks.metadata.meta import get_metadata
+
     stream_type = None
     zf = ZipFile(stream, 'r')
     names = zf.namelist()
@@ -25,12 +27,26 @@ def get_metadata(stream):
         stream_type = os.path.splitext(f)[1].lower()
         if stream_type:
             stream_type = stream_type[1:]
-            if stream_type in ('lit', 'opf', 'prc', 'mobi', 'fb2', 'epub',
-                               'rb', 'imp', 'pdf', 'lrf', 'azw', 'azw1', 'azw3'):
+            if stream_type in (
+                'lit',
+                'opf',
+                'prc',
+                'mobi',
+                'fb2',
+                'epub',
+                'rb',
+                'imp',
+                'pdf',
+                'lrf',
+                'azw',
+                'azw1',
+                'azw3',
+            ):
                 with TemporaryDirectory() as tdir:
                     with CurrentDir(tdir):
                         path = zf.extract(f)
-                        mi = get_metadata(open(path,'rb'), stream_type)
+                        with open(path, 'rb') as f:
+                            mi = get_metadata(f, stream_type)
                         if stream_type == 'opf' and mi.application_id is None:
                             try:
                                 # zip archive opf files without an application_id were assumed not to have a cover
@@ -38,27 +54,25 @@ def get_metadata(stream):
                                 nmi = zip_opf_metadata(path, zf)
                                 nmi.timestamp = None
                                 return nmi
-                            except:
+                            except Exception:
                                 pass
                         mi.timestamp = None
                         return mi
-    raise ValueError('No ebook found in ZIP archive (%s)' % os.path.basename(getattr(stream, 'name', '') or '<stream>'))
+    raise ValueError('No ebook found in ZIP archive ({})'.format(os.path.basename(getattr(stream, 'name', '') or '<stream>')))
 
 
-def zip_opf_metadata(opfpath, zf):
+def zip_opf_metadata(opfpath: str, zf: ZipFile) -> Metadata:
     from calibre.ebooks.metadata.opf2 import OPF
-    if hasattr(opfpath, 'read'):
-        f = opfpath
-        opfpath = getattr(f, 'name', getcwd())
-    else:
-        f = open(opfpath, 'rb')
-    opf = OPF(f, os.path.dirname(opfpath))
+
+    with StreamOrPath(opfpath, 'rb') as f:
+        opfpath = getattr(f, 'name', os.getcwd())
+        opf = OPF(f, os.path.dirname(opfpath))
     mi = opf.to_book_metadata()
     # This is broken, in that it only works for
     # when both the OPF file and the cover file are in the root of the
     # zip file and the cover is an actual raster image, but I don't care
     # enough to make it more robust
-    if getattr(mi, 'cover', None):
+    if mi.cover:
         covername = os.path.basename(mi.cover)
         mi.cover = None
         names = zf.namelist()

@@ -1,39 +1,45 @@
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
 
-__license__   = 'GPL v3'
-__copyright__ = '2008, Kovid Goyal <kovid at kovidgoyal.net>'
-
-'''
+"""
 Device drivers.
-'''
+"""
 
-import sys, time, pprint
+import pprint
+import sys
+import time
 from functools import partial
-from polyglot.builtins import zip, unicode_type
+from typing import IO, TYPE_CHECKING, TypedDict, cast
 
-DAY_MAP   = dict(Sun=0, Mon=1, Tue=2, Wed=3, Thu=4, Fri=5, Sat=6)
+if TYPE_CHECKING:
+    from collections.abc import Callable, Collection, Iterable
+    from io import StringIO
+
+    from calibre.devices.interface import DevicePlugin
+
+DAY_MAP = dict(Sun=0, Mon=1, Tue=2, Wed=3, Thu=4, Fri=5, Sat=6)
 MONTH_MAP = dict(Jan=1, Feb=2, Mar=3, Apr=4, May=5, Jun=6, Jul=7, Aug=8, Sep=9, Oct=10, Nov=11, Dec=12)
 INVERSE_DAY_MAP = dict(zip(DAY_MAP.values(), DAY_MAP.keys()))
 INVERSE_MONTH_MAP = dict(zip(MONTH_MAP.values(), MONTH_MAP.keys()))
 
 
-def strptime(src):
-    src = src.strip()
-    src = src.split()
-    src[0] = unicode_type(DAY_MAP[src[0][:-1]])+','
-    src[2] = unicode_type(MONTH_MAP[src[2]])
-    return time.strptime(' '.join(src), '%w, %d %m %Y %H:%M:%S %Z')
+def strptime(src: str) -> time.struct_time:
+    parts = src.strip().split()
+    parts[0] = str(DAY_MAP[parts[0][:-1]]) + ','
+    parts[2] = str(MONTH_MAP[parts[2]])
+    return time.strptime(' '.join(parts), '%w, %d %m %Y %H:%M:%S %Z')
 
 
-def strftime(epoch, zone=time.gmtime):
-    src = time.strftime("%w, %d %m %Y %H:%M:%S GMT", zone(epoch)).split()
-    src[0] = INVERSE_DAY_MAP[int(src[0][:-1])]+','
+def strftime(epoch: float, zone: Callable[[float], time.struct_time] = time.gmtime) -> str:
+    src = time.strftime('%w, %d %m %Y %H:%M:%S GMT', zone(epoch)).split()
+    src[0] = INVERSE_DAY_MAP[int(src[0][:-1])] + ','
     src[2] = INVERSE_MONTH_MAP[int(src[2])]
     return ' '.join(src)
 
 
-def get_connected_device():
+def get_connected_device() -> DevicePlugin | None:
     from calibre.customize.ui import device_plugins
     from calibre.devices.scanner import DeviceScanner
+
     dev = None
     scanner = DeviceScanner()
     scanner.scan()
@@ -52,7 +58,7 @@ def get_connected_device():
     for det, d in connected_devices:
         try:
             d.open(det, None)
-        except:
+        except Exception:
             continue
         else:
             dev = d
@@ -60,21 +66,27 @@ def get_connected_device():
     return dev
 
 
-def debug(ioreg_to_tmp=False, buf=None, plugins=None,
-        disabled_plugins=None):
-    '''
+def debug(
+    ioreg_to_tmp: bool = False,
+    buf: IO[str] | None = None,
+    plugins: Iterable[DevicePlugin] | None = None,
+    disabled_plugins: Collection[DevicePlugin] | None = None,
+) -> str | None:
+    """
     If plugins is None, then this method calls startup and shutdown on the
     device plugins. So if you are using it in a context where startup could
     already have been called (for example in the main GUI), pass in the list of
     device plugins as the plugins parameter.
-    '''
+    """
     import textwrap
+
+    from calibre import prints
+    from calibre.constants import debug, is_debugging, ismacos, iswindows
     from calibre.customize.ui import device_plugins, disabled_device_plugins
     from calibre.debug import print_basic_debug_info
     from calibre.devices.scanner import DeviceScanner
-    from calibre.constants import iswindows, ismacos
-    from calibre import prints
     from polyglot.io import PolyglotStringIO
+
     oldo, olde = sys.stdout, sys.stderr
 
     if buf is None:
@@ -88,37 +100,44 @@ def debug(ioreg_to_tmp=False, buf=None, plugins=None,
         for d in devplugins:
             try:
                 d.startup()
-            except:
-                out('Startup failed for device plugin: %s'%d)
+            except Exception:
+                out(f'Startup failed for device plugin: {d}')
 
     if disabled_plugins is None:
         disabled_plugins = list(disabled_device_plugins())
 
+    orig_debug = is_debugging()
+    debug(True)
     try:
         print_basic_debug_info(out=buf)
         s = DeviceScanner()
         s.scan()
-        devices = (s.devices)
+        devices = s.devices
         if not iswindows:
             devices = [list(x) for x in devices]
             for d in devices:
                 for i in range(3):
-                    d[i] = hex(d[i])
+                    # the first three entries are the vendor id, product id and bcd
+                    d[i] = hex(cast('int', d[i]))
         out('USB devices on system:')
         out(pprint.pformat(devices))
 
         ioreg = None
         if ismacos:
             from calibre.devices.usbms.device import Device
-            mount = '\n'.join(repr(x) for x in Device.osx_run_mount().splitlines())
+
+            mount = Device.osx_run_mount()
             drives = pprint.pformat(Device.osx_get_usb_drives())
-            ioreg = 'Output from mount:\n'+mount+'\n\n'
-            ioreg += 'Output from osx_get_usb_drives:\n'+drives+'\n\n'
-            ioreg += Device.run_ioreg().decode('utf-8')
+            ioreg = 'Output from mount:\n' + mount + '\n\n'
+            ioreg += 'Output from osx_get_usb_drives:\n' + drives + '\n\n'
+            iro = Device.run_ioreg()
+            try:
+                ioreg += iro.decode('utf-8', 'replace')
+            except UnicodeDecodeError:
+                ioreg += repr(iro)
         connected_devices = []
         if disabled_plugins:
-            out('\nDisabled plugins:', textwrap.fill(' '.join([x.__class__.__name__ for x in
-                disabled_plugins])))
+            out('\nDisabled plugins:', textwrap.fill(' '.join([x.__class__.__name__ for x in disabled_plugins])))
             out(' ')
         else:
             out('\nNo disabled plugins')
@@ -143,7 +162,7 @@ def debug(ioreg_to_tmp=False, buf=None, plugins=None,
                     connected_devices.append((dev, det))
 
             out(' ')
-            errors = {}
+            errors: dict[DevicePlugin, str] = {}
             success = False
             out('Devices possibly connected:', end=' ')
             for dev, det in connected_devices:
@@ -153,17 +172,18 @@ def debug(ioreg_to_tmp=False, buf=None, plugins=None,
             out(' ')
             for dev, det in connected_devices:
                 out('Trying to open', dev.name, '...', end=' ')
-                dev.do_device_debug = True
+                setattr(dev, 'do_device_debug', True)  # read by drivers via getattr()
                 try:
                     dev.reset(detected_device=det)
                     dev.open(det, None)
                     out('OK')
-                except:
+                except Exception:
                     import traceback
+
                     errors[dev] = traceback.format_exc()
                     out('failed')
                     continue
-                dev.do_device_debug = False
+                setattr(dev, 'do_device_debug', False)
                 success = True
                 if hasattr(dev, '_main_prefix'):
                     out('Main memory:', repr(dev._main_prefix))
@@ -171,40 +191,52 @@ def debug(ioreg_to_tmp=False, buf=None, plugins=None,
                 break
             if not success and errors:
                 out('Opening of the following devices failed')
-                for dev,msg in errors.items():
+                for dev, msg in errors.items():
                     out(dev)
                     out(msg)
                     out(' ')
 
             if ioreg is not None:
-                ioreg = 'IOREG Output\n'+ioreg
+                ioreg = 'IOREG Output\n' + ioreg
                 out(' ')
                 if ioreg_to_tmp:
-                    lopen('/tmp/ioreg.txt', 'w').write(ioreg)
-                    out('Dont forget to send the contents of /tmp/ioreg.txt')
+                    with open('/tmp/ioreg.txt', 'w') as f:
+                        f.write(ioreg)
+                    out("Don't forget to send the contents of /tmp/ioreg.txt")
                     out('You can open it with the command: open /tmp/ioreg.txt')
                 else:
                     out(ioreg)
 
         if hasattr(buf, 'getvalue'):
-            return buf.getvalue()
+            # buf is a StringIO, either passed in or created above
+            return cast('StringIO', buf).getvalue()
     finally:
+        debug(orig_debug)
         sys.stdout = oldo
         sys.stderr = olde
         if plugins is None:
             for d in devplugins:
                 try:
                     d.shutdown()
-                except:
+                except Exception:
                     pass
 
 
-def device_info(ioreg_to_tmp=False, buf=None):
+#: A USB device as a tuple of the form (vendor_id, product_id, bcd, ...)
+type DeviceTuple = tuple[int | str | None, ...]
+
+
+class DeviceInfo(TypedDict):
+    device_set: set[DeviceTuple]
+    device_details: dict[DeviceTuple, DeviceTuple]
+
+
+def device_info(ioreg_to_tmp: bool = False, buf: IO[str] | None = None) -> DeviceInfo:
     from calibre.devices.scanner import DeviceScanner
 
-    res = {}
-    res['device_set'] = device_set = set()
-    res['device_details'] = device_details = {}
+    res: DeviceInfo = {'device_set': set(), 'device_details': {}}
+    device_set = res['device_set']
+    device_details = res['device_details']
 
     s = DeviceScanner()
     s.scan()

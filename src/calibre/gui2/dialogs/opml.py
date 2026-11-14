@@ -1,35 +1,32 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
-
-from collections import defaultdict, namedtuple
+from collections import defaultdict
 from operator import itemgetter
-
-from PyQt5.Qt import (
-    QDialog, QFormLayout, QHBoxLayout, QLineEdit, QToolButton, QIcon,
-    QDialogButtonBox, Qt, QSpinBox, QCheckBox)
+from typing import NamedTuple
 
 from lxml import etree
+from qt.core import QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QIcon, QLabel, QLineEdit, QSpinBox, Qt, QToolButton
 
 from calibre.gui2 import choose_files, error_dialog
-from calibre.utils.xml_parse import safe_xml_fromstring
 from calibre.utils.icu import sort_key
-from polyglot.builtins import unicode_type
+from calibre.utils.localization import _
+from calibre.utils.xml_parse import safe_xml_fromstring
 
-Group = namedtuple('Group', 'title feeds')
+
+class Group(NamedTuple):
+    title: str
+    feeds: tuple[str, ...]
 
 
-def uniq(vals, kmap=lambda x:x):
-    ''' Remove all duplicates from vals, while preserving order. kmap must be a
-    callable that returns a hashable value for every item in vals '''
+def uniq(vals, kmap=lambda x: x):
+    """Remove all duplicates from vals, while preserving order. kmap must be a
+    callable that returns a hashable value for every item in vals"""
     vals = vals or ()
     lvals = (kmap(x) for x in vals)
     seen = set()
     seen_add = seen.add
-    return tuple(x for x, k in zip(vals, lvals) if k not in seen and not seen_add(k))
+    return tuple(x for x, k in zip(vals, lvals) if k not in seen and not seen_add(k))  # ty: ignore[redundant-condition]
 
 
 def import_opml(raw, preserve_groups=True):
@@ -54,13 +51,12 @@ def import_opml(raw, preserve_groups=True):
 
 
 class ImportOPML(QDialog):
-
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QDialog.__init__(self, parent=parent)
         self.l = l = QFormLayout(self)
         self.setLayout(l)
         self.setWindowTitle(_('Import OPML file'))
-        self.setWindowIcon(QIcon(I('opml.png')))
+        self.setWindowIcon(QIcon.ic('mimetypes/opml.png'))
 
         self.h = h = QHBoxLayout()
         self.path = p = QLineEdit(self)
@@ -68,12 +64,14 @@ class ImportOPML(QDialog):
         p.setPlaceholderText(_('Path to OPML file'))
         h.addWidget(p)
         self.cfb = b = QToolButton(self)
-        b.setIcon(QIcon(I('document_open.png')))
+        b.setIcon(QIcon.ic('document_open.png'))
         b.setToolTip(_('Browse for OPML file'))
         b.clicked.connect(self.choose_file)
         h.addWidget(b)
         l.addRow(_('&OPML file:'), h)
-        l.labelForField(h).setBuddy(p)
+        lbl = l.labelForField(h)
+        assert isinstance(lbl, QLabel)
+        lbl.setBuddy(p)
         b.setFocus(Qt.FocusReason.OtherFocusReason)
 
         self._articles_per_feed = a = QSpinBox(self)
@@ -88,19 +86,24 @@ class ImportOPML(QDialog):
         l.addRow(_('&Oldest article:'), o)
 
         self.preserve_groups = g = QCheckBox(_('Preserve groups in the OPML file'))
-        g.setToolTip('<p>' + _(
-            'If enabled, every group of feeds in the OPML file will be converted into a single recipe. Otherwise every feed becomes its own recipe'))
+        g.setToolTip(
+            '<p>' + _('If enabled, every group of feeds in the OPML file will be converted into a single recipe. Otherwise every feed becomes its own recipe')
+        )
         g.setChecked(True)
         l.addRow(g)
 
         self._replace_existing = r = QCheckBox(_('Replace existing recipes'))
-        r.setToolTip('<p>' + _(
-            'If enabled, any existing recipes with the same titles as entries in the OPML file will be replaced.'
-            ' Otherwise, new entries with modified titles will be created'))
+        r.setToolTip(
+            '<p>'
+            + _(
+                'If enabled, any existing recipes with the same titles as entries in the OPML file will be replaced.'
+                ' Otherwise, new entries with modified titles will be created'
+            )
+        )
         r.setChecked(True)
         l.addRow(r)
 
-        self.bb = bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel)
+        self.bb = bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept), bb.rejected.connect(self.reject)
         l.addRow(bb)
 
@@ -118,32 +121,38 @@ class ImportOPML(QDialog):
     def replace_existing(self):
         return self._replace_existing.isChecked()
 
-    def choose_file(self):
+    def choose_file(self) -> None:
         opml_files = choose_files(
-            self, 'opml-select-dialog', _('Select OPML file'), filters=[(_('OPML files'), ['opml'])],
-            all_files=False, select_only_single_file=True)
+            self,
+            'opml-select-dialog',
+            _('Select OPML file'),
+            filters=[(_('OPML files'), ['opml'])],
+            all_files=False,
+            select_only_single_file=True,
+        )
         if opml_files:
             self.path.setText(opml_files[0])
 
     def accept(self):
-        path = unicode_type(self.path.text())
+        path = str(self.path.text())
         if not path:
-            return error_dialog(self, _('Path not specified'), _(
-                'You must specify the path to the OPML file to import'), show=True)
+            return error_dialog(self, _('Path not specified'), _('You must specify the path to the OPML file to import'), show=True)
         with open(path, 'rb') as f:
             raw = f.read()
         self.recipes = tuple(import_opml(raw, self.preserve_groups.isChecked()))
         if len(self.recipes) == 0:
-            return error_dialog(self, _('No feeds found'), _(
-                'No importable RSS feeds found in the OPML file'), show=True)
+            return error_dialog(self, _('No feeds found'), _('No importable RSS feeds found in the OPML file'), show=True)
 
         QDialog.accept(self)
 
 
 if __name__ == '__main__':
     import sys
-    for group in import_opml(open(sys.argv[-1], 'rb').read()):
+
+    with open(sys.argv[-1], 'rb') as f:
+        raw = f.read()
+    for group in import_opml(raw):
         print(group.title)
         for title, url in group.feeds:
-            print('\t%s - %s' % (title, url))
+            print(f'\t{title} - {url}')
         print()

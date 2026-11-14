@@ -1,31 +1,30 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPL v3 Copyright: 2020, Kovid Goyal <kovid at kovidgoyal.net>
 
 import errno
 import os
 import socket
+import sys
 from contextlib import closing
 from functools import partial
 from itertools import count
-from PyQt5.Qt import (
-    QAbstractSocket, QByteArray, QLocalServer, QLocalSocket, pyqtSignal
-)
 
-from calibre.utils.ipc import gui_socket_address
+from qt.core import QAbstractSocket, QLocalServer, pyqtSignal
+
+from calibre.constants import iswindows
+from calibre.utils.ipc import gui_socket_address, socket_address
 
 
 def unix_socket(timeout=10):
-    ans = socket.socket(socket.AF_UNIX)
+    ans = socket.socket(socket.AF_UNIX)  # created as non-inheritable by Python
     ans.settimeout(timeout)
     return ans
 
 
 class Listener(QLocalServer):
-
     message_received = pyqtSignal(object)
 
-    def __init__(self, address=None, parent=None):
+    def __init__(self, address=None, parent=None) -> None:
         QLocalServer.__init__(self, parent)
         self.address = address or gui_socket_address()
         self.uses_filesystem = self.address[0] not in '\0\\'
@@ -34,25 +33,24 @@ class Listener(QLocalServer):
         self.connection_id = count()
         self.pending_messages = {}
 
-    def start_listening(self):
+    def start_listening(self) -> None:
         if self.address.startswith('\0'):
             s = unix_socket()
             s.bind(self.address)
             s.listen(16)
             if not self.listen(s.detach()):
                 raise OSError(f'Could not start Listener for IPC at address @{self.address[1:]} with error: {self.errorString()}')
-        else:
-            if not self.listen(self.address):
-                if self.serverError() == QAbstractSocket.SocketError.AddressInUseError and self.uses_filesystem:
-                    self.removeServer(self.address)
-                    if self.listen(self.address):
-                        return
-                code = self.serverError()
-                if code == QAbstractSocket.SocketError.AddressInUseError:
-                    raise OSError(errno.EADDRINUSE, os.strerror(errno.EADDRINUSE), self.address)
-                raise OSError(f'Could not start Listener for IPC at address {self.address} with error: {self.errorString()}')
+        elif not self.listen(self.address):  # Qt sets bhandleInteritable = False so not inheritable
+            if self.serverError() == QAbstractSocket.SocketError.AddressInUseError and self.uses_filesystem:
+                self.removeServer(self.address)
+                if self.listen(self.address):
+                    return
+            code = self.serverError()
+            if code == QAbstractSocket.SocketError.AddressInUseError:
+                raise OSError(errno.EADDRINUSE, os.strerror(errno.EADDRINUSE), self.address)
+            raise OSError(f'Could not start Listener for IPC at address {self.address} with error: {self.errorString()}')
 
-    def on_new_connection(self):
+    def on_new_connection(self) -> None:
         while True:
             s = self.nextPendingConnection()
             if s is None:
@@ -62,12 +60,12 @@ class Listener(QLocalServer):
             s.readyRead.connect(partial(self.on_ready_read, cid, s))
             s.disconnected.connect(partial(self.on_disconnect, cid, s))
 
-    def on_ready_read(self, connection_id, q_local_socket):
+    def on_ready_read(self, connection_id, q_local_socket) -> None:
         num = q_local_socket.bytesAvailable()
         if num > 0:
             self.pending_messages[connection_id] += bytes(q_local_socket.readAll())
 
-    def on_disconnect(self, connection_id, q_local_socket):
+    def on_disconnect(self, connection_id, q_local_socket) -> None:
         self.on_ready_read(connection_id, q_local_socket)
         q_local_socket.close()
         q_local_socket.readyRead.disconnect()
@@ -76,63 +74,130 @@ class Listener(QLocalServer):
         self.message_received.emit(self.pending_messages.pop(connection_id, b''))
 
 
-def send_message_in_process(msg, address=None, timeout=5):
+def send_message_in_process(msg, address=None, timeout=5) -> None:
     address = address or gui_socket_address()
     if isinstance(msg, str):
         msg = msg.encode('utf-8')
-    s = QLocalSocket()
-    qt_timeout = int(timeout * 1000)
-    if address.startswith('\0'):
+    if address.startswith('\\'):
+        with open(address, 'r+b') as f:
+            f.write(msg)
+    else:
         ps = unix_socket(timeout)
         ps.connect(address)
-        s.setSocketDescriptor(ps.detach())
-    else:
-        s.connectToServer(address)
-        if not s.waitForConnected(qt_timeout):
-            raise OSError(f'Failed to connect to Listener at: {address} with error: {s.errorString()}')
-    data = QByteArray(msg)
-    while True:
-        written = s.write(data)
-        if not s.waitForBytesWritten(qt_timeout):
-            raise OSError(f'Failed to write data to address: {s.serverName()} with error: {s.errorString()}')
-        if written >= len(data):
-            break
-        data = data.right(len(data) - written)
+        ps.sendall(msg)
+        ps.shutdown(socket.SHUT_RDWR)
+        ps.close()
 
 
-def send_message_via_worker(msg, address=None, timeout=5, wait_till_sent=False):
+def send_message_in_worker(address, timeout) -> None:
+    msg = sys.stdin.buffer.read()
+    send_message_in_process(msg, address, timeout)
+
+
+def send_message_via_worker(msg, address=None, timeout=5, wait_till_sent=True):
     # On Windows sending a message in a process that also is listening on the
     # same named pipe in a different thread deadlocks, so we do the actual sending in
     # a simple worker process
-    import json
-    import subprocess
+    from calibre.utils.ipc.simple_worker import start_pipe_worker
 
-    from calibre.startup import get_debug_executable
-    cmd = get_debug_executable() + [
-        '-c', 'from calibre.gui2.listener import *; import sys, json;'
-        'send_message_implementation(sys.stdin.buffer.read(), address=json.loads(sys.argv[-2]), timeout=int(sys.argv[-1]))',
-        json.dumps(address), str(timeout)]
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     if isinstance(msg, str):
         msg = msg.encode('utf-8')
+    p = start_pipe_worker(f'from calibre.gui2.listener import *; send_message_in_worker({address!r}, {timeout!r})')
     with closing(p.stdin):
         p.stdin.write(msg)
     if wait_till_sent:
-        return p.wait(timeout=timeout) == 0
+        return p.wait(timeout=timeout + 2) == 0
 
 
-def test():
-    from PyQt5.Qt import QApplication, QLabel, QTimer
+def listener_for_test(address) -> None:
+    from qt.core import QCoreApplication, QTimer
+
+    app = QCoreApplication([])
+    s = Listener(address=address, parent=app)
+    s.start_listening()
+
+    def got_message(msg) -> None:
+        if msg == b'quit':
+            app.quit()
+            return
+        sys.stdout.buffer.write(msg)
+        sys.stdout.buffer.write(os.linesep.encode())
+        sys.stdout.buffer.flush()
+
+    s.message_received.connect(got_message)
+    QTimer.singleShot(0, lambda: print('started', flush=True))
+    app.exec()
+
+
+def winkill_main(hang=True) -> None:
+    import atexit
+    import time
+
+    def exit_sequence() -> None:
+        from calibre.gui2.main import workaround_windows_shutdown_hang
+
+        workaround_windows_shutdown_hang(0.1, 17)
+        time.sleep(10 if hang else 0.1)
+
+    atexit.register(exit_sequence)
+
+
+def find_tests():
+    import unittest
+
+    class TestIPC(unittest.TestCase):
+        @unittest.skipUnless(iswindows, 'Only needed on windows')
+        def test_windows_exit_kill_workaround(self) -> None:
+            from calibre.utils.ipc.simple_worker import start_pipe_worker
+
+            p = start_pipe_worker('from calibre.gui2.listener import winkill_main; winkill_main(hang=False)')
+            self.assertEqual(0, p.wait())
+            p = start_pipe_worker('from calibre.gui2.listener import winkill_main; winkill_main(hang=True)')
+            self.assertEqual(17, p.wait())
+
+        def test_listener_ipc(self) -> None:
+            from calibre.utils.ipc.simple_worker import start_pipe_worker
+
+            address = socket_address('test')
+            server = start_pipe_worker(f'from calibre.gui2.listener import *; listener_for_test({address!r})')
+            try:
+                self.assertEqual(server.stdout.readline().rstrip(), b'started')
+                for msg in 'one', 'two', 'three':
+                    send_message_in_process(msg, address=address)
+                    self.assertEqual(server.stdout.readline().rstrip(), msg.encode())
+                self.assertTrue(send_message_via_worker('hello, world!', address=address))
+                self.assertEqual(server.stdout.readline().rstrip(), b'hello, world!')
+                msg = '123456789' * 8192 * 10
+                send_message_in_process(msg, address=address)
+                self.assertEqual(server.stdout.readline().rstrip(), msg.encode())
+                send_message_in_process('quit', address=address)
+                server.wait(2)
+            finally:
+                server.kill()
+                server.wait()
+
+    return unittest.defaultTestLoader.loadTestsFromTestCase(TestIPC)
+
+
+def test() -> None:
+    from qt.core import QApplication, QLabel, QTimer
+
     app = QApplication([])
     l = QLabel()
     l.setText('Waiting for message...')
+    m = '123456789' * 8192 * 10
 
-    def show_message(msg):
-        print(msg)
-        l.setText(msg.decode('utf-8'))
+    def show_message(msg) -> None:
+        q = msg.decode()
+        if q != m:
+            print(f'Received incorrect message of length: {len(q)} expecting length: {len(m)}', file=sys.stderr)
+        else:
+            print('Received msg correctly', file=sys.stderr)
+        l.setText(q)
+        QTimer.singleShot(1000, app.quit)
 
-    def send():
-        send_message_via_worker('hello!', wait_till_sent=False)
+    def send() -> None:
+        send_message_via_worker(m, wait_till_sent=False)
 
     QTimer.singleShot(1000, send)
     s = Listener(parent=l)
@@ -141,8 +206,7 @@ def test():
     s.message_received.connect(show_message)
 
     l.show()
-    app.exec_()
-    del app
+    app.exec()
 
 
 if __name__ == '__main__':

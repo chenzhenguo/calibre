@@ -1,26 +1,44 @@
 #!/usr/bin/env python
 # vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2011, Kovid Goyal <kovid@kovidgoyal.net>
+
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-__license__   = 'GPL v3'
-__copyright__ = '2011, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
 import time
-from threading import Thread, Event
 from io import StringIO
+from threading import Event, Thread
+from typing import TYPE_CHECKING
 
 from calibre.customize.ui import metadata_plugins
 from calibre.ebooks.metadata.sources.base import create_log
 from calibre.ebooks.metadata.sources.prefs import msprefs
-from calibre.utils.img import save_cover_data_to, remove_borders_from_image, image_to_data, image_from_data
+from calibre.utils.img import image_from_data, image_to_data, remove_borders_from_image, save_cover_data_to
 from calibre.utils.imghdr import identify
-from polyglot.queue import Queue, Empty
+from calibre.utils.localization import _
+from polyglot.queue import Empty, Queue
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
+    from calibre.ebooks.metadata.sources.base import CoverQueue, Identifiers, Source
+    from calibre.utils.logging import Log
+
+#: (plugin, width, height, image format, image data)
+type CoverResult = tuple[Source, int, int, str | None, bytes]
 
 
 class Worker(Thread):
-
-    def __init__(self, plugin, abort, title, authors, identifiers, timeout, rq, get_best_cover=False):
+    def __init__(
+        self,
+        plugin: Source,
+        abort: Event,
+        title: str | None,
+        authors: Sequence[str] | None,
+        identifiers: Identifiers,
+        timeout: float,
+        rq: CoverQueue,
+        get_best_cover: bool = False,
+    ) -> None:
         Thread.__init__(self)
         self.daemon = True
 
@@ -29,37 +47,45 @@ class Worker(Thread):
         self.get_best_cover = get_best_cover
         self.buf = StringIO()
         self.log = create_log(self.buf)
-        self.title, self.authors, self.identifiers = (title, authors,
-                identifiers)
+        self.title, self.authors, self.identifiers = (title, authors, identifiers)
         self.timeout, self.rq = timeout, rq
-        self.time_spent = None
+        self.time_spent: float | None = None
 
-    def run(self):
+    def run(self) -> None:
         start_time = time.time()
         if not self.abort.is_set():
             try:
                 if self.plugin.can_get_multiple_covers:
-                    self.plugin.download_cover(self.log, self.rq, self.abort,
-                        title=self.title, authors=self.authors, get_best_cover=self.get_best_cover,
-                        identifiers=self.identifiers, timeout=self.timeout)
+                    self.plugin.download_cover(
+                        self.log,
+                        self.rq,
+                        self.abort,
+                        title=self.title,
+                        authors=self.authors,
+                        get_best_cover=self.get_best_cover,
+                        identifiers=self.identifiers,
+                        timeout=self.timeout,
+                    )
                 else:
-                    self.plugin.download_cover(self.log, self.rq, self.abort,
-                        title=self.title, authors=self.authors,
-                        identifiers=self.identifiers, timeout=self.timeout)
-            except:
-                self.log.exception('Failed to download cover from',
-                        self.plugin.name)
+                    self.plugin.download_cover(
+                        self.log,
+                        self.rq,
+                        self.abort,
+                        title=self.title,
+                        authors=self.authors,
+                        identifiers=self.identifiers,
+                        timeout=self.timeout,
+                    )
+            except Exception:
+                self.log.exception('Failed to download cover from', self.plugin.name)
         self.time_spent = time.time() - start_time
 
 
-def is_worker_alive(workers):
-    for w in workers:
-        if w.is_alive():
-            return True
-    return False
+def is_worker_alive(workers: Iterable[Worker]) -> bool:
+    return any(w.is_alive() for w in workers)
 
 
-def process_result(log, result):
+def process_result(log: Log, result: tuple[Source, bytes]) -> CoverResult | None:
     plugin, data = result
     try:
         if getattr(plugin, 'auto_trim_covers', False):
@@ -79,16 +105,26 @@ def process_result(log, result):
     return (plugin, width, height, fmt, data)
 
 
-def run_download(log, results, abort,
-        title=None, authors=None, identifiers={}, timeout=30, get_best_cover=False):
-    '''
+def run_download(
+    log: Log,
+    results: Queue[CoverResult],
+    abort: Event,
+    title: str | None = None,
+    authors: Sequence[str] | None = None,
+    identifiers: Identifiers | None = None,
+    timeout: float = 30,
+    get_best_cover: bool = False,
+) -> None:
+    """
     Run the cover download, putting results into the queue :param:`results`.
 
     Each result is a tuple of the form:
 
         (plugin, width, height, fmt, bytes)
 
-    '''
+    """
+    if identifiers is None:
+        identifiers = {}
     if title == _('Unknown'):
         title = None
     if authors == [_('Unknown')]:
@@ -96,15 +132,14 @@ def run_download(log, results, abort,
 
     plugins = [p for p in metadata_plugins(['cover']) if p.is_configured()]
 
-    rq = Queue()
-    workers = [Worker(p, abort, title, authors, identifiers, timeout, rq, get_best_cover=get_best_cover) for p
-            in plugins]
+    rq: CoverQueue = Queue()
+    workers = [Worker(p, abort, title, authors, identifiers, timeout, rq, get_best_cover=get_best_cover) for p in plugins]
     for w in workers:
         w.start()
 
     first_result_at = None
     wait_time = msprefs['wait_after_first_cover_result']
-    found_results = {}
+    found_results: dict[Source, CoverResult] = {}
 
     start_time = time.time()  # Use a global timeout to workaround misbehaving plugins that hang
     while time.time() - start_time < 301:
@@ -142,11 +177,11 @@ def run_download(log, results, abort,
 
     for w in workers:
         wlog = w.buf.getvalue().strip()
-        log('\n'+'*'*30, w.plugin.name, 'Covers', '*'*30)
+        log('\n' + '*' * 30, w.plugin.name, 'Covers', '*' * 30)
         log('Request extra headers:', w.plugin.browser.addheaders)
         if w.plugin in found_results:
             result = found_results[w.plugin]
-            log('Downloaded cover:', '%dx%d'%(result[1], result[2]))
+            log('Downloaded cover:', '%dx%d' % (result[1], result[2]))
         else:
             log('Failed to download valid cover')
         if w.time_spent is None:
@@ -155,11 +190,12 @@ def run_download(log, results, abort,
             log('Took', w.time_spent, 'seconds')
         if wlog:
             log(wlog)
-        log('\n'+'*'*80)
+        log('\n' + '*' * 80)
 
 
-def download_cover(log,
-        title=None, authors=None, identifiers={}, timeout=30):
+def download_cover(
+    log: Log, title: str | None = None, authors: Sequence[str] | None = None, identifiers: Identifiers | None = None, timeout: float = 30
+) -> CoverResult | None:
     '''
     Synchronous cover download. Returns the "best" cover as per user
     prefs/cover resolution.
@@ -168,13 +204,14 @@ def download_cover(log,
 
     Returns None if no cover is found.
     '''
-    rq = Queue()
+    if identifiers is None:
+        identifiers = {}
+    rq: Queue[CoverResult] = Queue()
     abort = Event()
 
-    run_download(log, rq, abort, title=title, authors=authors,
-            identifiers=identifiers, timeout=timeout, get_best_cover=True)
+    run_download(log, rq, abort, title=title, authors=authors, identifiers=identifiers, timeout=timeout, get_best_cover=True)
 
-    results = []
+    results: list[CoverResult] = []
 
     while True:
         try:
@@ -184,9 +221,9 @@ def download_cover(log,
 
     cp = msprefs['cover_priorities']
 
-    def keygen(result):
+    def keygen(result: CoverResult) -> tuple[int, float]:
         plugin, width, height, fmt, data = result
-        return (cp.get(plugin.name, 1), 1/(width*height))
+        return (cp.get(plugin.name, 1), 1 / (width * height))
 
     results.sort(key=keygen)
 

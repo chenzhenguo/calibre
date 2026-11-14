@@ -8,8 +8,9 @@ nacional.hr
 '''
 
 import re
-from calibre.web.feeds.recipes import BasicNewsRecipe
+
 from calibre.ebooks.BeautifulSoup import Tag
+from calibre.web.feeds.recipes import BasicNewsRecipe
 
 
 def new_tag(soup, name, attrs=()):
@@ -22,7 +23,7 @@ def new_tag(soup, name, attrs=()):
 class NacionalCro(BasicNewsRecipe):
     title = 'Nacional - Hr'
     __author__ = 'Darko Miletic'
-    description = "news from Croatia"
+    description = 'news from Croatia'
     publisher = 'Nacional.hr'
     category = 'news, politics, Croatia'
     oldest_article = 2
@@ -36,25 +37,21 @@ class NacionalCro(BasicNewsRecipe):
     lang = 'hr-HR'
     direction = 'ltr'
 
-    extra_css = '@font-face {font-family: "serif1";src:url(res:///opt/sony/ebook/FONT/tt0011m_.ttf)} body{font-family: serif1, serif} .article_description{font-family: serif1, serif}'  # noqa
+    extra_css = '@font-face {font-family: "serif1";src:url(res:///opt/sony/ebook/FONT/tt0011m_.ttf)} body{font-family: serif1, serif} .article_description{font-family: serif1, serif}'  # ruff: ignore[line-too-long]
 
-    conversion_options = {
-        'comment': description, 'tags': category, 'publisher': publisher, 'language': lang, 'pretty_print': True
-    }
+    conversion_options = {'comment': description, 'tags': category, 'publisher': publisher, 'language': lang, 'pretty_print': True}
 
-    preprocess_regexps = [(re.compile(u'\u0110'), lambda match: u'\u00D0')]
+    preprocess_regexps = [(re.compile('\u0110'), lambda match: '\u00d0')]  # ruff: ignore[unraw-re-pattern]
 
     remove_tags = [dict(name=['object', 'link', 'embed'])]
 
-    feeds = [(u'Najnovije Vijesti', u'http://www.nacional.hr/rss')]
+    feeds = [('Najnovije Vijesti', 'http://www.nacional.hr/rss')]
 
     def preprocess_html(self, soup):
         soup.html['lang'] = self.lang
         soup.html['dir'] = self.direction
-        mlang = new_tag(soup, 'meta', [
-                    ("http-equiv", "Content-Language"), ("content", self.lang)])
-        mcharset = new_tag(soup, 'meta', [
-                       ("http-equiv", "Content-Type"), ("content", "text/html; charset=UTF-8")])
+        mlang = new_tag(soup, 'meta', [('http-equiv', 'Content-Language'), ('content', self.lang)])
+        mcharset = new_tag(soup, 'meta', [('http-equiv', 'Content-Type'), ('content', 'text/html; charset=UTF-8')])
         soup.head.insert(0, mlang)
         soup.head.insert(1, mcharset)
         for item in soup.findAll(style=True):

@@ -1,0 +1,626 @@
+#!/usr/bin/env python
+# License: GPLv3 Copyright: 2026, Kovid Goyal <kovid at kovidgoyal.net>
+
+import errno
+import io
+import json
+import os
+import shutil
+import stat
+import sys
+import tempfile
+import time
+import types
+import unittest
+import unittest.mock
+import zipfile
+from contextlib import redirect_stderr
+from threading import Event, Thread
+from typing import TYPE_CHECKING, Any
+from urllib.error import URLError
+
+from calibre.constants import iswindows
+from calibre.web.automate import download_deps as dd
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+class FakeInstaller(dd.Installer):
+    def __init__(self) -> None:
+        super().__init__('fake')
+        self.available = dd.Release('1.0', 'fake://1.0', '')
+        self.num_of_release_queries = 0
+        self.num_of_installs = 0
+        self.fail_downloads_of: dict[str, Exception] = {}
+        self.progress_seen: list[dd.InstallProgress | None] = []
+
+    def latest_release(self, **kw: Any) -> dd.Release:  # ruff: ignore[any-type]
+        self.num_of_release_queries += 1
+        return self.available
+
+    def unpack(self, downloaded_file: str, dest: str) -> None:
+        self.num_of_installs += 1
+        with open(downloaded_file) as src, open(os.path.join(dest, 'payload'), 'w') as f:
+            f.write(src.read())
+
+    def payload_path(self, version_dir: str) -> str:
+        return os.path.join(version_dir, 'payload')
+
+    def is_complete(self, version_dir: str) -> bool:
+        return os.path.exists(self.payload_path(version_dir))
+
+    def download_file(self, url: str, dest: str, expected_sha256: str = '', progress: Callable[[int, int], None] | None = None) -> None:
+        version = url.rpartition('://')[2]
+        self.progress_seen.append(self.install_progress)
+        if progress is not None:
+            progress(len(version), len(version))
+            self.progress_seen.append(self.install_progress)
+        if (err := self.fail_downloads_of.get(version)) is not None:
+            raise err
+        with open(dest, 'w') as f:
+            f.write(version)
+
+
+class TestDownloadDeps(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tdir = tempfile.mkdtemp()
+        self.original_install_root = dd.install_root
+        self.original_download_file = dd.download_file
+        self.original_system_camoufox_config_path = dd.system_camoufox_config_path
+        dd.install_root = lambda: self.tdir
+        dd.system_camoufox_config_path = lambda: os.path.join(self.tdir, dd.SYSTEM_CAMOUFOX_RESOURCE)
+        self.installer = FakeInstaller()
+        dd.download_file = self.installer.download_file
+
+    def tearDown(self) -> None:
+        dd.install_root = self.original_install_root
+        dd.download_file = self.original_download_file
+        dd.system_camoufox_config_path = self.original_system_camoufox_config_path
+        shutil.rmtree(self.tdir, ignore_errors=True)
+
+    # Utilities {{{
+
+    def read_metadata(self) -> dict[str, Any]:
+        # On Windows ExclusiveFile opens with share mode 0, so a concurrent lock
+        # holder causes PermissionError — treat that as "not yet written".
+        try:
+            with open(self.installer.metadata_path) as f:
+                raw = f.read()
+        except PermissionError:
+            return {}
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+
+    def write_metadata(self, metadata: dict[str, Any]) -> None:
+        with open(self.installer.metadata_path, 'w') as f:
+            json.dump(metadata, f)
+
+    def make_update_check_due(self) -> None:
+        metadata = self.read_metadata()
+        metadata['last_update_check'] = time.time() - 2 * dd.UPDATE_CHECK_INTERVAL
+        self.write_metadata(metadata)
+
+    def wait_for_update_check(self) -> dict[str, Any]:
+        limit = time.monotonic() + 30
+        while time.monotonic() < limit:
+            metadata = self.read_metadata()
+            if metadata.get('update_available'):
+                return metadata
+            time.sleep(0.01)
+        self.fail('Timed out waiting for the background update check to complete')
+
+    def installed_versions(self) -> set[str]:
+        return {x for x in os.listdir(self.installer.base) if os.path.isdir(os.path.join(self.installer.base, x))}
+
+    # }}}
+
+    def test_download_deps_install(self) -> None:
+        i = self.installer
+        install = i()
+        self.assertEqual(install.version, '1.0')
+        with open(install.path) as f:
+            self.assertEqual(f.read(), '1.0')
+        self.assertEqual(i.num_of_installs, 1)
+        metadata = self.read_metadata()
+        self.assertEqual(metadata['version'], '1.0')
+        self.assertGreater(metadata['installed_at'], 0)
+
+        # An existing install must be re-used, without any network access
+        self.assertEqual(i().path, install.path)
+        self.assertEqual(i.num_of_installs, 1)
+        self.assertEqual(i.num_of_release_queries, 1)
+
+        # A removed install must be re-installed
+        shutil.rmtree(i.version_dir('1.0'))
+        self.assertEqual(i().version, '1.0')
+        self.assertEqual(i.num_of_installs, 2)
+
+        # Corrupted metadata must not be fatal
+        with open(i.metadata_path, 'wb') as f:
+            f.write(b'{not json')
+        self.assertEqual(i().version, '1.0')
+        self.assertEqual(self.read_metadata()['version'], '1.0')
+
+    def test_download_deps_update(self) -> None:
+        i = self.installer
+        i()
+        i.available = dd.Release('2.0', 'fake://2.0', '')
+
+        # No update check should happen more than once a day
+        i()
+        self.assertEqual(self.read_metadata().get('update_available'), None)
+        self.assertEqual(i.num_of_release_queries, 1)
+
+        # A day later an update check runs in the background and the update is
+        # only applied on the next call
+        self.make_update_check_due()
+        self.assertEqual(i().version, '1.0')
+        metadata = self.wait_for_update_check()
+        self.assertEqual(metadata['update_available']['version'], '2.0')
+        self.assertEqual(metadata['version'], '1.0')
+
+        install = i()
+        self.assertEqual(install.version, '2.0')
+        with open(install.path) as f:
+            self.assertEqual(f.read(), '2.0')
+        self.assertEqual(self.read_metadata().get('update_available'), None)
+        # The superseded version must be removed
+        self.assertEqual(self.installed_versions(), {'2.0'})
+
+        # A release older than the installed one must never be applied
+        i.available = dd.Release('1.5', 'fake://1.5', '')
+        self.make_update_check_due()
+        i.check_for_update({})
+        self.assertEqual(self.read_metadata().get('update_available'), None)
+        self.assertEqual(i().version, '2.0')
+
+        # No check must be done if one was done recently, even by another process
+        i.available = dd.Release('3.0', 'fake://3.0', '')
+        i.check_for_update({})
+        self.assertEqual(self.read_metadata().get('update_available'), None)
+        self.make_update_check_due()
+        i.check_for_update({})
+        self.assertEqual(self.read_metadata()['update_available']['version'], '3.0')
+
+    def test_download_deps_versions_in_use(self) -> None:
+        i = self.installer
+        install, lock = i.use()
+        self.assertEqual(install.version, '1.0')
+        # Any number of users can hold a version at the same time
+        install2, lock2 = i.use()
+        self.assertEqual(install2, install)
+
+        # A version in use must survive an update, since a running browser can
+        # open files from it at any time
+        i.available = dd.Release('2.0', 'fake://2.0', '')
+        self.make_update_check_due()
+        i()
+        self.wait_for_update_check()
+        self.assertEqual(i().version, '2.0')
+        self.assertEqual(self.installed_versions(), {'1.0', '2.0'})
+        with open(install.path) as f:
+            self.assertEqual(f.read(), '1.0')
+
+        # and must be removed only once all its users are done with it
+        lock.release()
+        i()
+        self.assertEqual(self.installed_versions(), {'1.0', '2.0'})
+        with lock2:
+            pass
+        lock.release()  # releasing twice must be harmless
+        i()
+        self.assertEqual(self.installed_versions(), {'2.0'})
+        self.assertFalse(os.path.exists(i.version_dir('1.0') + dd.VERSION_LOCK_SUFFIX))
+
+        # An install obtained earlier, as by another process, can be locked
+        install = i()
+        lock3 = i.lock_install(install)
+        self.assertIsNotNone(lock3)
+        self.assertIsNone(i.lock_install(dd.Install(os.path.join(self.tdir, 'elsewhere'), '2.0')))
+        self.assertIsNone(i.lock_install(dd.Install(i.payload_path(os.path.join(i.install_dir, '1.0')), '1.0')))
+        i.available = dd.Release('3.0', 'fake://3.0', '')
+        self.make_update_check_due()
+        i()
+        self.wait_for_update_check()
+        self.assertEqual(i().version, '3.0')
+        self.assertEqual(self.installed_versions(), {'2.0', '3.0'})
+        if lock3 is not None:
+            lock3.release()
+        i()
+        self.assertEqual(self.installed_versions(), {'3.0'})
+
+        # A version still in use that the metadata no longer refers to must be
+        # re-used rather than replaced from under its users
+        install, lock = i.use()
+        self.write_metadata({})
+        num_of_installs = i.num_of_installs
+        self.assertEqual(i().path, install.path)
+        self.assertEqual(i.num_of_installs, num_of_installs)
+        lock.release()
+
+    def test_download_deps_failed_update(self) -> None:
+        i = self.installer
+        i()
+        i.available = dd.Release('2.0', 'fake://2.0', '')
+        i.fail_downloads_of['2.0'] = ValueError('Failed to download 2.0 as required by the test')
+        self.make_update_check_due()
+        i()
+        self.wait_for_update_check()
+
+        # A failed update must leave the existing install usable
+        with redirect_stderr(io.StringIO()) as stderr:
+            install = i()
+        self.assertIn('Failed to update fake to 2.0', stderr.getvalue())
+        self.assertEqual(install.version, '1.0')
+        with open(install.path) as f:
+            self.assertEqual(f.read(), '1.0')
+        # and must not be retried until a day has passed
+        self.assertGreater(self.read_metadata()['update_available']['failed_at'], 0)
+        self.assertEqual(i().version, '1.0')
+
+        i.fail_downloads_of.clear()
+        metadata = self.read_metadata()
+        metadata['update_available']['failed_at'] = time.time() - 2 * dd.UPDATE_CHECK_INTERVAL
+        self.write_metadata(metadata)
+        self.assertEqual(i().version, '2.0')
+
+    def test_download_deps_failed_install(self) -> None:
+        i = self.installer
+        i.fail_downloads_of['1.0'] = OSError(errno.ENOSPC, 'No space left on device')
+        with self.assertRaises(dd.InstallFailed) as cm:
+            i()
+        err = cm.exception
+        self.assertIn('Failed to install fake with error:', err.message)
+        self.assertIn('No space left on device', err.message)
+        self.assertIn('not enough free space', err.message)
+        self.assertIn('tried again after', err.message)
+        self.assertIn('OSError', err.details)
+        self.assertAlmostEqual(err.retry_at, time.time() + dd.INSTALL_RETRY_INTERVAL, delta=60)
+        self.assertIsInstance(err.__cause__, OSError)
+        failure = self.read_metadata()[dd.INSTALL_FAILURE_KEY]
+        self.assertEqual(failure['version'], '1.0')
+        # Progress is reported while installing, and only then
+        self.assertEqual(i.progress_seen, [dd.InstallProgress('downloading'), dd.InstallProgress('downloading', 3, 3)])
+        self.assertIsNone(i.install_progress)
+
+        # Not tried again, not even the check for the latest release, but
+        # reported the same way
+        del i.fail_downloads_of['1.0']
+        with self.assertRaises(dd.InstallFailed) as cm:
+            i.use()
+        self.assertIn('not enough free space', cm.exception.message)
+        self.assertEqual(cm.exception.details, err.details)
+        self.assertEqual(i.num_of_release_queries, 1)
+        self.assertFalse(self.installed_versions())
+
+        # Tried again once enough time has passed, and a success forgets
+        # about the failure
+        metadata = self.read_metadata()
+        metadata[dd.INSTALL_FAILURE_KEY]['failed_at'] = time.time() - 2 * dd.INSTALL_RETRY_INTERVAL
+        self.write_metadata(metadata)
+        self.assertEqual(i().version, '1.0')
+        self.assertNotIn(dd.INSTALL_FAILURE_KEY, self.read_metadata())
+
+        # Failures can be forgotten on demand
+        shutil.rmtree(i.version_dir('1.0'))
+        i.fail_downloads_of['1.0'] = ValueError('broken')
+        self.assertRaises(dd.InstallFailed, i)
+        self.assertRaises(dd.InstallFailed, i)
+        self.assertEqual(i.num_of_release_queries, 3)
+        i.forget_install_failure()
+        self.assertNotIn(dd.INSTALL_FAILURE_KEY, self.read_metadata())
+        del i.fail_downloads_of['1.0']
+        self.assertEqual(i().version, '1.0')
+
+        # A failure to find the latest release is not recorded, as it is cheap
+        # to try again
+        shutil.rmtree(i.version_dir('1.0'))
+        with unittest.mock.patch.object(i, 'latest_release', side_effect=OSError('offline')):
+            self.assertRaisesRegex(OSError, 'offline', i)
+        self.assertNotIn(dd.INSTALL_FAILURE_KEY, self.read_metadata())
+
+    def test_download_deps_install_failure_advice(self) -> None:
+        d = self.tdir
+        self.assertIn('not enough free space', dd.install_failure_advice(OSError(errno.ENOSPC, 'full'), d))
+        self.assertIn('needed, there is', dd.install_failure_advice(OSError(errno.ENOSPC, 'full'), os.path.join(d, 'not', 'yet'), 1024))
+        self.assertIn('too long', dd.install_failure_advice(OSError(errno.ENAMETOOLONG, 'long'), d))
+        self.assertIn('denied', dd.install_failure_advice(PermissionError(errno.EACCES, 'no'), d))
+        self.assertIn('internet connection', dd.install_failure_advice(URLError('no network'), d))
+        self.assertIn('internet connection', dd.install_failure_advice(TimeoutError(), d))
+        self.assertEqual(dd.install_failure_advice(ValueError('checksum mismatch'), d), '')
+        if iswindows:
+            winerr = OSError(None, 'Access is denied', None, dd.ERROR_ACCESS_DENIED)
+            self.assertIn('antivirus', dd.install_failure_advice(winerr, d))
+            winerr = OSError(None, 'Disk full', None, dd.ERROR_DISK_FULL)
+            self.assertIn('not enough free space', dd.install_failure_advice(winerr, d))
+        self.assertEqual(dd.explain_install_failure('X', ValueError('bad'), d), 'Failed to install X with error: bad')
+
+    def test_download_deps_simultaneous_use(self) -> None:
+        i, num = self.installer, 8
+        start, results = Event(), []
+
+        def worker() -> None:
+            start.wait()
+            results.append(i())
+
+        threads = [Thread(target=worker, daemon=True) for x in range(num)]
+        for t in threads:
+            t.start()
+        start.set()
+        for t in threads:
+            t.join(60)
+            self.assertFalse(t.is_alive())
+        self.assertEqual(len(results), num)
+        self.assertEqual({x.path for x in results}, {i.payload_path(i.version_dir('1.0'))})
+        # Only one of the threads must have actually done the install
+        self.assertEqual(i.num_of_installs, 1)
+
+    def test_download_deps_zip_extraction(self) -> None:
+        src = os.path.join(self.tdir, 'test.zip')
+        with zipfile.ZipFile(src, 'w') as zf:
+            zf.writestr(zipfile.ZipInfo('sub/data.txt'), 'data')
+            info = zipfile.ZipInfo('sub/prog')
+            info.create_system = 3
+            info.external_attr = (0o100755) << 16
+            zf.writestr(info, 'prog')
+        dest = os.path.join(self.tdir, 'x')
+        dd.extract_zip(src, dest)
+        with open(os.path.join(dest, 'sub', 'data.txt')) as f:
+            self.assertEqual(f.read(), 'data')
+        prog = os.path.join(dest, 'sub', 'prog')
+        with open(prog) as f:
+            self.assertEqual(f.read(), 'prog')
+        if not iswindows:
+            self.assertEqual(stat.S_IMODE(os.stat(prog).st_mode), 0o755)
+            self.assertFalse(os.stat(os.path.join(dest, 'sub', 'data.txt')).st_mode & 0o111)
+            os.chmod(prog, 0o644)
+            dd.make_executable(prog)
+            self.assertTrue(os.access(prog, os.X_OK))
+
+        # On Windows os.path.isabs('/evil') is False (no drive letter), so the
+        # production code safely extracts it to dest/evil rather than raising.
+        unsafe_paths = ['../evil', 'sub/../../evil']
+        if not iswindows:
+            unsafe_paths.append('/evil')
+        for unsafe in unsafe_paths:
+            with zipfile.ZipFile(src, 'w') as zf:
+                zf.writestr(unsafe, 'evil')
+            with self.assertRaises(ValueError):
+                dd.extract_zip(src, os.path.join(self.tdir, 'y'))
+
+    def test_download_deps_versions(self) -> None:
+        for a, b in (
+            ('152.0.4-beta.29', '152.0.4-beta.28'),
+            ('152.0.4-beta.30', '152.0.4-beta.29'),
+            ('152.0.4-beta.1', '152.0.4-alpha.99'),
+            ('152.0.5-beta.1', '152.0.4-beta.30'),
+            ('0.15.0', '0.9.0'),
+        ):
+            self.assertTrue(dd.is_newer(a, b), f'{a} is not newer than {b}')
+            self.assertFalse(dd.is_newer(b, a), f'{b} is newer than {a}')
+        self.assertFalse(dd.is_newer('0.15.0', '0.15.0'))
+        self.assertTrue(dd.is_newer('0.15.0', '0'))
+
+    def test_download_deps_camoufox_release_selection(self) -> None:
+        def asset(build: str, os_name: str = '', arch: str = '') -> dict[str, Any]:
+            os_name = os_name or dd.camoufox_os()
+            arch = arch or dd.camoufox_arch()
+            name = f'camoufox-152.0.4-{build}-{os_name}.{arch}.zip'
+            return {
+                'name': name,
+                'browser_download_url': f'https://example.com/{name}',
+                'digest': f'sha256:{build}-digest',
+            }
+
+        other_arch = 'i686' if dd.camoufox_arch() != 'i686' else 'arm64'
+        other_os = 'win' if dd.camoufox_os() != 'win' else 'lin'
+        releases = [
+            {'prerelease': False, 'draft': True, 'assets': [asset('beta.31')]},
+            {'prerelease': True, 'assets': [asset('beta.30')]},
+            {'prerelease': False, 'assets': [asset('alpha.40')]},
+            {
+                'prerelease': False,
+                'assets': [asset('beta.29'), asset('beta.99', arch=other_arch), asset('beta.98', os_name=other_os), {'name': 'sha256sums.txt'}],
+            },
+            {'prerelease': False, 'assets': [asset('beta.28')]},
+        ]
+        original = dd.download_json
+        try:
+            dd.download_json = lambda *a, **kw: releases
+            release = dd.camoufox_installer.latest_release()
+            self.assertEqual(release.version, '152.0.4-beta.29')
+            self.assertEqual(release.sha256, 'beta.29-digest')
+            self.assertEqual(release.url, f'https://example.com/camoufox-152.0.4-beta.29-{dd.camoufox_os()}.{dd.camoufox_arch()}.zip')
+            self.assertEqual(dd.camoufox_installer.latest_release(allow_prerelease=True).version, '152.0.4-beta.30')
+            dd.download_json = lambda *a, **kw: [{'prerelease': False, 'assets': [asset('beta.29', arch=other_arch)]}]
+            with self.assertRaises(ValueError):
+                dd.camoufox_installer.latest_release()
+        finally:
+            dd.download_json = original
+
+    def test_download_deps_camoufox_emulated_arch(self) -> None:
+        def asset(build: str, arch: str) -> dict[str, Any]:
+            name = f'camoufox-152.0.4-{build}-win.{arch}.zip'
+            return {'name': name, 'browser_download_url': f'https://example.com/{name}'}
+
+        orig_json, orig_os, orig_arch = dd.download_json, dd.camoufox_os, dd.camoufox_arch
+        try:
+            # Windows on ARM falls back to x86_64 builds, preferring native builds of the same version
+            dd.camoufox_os, dd.camoufox_arch = (lambda: 'win'), (lambda: 'arm64')
+            self.assertEqual(dd.camoufox_archs(), ('arm64', 'x86_64'))
+            dd.download_json = lambda *a, **kw: [{'prerelease': False, 'assets': [asset('beta.29', 'x86_64'), asset('beta.29', 'i686')]}]
+            self.assertEqual(dd.camoufox_installer.latest_release().url, 'https://example.com/camoufox-152.0.4-beta.29-win.x86_64.zip')
+            dd.download_json = lambda *a, **kw: [
+                {'prerelease': False, 'assets': [asset('beta.30', 'x86_64'), asset('beta.29', 'arm64'), asset('beta.29', 'x86_64')]},
+            ]
+            self.assertEqual(dd.camoufox_installer.latest_release().version, '152.0.4-beta.30')
+            dd.download_json = lambda *a, **kw: [{'prerelease': False, 'assets': [asset('beta.29', 'x86_64'), asset('beta.29', 'arm64')]}]
+            self.assertEqual(dd.camoufox_installer.latest_release().url, 'https://example.com/camoufox-152.0.4-beta.29-win.arm64.zip')
+            # Other platforms have native builds and no fallbacks
+            for os_name, arch in (('lin', 'arm64'), ('mac', 'arm64'), ('mac', 'x86_64'), ('win', 'x86_64')):
+                dd.camoufox_os, dd.camoufox_arch = (lambda: os_name), (lambda: arch)  # ruff: ignore[function-uses-loop-variable]
+                self.assertEqual(dd.camoufox_archs(), (arch,))
+        finally:
+            dd.download_json, dd.camoufox_os, dd.camoufox_arch = orig_json, orig_os, orig_arch
+
+    def test_download_deps_camoufox_32bit_linux(self) -> None:
+        orig_os, orig_machine, orig_32bit = dd.camoufox_os, dd.platform.machine, dd.is_32bit_userspace
+        try:
+            dd.camoufox_os = lambda: 'lin'
+            for machine, is_32bit, expected in (
+                ('x86_64', False, 'x86_64'),
+                ('aarch64', False, 'arm64'),
+                ('i686', True, ''),
+                ('i386', True, ''),
+                ('armv7l', True, ''),
+                ('armv6l', True, ''),
+                # 32-bit userspace on a 64-bit kernel
+                ('aarch64', True, ''),
+                ('x86_64', True, ''),
+            ):
+                dd.platform.machine, dd.is_32bit_userspace = (lambda: machine), (lambda: is_32bit)  # ruff: ignore[function-uses-loop-variable]
+                if expected:
+                    self.assertEqual(dd.camoufox_arch(), expected)
+                else:
+                    with self.assertRaisesRegex(ValueError, '32-bit Linux'):
+                        dd.camoufox_arch()
+        finally:
+            dd.camoufox_os, dd.platform.machine, dd.is_32bit_userspace = orig_os, orig_machine, orig_32bit
+
+    @unittest.skipIf(iswindows, 'UNIX file permissions are not used on Windows')
+    def test_download_deps_camoufox_permissions(self) -> None:
+        # Simulate a zip file created without any UNIX file permissions
+        version_dir = os.path.join(self.tdir, '152.0.4-beta.29')
+        binary = dd.camoufox_installer.payload_path(version_dir)
+        lib = os.path.join(version_dir, 'libxul.so')
+        os.makedirs(os.path.dirname(binary))
+        for path in (binary, lib):
+            with open(path, 'w') as f:
+                f.write('x')
+            os.chmod(path, 0o644)
+        dd.camoufox_installer.finalize(version_dir)
+        self.assertTrue(os.access(binary, os.X_OK))
+        self.assertTrue(os.access(lib, os.X_OK))
+
+    def test_download_deps_camoufox_paths(self) -> None:
+        binary = dd.camoufox_installer.payload_path(os.path.join(self.tdir, '152.0.4-beta.29'))
+        self.assertTrue(os.path.basename(binary).startswith('camoufox'))
+        self.assertEqual(os.path.basename(dd.camoufox_resource_dir(binary)), 'Resources' if dd.ismacos else '152.0.4-beta.29')
+
+    def test_download_deps_system_camoufox(self) -> None:
+        self.assertIsNone(dd.system_camoufox())
+        cdir = os.path.join(self.tdir, 'system', 'camoufox')
+        os.makedirs(cdir)
+        binary, resource_dir = os.path.join(cdir, 'camoufox-bin'), os.path.join(self.tdir, 'system', 'share')
+        os.makedirs(resource_dir)
+        spec_path = dd.system_camoufox_config_path()
+
+        def write_spec(spec: object) -> None:
+            with open(spec_path, 'w') as f:
+                json.dump(spec, f)
+
+        for bad in ([], {'binary': binary}, {'binary': binary, 'resource_dir': 1}):
+            write_spec(bad)
+            self.assertRaises(ValueError, dd.system_camoufox)
+        write_spec({'binary': binary, 'resource_dir': resource_dir})
+        sc = dd.system_camoufox()
+        self.assertEqual(sc, dd.SystemCamoufox(binary, resource_dir))
+        self.assertRaises(ValueError, dd.camoufox_install)  # no application.ini
+        with open(os.path.join(cdir, 'application.ini'), 'w') as f:
+            f.write('; A comment\n[App]\nVendor=Camoufox\nVersion=152.0.4-beta.31\n\n[Gecko]\nMinVersion=152.0.4\n')
+        self.assertEqual(dd.camoufox_install(), dd.Install(binary, '152.0.4-beta.31'))
+        self.assertEqual(dd.camoufox_binary(allow_prerelease=True), binary)
+        self.assertEqual(dd.camoufox_resource_dir(binary), resource_dir)
+        # An application.ini in the resource dir takes precedence
+        with open(os.path.join(resource_dir, 'application.ini'), 'w') as f:
+            f.write('[App]\nVersion=../bad\n')
+        self.assertRaises(ValueError, dd.camoufox_install)
+        with open(os.path.join(resource_dir, 'application.ini'), 'w') as f:
+            f.write('[App]\nVersion=153.0-beta.1\n')
+        self.assertEqual(dd.camoufox_install().version, '153.0-beta.1')
+        # Nothing must have been downloaded
+        self.assertFalse(os.path.exists(dd.camoufox_installer.install_dir))
+
+    def test_download_deps_camoufox_font_lists(self) -> None:
+        urls: list[str] = []
+        response: object = {}
+
+        def download_json(url: str, headers: dict[str, str] | None = None, timeout: float = dd.NETWORK_TIMEOUT) -> object:
+            urls.append(url)
+            return response
+
+        original = dd.download_json
+        try:
+            dd.download_json = download_json
+            response = {'win': ['Segoe UI', 'Tahoma'], 'lin': ['Arimo']}
+            self.assertEqual(dd.camoufox_font_lists('156.0.1-beta.34'), response)
+            self.assertEqual(urls, ['https://raw.githubusercontent.com/daijro/camoufox/v156.0.1-beta.34/pythonlib/camoufox/fonts.json'])
+            for bad in ([], {'win': 'Segoe UI'}, {'win': ['Segoe UI', 1]}):
+                response = bad
+                self.assertRaises(ValueError, dd.camoufox_font_lists, '156.0.1-beta.34')
+            self.assertRaises(ValueError, dd.camoufox_font_lists, '../main')
+        finally:
+            dd.download_json = original
+
+    def test_download_deps_browserforge_patching(self) -> None:
+        data_dir = os.path.join(self.tdir, 'bf-data')
+        os.mkdir(data_dir)
+        for name in dd.BROWSERFORGE_DATA_FILES.values():
+            with open(os.path.join(data_dir, name), 'w') as f:
+                f.write(name)
+
+        class FakeBayesianNetwork:
+            def __init__(self, path: str | dd.Path) -> None:
+                self.path = str(path)
+
+        datapoints = types.ModuleType(dd.BROWSERFORGE_DATA_PACKAGE)
+        for getter, name in dd.BROWSERFORGE_DATA_FILES.items():
+            setattr(datapoints, getter, dd.constant_path(dd.Path(os.path.join('packaged', name))))
+        bayesian = types.ModuleType('browserforge.bayesian_network')
+        bayesian.BayesianNetwork = FakeBayesianNetwork  # type: ignore[attr-defined]
+        headers = types.ModuleType('browserforge.headers.generator')
+        headers.HeaderGenerator = type(
+            'HeaderGenerator',
+            (),
+            {  # type: ignore[attr-defined]
+                'input_generator_network': None,
+                'header_generator_network': None,
+            },
+        )
+        for getter in ('get_browser_helper_file', 'get_header_network', 'get_headers_order', 'get_input_network'):
+            setattr(headers, getter, getattr(datapoints, getter))
+        fingerprints = types.ModuleType('browserforge.fingerprints.generator')
+        fingerprints.FingerprintGenerator = type('FingerprintGenerator', (), {'fingerprint_generator_network': None})  # type: ignore[attr-defined]
+        fingerprints.get_fingerprint_network = datapoints.get_fingerprint_network  # type: ignore[attr-defined]
+
+        original_modules = {}
+        for mod in (datapoints, bayesian, headers, fingerprints):
+            original_modules[mod.__name__] = sys.modules.get(mod.__name__)
+            sys.modules[mod.__name__] = mod
+        original_patched = dd._patched_data_dir
+        try:
+            dd._patched_data_dir = ''
+            dd.patch_browserforge_data_files(data_dir)
+            for getter, name in dd.BROWSERFORGE_DATA_FILES.items():
+                self.assertEqual(str(getattr(datapoints, getter)()), os.path.join(data_dir, name))
+            self.assertEqual(str(headers.get_input_network()), os.path.join(data_dir, 'input-network-definition.zip'))
+            self.assertEqual(str(fingerprints.get_fingerprint_network()), os.path.join(data_dir, 'fingerprint-network-definition.zip'))
+            self.assertEqual(headers.HeaderGenerator.input_generator_network.path, os.path.join(data_dir, 'input-network-definition.zip'))
+            self.assertEqual(headers.HeaderGenerator.header_generator_network.path, os.path.join(data_dir, 'header-network-definition.zip'))
+            self.assertEqual(fingerprints.FingerprintGenerator.fingerprint_generator_network.path, os.path.join(data_dir, 'fingerprint-network-definition.zip'))
+        finally:
+            dd._patched_data_dir = original_patched
+            for name, mod in original_modules.items():
+                if mod is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = mod
+
+
+def find_tests() -> unittest.TestSuite:
+    return unittest.defaultTestLoader.loadTestsFromTestCase(TestDownloadDeps)

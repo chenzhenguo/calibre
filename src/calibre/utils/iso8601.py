@@ -1,44 +1,23 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2016, Kovid Goyal <kovid at kovidgoyal.net>
 
+from datetime import UTC as utc_tz
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-from datetime import datetime
+import tzlocal
 
-from dateutil.tz import tzlocal, tzutc, tzoffset
 from calibre_extensions import speedup
 
-
-class SafeLocalTimeZone(tzlocal):
-
-    def _isdst(self, dt):
-        # This method in tzlocal raises ValueError if dt is out of range (in
-        # older versions of dateutil)
-        # In such cases, just assume that dt is not DST.
-        try:
-            return super(SafeLocalTimeZone, self)._isdst(dt)
-        except Exception:
-            pass
-        return False
-
-    def _naive_is_dst(self, dt):
-        # This method in tzlocal raises ValueError if dt is out of range (in
-        # newer versions of dateutil)
-        # In such cases, just assume that dt is not DST.
-        try:
-            return super(SafeLocalTimeZone, self)._naive_is_dst(dt)
-        except Exception:
-            pass
-        return False
+try:
+    tz_name = tzlocal.get_localzone_name() or 'UTC'
+except Exception:
+    tz_name = 'UTC'
+local_tz = ZoneInfo(tz_name)
+UNDEFINED_DATE = datetime(101, 1, 1, tzinfo=utc_tz)
 
 
-utc_tz = tzutc()
-local_tz = SafeLocalTimeZone()
-del tzutc, tzlocal
-UNDEFINED_DATE = datetime(101,1,1, tzinfo=utc_tz)
-
-
-def parse_iso8601(date_string, assume_utc=False, as_utc=True, require_aware=False):
+def parse_iso8601(date_string: str | None, assume_utc: bool = False, as_utc: bool = True, require_aware: bool = False) -> datetime:
     if not date_string:
         return UNDEFINED_DATE
     dt, aware, tzseconds = speedup.parse_iso8601(date_string)
@@ -48,10 +27,10 @@ def parse_iso8601(date_string, assume_utc=False, as_utc=True, require_aware=Fals
             tz = utc_tz
         else:
             sign = '-' if tzseconds < 0 else '+'
-            description = "%s%02d:%02d" % (sign, abs(tzseconds) // 3600, (abs(tzseconds) % 3600) // 60)
-            tz = tzoffset(description, tzseconds)
+            description = f'{sign}{abs(tzseconds) // 3600:02}:{abs(tzseconds) % 3600 // 60:02}'
+            tz = timezone(timedelta(seconds=tzseconds), description)
     elif require_aware:
-        raise ValueError('{} does not specify a time zone'.format(date_string))
+        raise ValueError(f'{date_string} does not specify a time zone')
     dt = dt.replace(tzinfo=tz)
     if as_utc and tz is utc_tz:
         return dt
@@ -60,4 +39,5 @@ def parse_iso8601(date_string, assume_utc=False, as_utc=True, require_aware=Fals
 
 if __name__ == '__main__':
     import sys
+
     print(parse_iso8601(sys.argv[-1]))

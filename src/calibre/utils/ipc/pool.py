@@ -1,33 +1,62 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
-
-import os, sys
-from threading import Thread
-from collections import namedtuple
+import os
+import sys
 from multiprocessing.connection import Pipe
+from queue import Queue
+from threading import Thread
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 
-from calibre import detect_ncpus, as_unicode, prints
-from calibre.constants import iswindows, DEBUG
+from calibre import as_unicode, detect_ncpus, prints
+from calibre.constants import DEBUG, iswindows
 from calibre.ptempfile import PersistentTemporaryFile
 from calibre.utils import join_with_timeout
 from calibre.utils.ipc import eintr_retry_call
 from calibre.utils.serialize import pickle_dumps, pickle_loads
-from polyglot.builtins import iteritems, itervalues
-from polyglot.queue import Queue
 
-Job = namedtuple('Job', 'id module func args kwargs')
-Result = namedtuple('Result', 'value err traceback')
-WorkerResult = namedtuple('WorkerResult', 'id result is_terminal_failure worker')
-TerminalFailure = namedtuple('TerminalFailure', 'message tb job_id')
-File = namedtuple('File', 'name')
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from multiprocessing.connection import Connection, PipeConnection
+    from subprocess import Popen
+
+    from calibre.utils.ipc.simple_worker import PipeWorker
+
+
+class Job(NamedTuple):
+    id: int
+    module: str
+    func: str
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+
+class Result(NamedTuple):
+    value: Any | None
+    err: str | None
+    traceback: str | None
+
+
+class WorkerResult(NamedTuple):
+    id: int
+    result: Result
+    is_terminal_failure: bool
+    worker: Worker | None
+
+
+class TerminalFailure(NamedTuple):
+    message: str
+    tb: str | None
+    job_id: int | None
+
+
+class File(NamedTuple):
+    name: str
+
 
 MAX_SIZE = 30 * 1024 * 1024  # max size of data to send over the connection (old versions of windows cannot handle arbitrary data lengths)
 
-worker_kwargs = {'stdout':None}
+worker_kwargs = {'stdout': None}
 get_stdout_from_child = False
 
 if iswindows:
@@ -40,89 +69,89 @@ if iswindows:
     # Note that when running via the "Restart in debug mode" action, stdout is
     # not a console (its already redirected to a log file), so no redirection
     # is required.
-    if getattr(sys, 'gui_app', False) or getattr(sys.stdout, 'isatty', lambda : False)():
+    if getattr(sys, 'gui_app', False) or getattr(sys.stdout, 'isatty', lambda: False)():
         if DEBUG:
             # We are running in a windows console with calibre-debug -g
             import subprocess
+
             get_stdout_from_child = True
             worker_kwargs['stdout'] = subprocess.PIPE
             worker_kwargs['stderr'] = subprocess.STDOUT
         else:
-            from calibre.utils.ipc.launch import windows_null_file
-            worker_kwargs['stdout'] = worker_kwargs['stderr'] = windows_null_file
+            import subprocess
+
+            worker_kwargs['stdout'] = worker_kwargs['stderr'] = subprocess.DEVNULL
 
 
-def get_stdout(process):
+def get_stdout(process: PipeWorker) -> None:
     import time
+
     while process.poll() is None:
         try:
             raw = process.stdout.read(1)
             if raw:
                 try:
                     sys.stdout.buffer.write(raw)
-                except EnvironmentError:
+                except OSError:
                     pass
             else:
                 time.sleep(0.1)
-        except (EOFError, EnvironmentError):
+        except EOFError, OSError:
             break
 
 
-def start_worker(code, pass_fds, name=''):
+def start_worker(code: str, pass_fds: Sequence[int], name: str = '') -> PipeWorker:
     from calibre.utils.ipc.simple_worker import start_pipe_worker
+
     if name:
         name = '-' + name
-    p = start_pipe_worker(code, pass_fds=pass_fds, **worker_kwargs)
+    p = start_pipe_worker(code, pass_fds=pass_fds, **worker_kwargs)  # ty: ignore[invalid-argument-type]
     if get_stdout_from_child:
-        t = Thread(target=get_stdout, name='PoolWorkerGetStdout' + name, args=(p,))
-        t.daemon = True
-        t.start()
+        Thread(target=get_stdout, name='PoolWorkerGetStdout' + name, args=(p,), daemon=True).start()
     return p
 
 
 class Failure(Exception):
-
-    def __init__(self, tf):
+    def __init__(self, tf: TerminalFailure) -> None:
         Exception.__init__(self, tf.message)
         self.details = tf.tb
         self.job_id = tf.job_id
         self.failure_message = tf.message
 
 
-class Worker(object):
-
-    def __init__(self, p, conn, events, name):
+class Worker:
+    def __init__(self, p: Popen[bytes], conn: Connection | PipeConnection, events: Queue[object], name: str | None) -> None:
         self.process, self.conn = p, conn
         self.events = events
         self.name = name or ''
 
-    def __call__(self, job):
+    def __call__(self, job: Job | None) -> None:
         eintr_retry_call(self.conn.send_bytes, pickle_dumps(job))
         if job is not None:
             self.job_id = job.id
-            t = Thread(target=self.recv, name='PoolWorker-'+self.name)
+            t = Thread(target=self.recv, name='PoolWorker-' + self.name)
             t.daemon = True
             t.start()
 
-    def recv(self):
+    def recv(self) -> None:
         try:
             result = pickle_loads(eintr_retry_call(self.conn.recv_bytes))
             wr = WorkerResult(self.job_id, result, False, self)
         except Exception as err:
             import traceback
+
             result = Result(None, as_unicode(err), traceback.format_exc())
             wr = WorkerResult(self.job_id, result, True, self)
         self.events.put(wr)
 
-    def set_common_data(self, data):
+    def set_common_data(self, data: bytes) -> None:
         eintr_retry_call(self.conn.send_bytes, data)
 
 
 class Pool(Thread):
-
     daemon = True
 
-    def __init__(self, max_workers=None, name=None):
+    def __init__(self, max_workers: int | None = None, name: str | None = None) -> None:
         Thread.__init__(self, name=name)
         self.max_workers = max_workers or detect_ncpus()
         self.available_workers = []
@@ -137,19 +166,19 @@ class Pool(Thread):
 
         self.start()
 
-    def set_common_data(self, data=None):
-        ''' Set some data that will be passed to all subsequent jobs without
+    def set_common_data(self, data: object = None) -> None:
+        """Set some data that will be passed to all subsequent jobs without
         needing to be transmitted every time. You must call this method before
         queueing any jobs, otherwise the behavior is undefined. You can call it
         after all jobs are done, then it will be used for the new round of
         jobs. Can raise the :class:`Failure` exception is data could not be
-        sent to workers.'''
-        if self.failed:
+        sent to workers."""
+        if self.terminal_failure is not None:
             raise Failure(self.terminal_failure)
         self.events.put(data)
 
-    def __call__(self, job_id, module, func, *args, **kwargs):
-        '''
+    def __call__(self, job_id: int, module: str, func: str, *args: object, **kwargs: object) -> None:
+        """
         Schedule a job. The job will be run in a worker process, with the
         result placed in self.results. If a terminal failure has occurred
         previously, this method will raise the :class:`Failure` exception.
@@ -160,57 +189,57 @@ class Pool(Thread):
                        Source code is detected by the presence of newlines in module.
         :param func: Name of the function from ``module`` that will be
                      executed. ``args`` and ``kwargs`` will be passed to the function.
-        '''
-        if self.failed:
+        """
+        if self.terminal_failure is not None:
             raise Failure(self.terminal_failure)
         job = Job(job_id, module, func, args, kwargs)
         self.tracker.put(None)
         self.events.put(job)
 
-    def wait_for_tasks(self, timeout=None):
-        ''' Wait for all queued jobs to be completed, if timeout is not None,
+    def wait_for_tasks(self, timeout: float | None = None) -> None:
+        """Wait for all queued jobs to be completed, if timeout is not None,
         will raise a RuntimeError if jobs are not completed in the specified
         time. Will raise a :class:`Failure` exception if a terminal failure has
-        occurred previously. '''
-        if self.failed:
+        occurred previously."""
+        if self.terminal_failure is not None:
             raise Failure(self.terminal_failure)
         if timeout is None:
             self.tracker.join()
         else:
             join_with_timeout(self.tracker, timeout)
 
-    def shutdown(self, wait_time=0.1):
-        ''' Shutdown this pool, terminating all worker process. The pool cannot
-        be used after a shutdown. '''
+    def shutdown(self, wait_time: float = 0.1) -> None:
+        """Shutdown this pool, terminating all worker process. The pool cannot
+        be used after a shutdown."""
         self.shutting_down = True
         self.events.put(None)
         self.shutdown_workers(wait_time=wait_time)
 
-    def create_worker(self):
+    def create_worker(self) -> Worker:
         a, b = Pipe()
         with a:
-            cmd = 'from {0} import run_main, {1}; run_main({2!r}, {1})'.format(
-                self.__class__.__module__, 'worker_main', a.fileno())
+            cmd = 'from {0} import run_main, {1}; run_main({2!r}, {1})'.format(self.__class__.__module__, 'worker_main', a.fileno())
             p = start_worker(cmd, (a.fileno(),))
         sys.stdout.flush()
         p.stdin.close()
         w = Worker(p, b, self.events, self.name)
-        if self.common_data != pickle_dumps(None):
+        if self.common_data is not None and self.common_data != pickle_dumps(None):
             w.set_common_data(self.common_data)
         return w
 
-    def start_worker(self):
+    def start_worker(self) -> bool | None:
         try:
             w = self.create_worker()
             if not self.shutting_down:
                 self.available_workers.append(w)
         except Exception:
             import traceback
+
             self.terminal_failure = TerminalFailure('Failed to start worker process', traceback.format_exc(), None)
             self.terminal_error()
             return False
 
-    def run(self):
+    def run(self) -> None:
         if self.start_worker() is False:
             return
 
@@ -221,7 +250,7 @@ class Pool(Thread):
             if self.handle_event(event) is False:
                 break
 
-    def handle_event(self, event):
+    def handle_event(self, event: object) -> bool | None:
         if isinstance(event, Job):
             job = event
             if not self.available_workers:
@@ -253,6 +282,7 @@ class Pool(Thread):
                     worker.set_common_data(self.common_data)
                 except Exception:
                     import traceback
+
                     self.terminal_failure = TerminalFailure('Worker process crashed while sending common data', traceback.format_exc(), None)
                     self.terminal_error()
                     return False
@@ -261,25 +291,26 @@ class Pool(Thread):
             if self.run_job(self.pending_jobs.pop()) is False:
                 return False
 
-    def run_job(self, job):
+    def run_job(self, job: Job) -> bool | None:
         worker = self.available_workers.pop()
         try:
             worker(job)
         except Exception:
             import traceback
+
             self.terminal_failure = TerminalFailure('Worker process crashed while sending job', traceback.format_exc(), job.id)
             self.terminal_error()
             return False
         self.busy_workers[worker] = job
 
     @property
-    def failed(self):
+    def failed(self) -> bool:
         return self.terminal_failure is not None
 
-    def terminal_error(self):
+    def terminal_error(self) -> None:
         if self.shutting_down:
             return
-        for worker, job in iteritems(self.busy_workers):
+        for worker, job in self.busy_workers.items():
             self.results.put(WorkerResult(job.id, Result(None, None, None), True, worker))
             self.tracker.task_done()
         while self.pending_jobs:
@@ -288,18 +319,18 @@ class Pool(Thread):
             self.tracker.task_done()
         self.shutdown()
 
-    def shutdown_workers(self, wait_time=0.1):
+    def shutdown_workers(self, wait_time: float = 0.1) -> None:
         self.worker_data = self.common_data = None
         for worker in self.busy_workers:
             if worker.process.poll() is None:
                 try:
                     worker.process.terminate()
-                except EnvironmentError:
+                except OSError:
                     pass  # If the process has already been killed
         workers = [w.process for w in self.available_workers + list(self.busy_workers)]
         aw = list(self.available_workers)
 
-        def join():
+        def join() -> None:
             for w in aw:
                 try:
                     w(None)
@@ -310,6 +341,7 @@ class Pool(Thread):
                     w.wait()
                 except Exception:
                     pass
+
         reaper = Thread(target=join, name='ReapPoolWorkers')
         reaper.daemon = True
         reaper.start()
@@ -323,19 +355,20 @@ class Pool(Thread):
             if w.poll() is None:
                 try:
                     w.kill()
-                except EnvironmentError:
+                except OSError:
                     pass
         del self.available_workers[:]
         self.busy_workers.clear()
         if hasattr(self, 'cd_file'):
             try:
                 os.remove(self.cd_file.name)
-            except EnvironmentError:
+            except OSError:
                 pass
 
 
-def worker_main(conn):
+def worker_main(conn: Connection | PipeConnection) -> int:
     from importlib import import_module
+
     common_data = None
     while True:
         try:
@@ -347,13 +380,14 @@ def worker_main(conn):
         except Exception:
             prints('recv() failed in worker, terminating worker', file=sys.stderr)
             import traceback
+
             traceback.print_exc()
             return 1
         if job is None:
             break
         if not isinstance(job, Job):
             if isinstance(job, File):
-                with lopen(job.name, 'rb') as f:
+                with open(job.name, 'rb') as f:
                     common_data = f.read()
                 common_data = pickle_loads(common_data)
             else:
@@ -363,6 +397,7 @@ def worker_main(conn):
             if '\n' in job.module:
                 import_module('calibre.customize.ui')  # Load plugins
                 from calibre.utils.ipc.simple_worker import compile_code
+
                 mod = compile_code(job.module)
                 func = mod[job.func]
             else:
@@ -373,6 +408,7 @@ def worker_main(conn):
             result = Result(result, None, None)
         except Exception as err:
             import traceback
+
             result = Result(None, as_unicode(err), traceback.format_exc())
         try:
             eintr_retry_call(conn.send_bytes, pickle_dumps(result))
@@ -381,12 +417,13 @@ def worker_main(conn):
         except Exception:
             prints('send() failed in worker, terminating worker', file=sys.stderr)
             import traceback
+
             traceback.print_exc()
             return 1
     return 0
 
 
-def run_main(client_fd, func):
+def run_main(client_fd: int, func: Callable[[Connection | PipeConnection], int]) -> NoReturn:
     if iswindows:
         from multiprocessing.connection import PipeConnection as Connection
     else:
@@ -395,12 +432,12 @@ def run_main(client_fd, func):
         raise SystemExit(func(conn))
 
 
-def test_write():
+def test_write() -> None:
     print('Printing to stdout in worker')
 
 
-def test():
-    def get_results(pool, ignore_fail=False):
+def test() -> None:
+    def get_results(pool: Pool, ignore_fail: bool = False) -> dict[int, Result]:
         ans = {}
         while not p.results.empty():
             r = p.results.get()
@@ -418,9 +455,9 @@ def test():
         p(i, 'def x(i):\n return 2*i', 'x', i)
         expected_results[i] = 2 * i
     p.wait_for_tasks(30)
-    results = {k:v.value for k, v in iteritems(get_results(p))}
+    results = {k: v.value for k, v in get_results(p).items()}
     if results != expected_results:
-        raise SystemExit('%r != %r' % (expected_results, results))
+        raise SystemExit(f'{expected_results!r} != {results!r}')
     p.shutdown(), p.join()
 
     # Test common_data
@@ -432,9 +469,9 @@ def test():
         p(i, 'def x(i, common_data=None):\n return common_data + i', 'x', i)
         expected_results[i] = 7 + i
     p.wait_for_tasks(30)
-    results = {k:v.value for k, v in iteritems(get_results(p))}
+    results = {k: v.value for k, v in get_results(p).items()}
     if results != expected_results:
-        raise SystemExit('%r != %r' % (expected_results, results))
+        raise SystemExit(f'{expected_results!r} != {results!r}')
     p.shutdown(), p.join()
 
     # Test large common data
@@ -454,10 +491,10 @@ def test():
         p(i, 'def x(i):\n return 1/0', 'x', i)
     p.wait_for_tasks(30)
     c = 0
-    for r in itervalues(get_results(p)):
+    for r in get_results(p).values():
         c += 1
         if not r.traceback or 'ZeroDivisionError' not in r.traceback:
-            raise SystemExit('Unexpected result: %s' % r)
+            raise SystemExit(f'Unexpected result: {r}')
     if c != 1000:
         raise SystemExit('Incorrect number of results')
     p.shutdown(), p.join()

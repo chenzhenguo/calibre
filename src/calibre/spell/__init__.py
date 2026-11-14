@@ -1,35 +1,31 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
+
+from typing import NamedTuple
+
+from calibre.utils.localization import canonicalize_lang, load_iso3166
 
 
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
-
-from collections import namedtuple
-
-from calibre.utils.localization import canonicalize_lang
-
-DictionaryLocale = namedtuple('DictionaryLocale', 'langcode countrycode')
-
-ccodes, ccodemap, country_names = None, None, None
+class DictionaryLocale(NamedTuple):
+    langcode: str
+    countrycode: str | None
 
 
-def get_codes():
-    global ccodes, ccodemap, country_names
-    if ccodes is None:
-        from calibre.utils.serialize import msgpack_loads
-        data = msgpack_loads(P('localization/iso3166.calibre_msgpack', allow_user_override=False, data=True))
-        ccodes, ccodemap, country_names = data['codes'], data['three_map'], data['names']
-    return ccodes, ccodemap
+def get_codes() -> tuple[set[str], dict[str, str]]:
+    data = load_iso3166()
+    return data['codes'], data['three_map']
 
 
-def parse_lang_code(raw):
+def parse_lang_code(raw: str | None) -> DictionaryLocale:
     raw = raw or ''
     parts = raw.replace('_', '-').split('-')
     lc = canonicalize_lang(parts[0])
     if lc is None:
-        raise ValueError('Invalid language code: %r' % raw)
+        raise ValueError(f'Invalid language code: {raw!r}')
     cc = None
+    for sc in ['Cyrl', 'Latn']:
+        if sc in parts:
+            parts.remove(sc)
     if len(parts) > 1:
         ccodes, ccodemap = get_codes()[:2]
         q = parts[1].upper()

@@ -19,8 +19,8 @@ static PyTypeObject html_TagType;
 
 typedef struct {
     PyObject_HEAD
-    // Type-specific fields go here.
-    PyObject *name;
+        // Type-specific fields go here.
+        PyObject *name;
     PyObject *bold;
     PyObject *italic;
     PyObject *lang;
@@ -28,54 +28,51 @@ typedef struct {
 } html_Tag;
 
 static void
-html_Tag_dealloc(html_Tag* self)
-{
-    Py_XDECREF(self->name); self->name = NULL;
-    Py_XDECREF(self->bold); self->bold = NULL;
-    Py_XDECREF(self->italic); self->italic = NULL;
-    Py_XDECREF(self->lang); self->lang = NULL;
-    Py_TYPE(self)->tp_free((PyObject*)self);
+html_Tag_dealloc(html_Tag *self) {
+    Py_CLEAR(self->name);
+    Py_CLEAR(self->bold);
+    Py_CLEAR(self->italic);
+    Py_CLEAR(self->lang);
+    Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
 
 static PyObject *
-html_Tag_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
-{
+html_Tag_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
     html_Tag *self = NULL;
     self = (html_Tag *)type->tp_alloc(type, 0);
     if (self == NULL) return PyErr_NoMemory();
 
-    self->bold = NULL; self->italic = NULL; self->lang = NULL;
+    self->bold = NULL;
+    self->italic = NULL;
+    self->lang = NULL;
     if (!PyArg_ParseTuple(args, "O|OOO", &(self->name), &(self->bold), &(self->italic), &(self->lang))) {
-        Py_TYPE(self)->tp_free((PyObject*)self); return NULL;
+        Py_TYPE(self)->tp_free((PyObject *)self);
+        return NULL;
     }
-    if (self->bold == NULL) {
-        self->bold = (PySet_Contains(bold_tags, self->name)) ? Py_True : Py_False;
-    }
-    if (self->italic == NULL) {
-        self->italic = (PySet_Contains(italic_tags, self->name)) ? Py_True : Py_False;
-    }
+    if (self->bold == NULL) { self->bold = (PySet_Contains(bold_tags, self->name)) ? Py_True : Py_False; }
+    if (self->italic == NULL) { self->italic = (PySet_Contains(italic_tags, self->name)) ? Py_True : Py_False; }
     if (self->lang == NULL) self->lang = Py_None;
-    Py_INCREF(self->name); Py_INCREF(self->bold); Py_INCREF(self->italic); Py_INCREF(self->lang);
+    Py_INCREF(self->name);
+    Py_INCREF(self->bold);
+    Py_INCREF(self->italic);
+    Py_INCREF(self->lang);
 
     return (PyObject *)self;
 }
 
 static PyObject *
 html_Tag_copy(html_Tag *self, PyObject *args, PyObject *kwargs) {
-    return PyObject_CallFunctionObjArgs((PyObject *) &html_TagType, self->name, self->bold, self->italic, self->lang, NULL);
+    return PyObject_CallFunctionObjArgs((PyObject *)&html_TagType, self->name, self->bold, self->italic, self->lang, NULL);
 }
 
 static PyObject *
 html_Tag_compare(html_Tag *a, html_Tag *b, int op) {
     if (!PyObject_TypeCheck(a, &html_TagType) || !PyObject_TypeCheck(b, &html_TagType)) {
         switch (op) {
-            case Py_EQ:
-                Py_RETURN_FALSE;
-            case Py_NE:
-                Py_RETURN_TRUE;
-            default:
-                break;
+            case Py_EQ: Py_RETURN_FALSE;
+            case Py_NE: Py_RETURN_TRUE;
+            default: break;
         }
     } else {
         switch (op) {
@@ -85,8 +82,7 @@ html_Tag_compare(html_Tag *a, html_Tag *b, int op) {
             case Py_NE:
                 if (COMPARE(name, Py_NE) || COMPARE(lang, Py_NE)) Py_RETURN_TRUE;
                 Py_RETURN_FALSE;
-            default:
-                break;
+            default: break;
         }
     }
     PyErr_SetString(PyExc_TypeError, "Only equals comparison is supported for Tag objects");
@@ -95,8 +91,7 @@ html_Tag_compare(html_Tag *a, html_Tag *b, int op) {
 
 static PyObject *
 html_Tag_repr(html_Tag *self) {
-    return PyUnicode_FromFormat("Tag(%R, bold=%R, italic=%R, lang=%R)",
-        self->name, self->bold, self->italic, self->lang);
+    return PyUnicode_FromFormat("Tag(%R, bold=%R, italic=%R, lang=%R)", self->name, self->bold, self->italic, self->lang);
 }
 
 static PyMemberDef html_Tag_members[] = {
@@ -104,18 +99,17 @@ static PyMemberDef html_Tag_members[] = {
     {"bold", T_OBJECT_EX, offsetof(html_Tag, bold), 0, "True iff tag is bold"},
     {"italic", T_OBJECT_EX, offsetof(html_Tag, italic), 0, "True iff tag is italic"},
     {"lang", T_OBJECT_EX, offsetof(html_Tag, lang), 0, "The language of this tag"},
-    {NULL}  /* Sentinel */
+    {NULL} /* Sentinel */
 };
 
 static PyMethodDef html_Tag_methods[] = {
-    {"copy", (PyCFunction)html_Tag_copy, METH_VARARGS,
-     "copy() -> Return a copy of this Tag"
-    },
+    {"copy", (PyCFunction)html_Tag_copy, METH_VARARGS, "copy() -> Return a copy of this Tag"},
 
-    {NULL}  /* Sentinel */
+    {NULL} /* Sentinel */
 };
 
-static PyTypeObject html_TagType = { // {{{
+static PyTypeObject html_TagType = {
+    // {{{
     PyVarObject_HEAD_INIT(NULL, 0)
     /* tp_name           */ "html.Tag",
     /* tp_basicsize      */ sizeof(html_Tag),
@@ -135,7 +129,7 @@ static PyTypeObject html_TagType = { // {{{
     /* tp_getattro       */ 0,
     /* tp_setattro       */ 0,
     /* tp_as_buffer      */ 0,
-    /* tp_flags          */ Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE,
+    /* tp_flags          */ Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
     /* tp_doc            */ "Token",
     /* tp_traverse       */ 0,
     /* tp_clear          */ 0,
@@ -163,8 +157,8 @@ static PyTypeObject html_StateType;
 
 typedef struct {
     PyObject_HEAD
-    // Type-specific fields go here.
-    PyObject *tag_being_defined;
+        // Type-specific fields go here.
+        PyObject *tag_being_defined;
     PyObject *tags;
     PyObject *is_bold;
     PyObject *is_italic;
@@ -178,42 +172,31 @@ typedef struct {
 } html_State;
 
 static void
-html_State_dealloc(html_State* self)
-{
-    Py_XDECREF(self->tag_being_defined); self->tag_being_defined = NULL;
-    Py_XDECREF(self->tags); self->tags = NULL;
-    Py_XDECREF(self->is_bold); self->is_bold = NULL;
-    Py_XDECREF(self->is_italic); self->is_italic = NULL;
-    Py_XDECREF(self->current_lang); self->current_lang = NULL;
-    Py_XDECREF(self->parse); self->parse = NULL;
-    Py_XDECREF(self->css_formats); self->css_formats = NULL;
-    Py_XDECREF(self->sub_parser_state); self->sub_parser_state = NULL;
-    Py_XDECREF(self->default_lang); self->default_lang = NULL;
-    Py_XDECREF(self->attribute_name);self->attribute_name = NULL;
+html_State_dealloc(html_State *self) {
+    Py_CLEAR(self->tag_being_defined);
+    Py_CLEAR(self->tags);
+    Py_CLEAR(self->is_bold);
+    Py_CLEAR(self->is_italic);
+    Py_CLEAR(self->current_lang);
+    Py_CLEAR(self->parse);
+    Py_CLEAR(self->css_formats);
+    Py_CLEAR(self->sub_parser_state);
+    Py_CLEAR(self->default_lang);
+    Py_CLEAR(self->attribute_name);
 
-    Py_TYPE(self)->tp_free((PyObject*)self);
+    Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
 
 static PyObject *
-html_State_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
-{
+html_State_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
     html_State *self = NULL;
     self = (html_State *)type->tp_alloc(type, 0);
     if (self == NULL) return PyErr_NoMemory();
 
-    self->tag_being_defined = NULL;
-    self->tags = NULL;
-    self->is_bold = NULL;
-    self->is_italic = NULL;
-    self->current_lang = NULL;
-    self->parse = NULL;
-    self->css_formats = NULL;
-    self->sub_parser_state = NULL;
-    self->default_lang = NULL;
-    self->attribute_name = NULL;
-
-    if (!PyArg_ParseTuple(args, "|OOOOOOOOOO",
+    if (!PyArg_ParseTuple(
+            args,
+            "|OOOOOOOOOO",
             &(self->tag_being_defined),
             &(self->tags),
             &(self->is_bold),
@@ -223,33 +206,29 @@ html_State_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
             &(self->css_formats),
             &(self->sub_parser_state),
             &(self->default_lang),
-            &(self->attribute_name)))
-    {
-        Py_TYPE(self)->tp_free((PyObject*)self); return NULL;
+            &(self->attribute_name))) {
+        Py_TYPE(self)->tp_free((PyObject *)self);
+        return NULL;
     }
 
-    if (self->tag_being_defined == NULL) self->tag_being_defined = Py_None;
-    if (self->tags == NULL) { self->tags = PyList_New(0); if (self->tags == NULL) return PyErr_NoMemory(); }
-    if (self->is_bold == NULL) self->is_bold = Py_False;
-    if (self->is_italic == NULL) self->is_italic = Py_False;
-    if (self->current_lang == NULL) self->current_lang = Py_None;
-    if (self->parse == NULL) self->parse = zero;
-    if (self->css_formats == NULL) self->css_formats = Py_None;
-    if (self->sub_parser_state == NULL) self->sub_parser_state = Py_None;
-    if (self->default_lang == NULL) self->default_lang = Py_None;
-    if (self->attribute_name == NULL) self->attribute_name = Py_None;
-
-    Py_INCREF(self->tag_being_defined);
-    Py_INCREF(self->tags);
-    Py_INCREF(self->is_bold);
-    Py_INCREF(self->is_italic);
-    Py_INCREF(self->current_lang);
-    Py_INCREF(self->parse);
-    Py_INCREF(self->css_formats);
-    Py_INCREF(self->sub_parser_state);
-    Py_INCREF(self->default_lang);
-    Py_INCREF(self->attribute_name);
-
+#define A(attr, defval) self->attr = Py_NewRef(self->attr == NULL ? defval : self->attr);
+    A(tag_being_defined, Py_None);
+    A(is_bold, Py_False);
+    A(is_italic, Py_False);
+    A(current_lang, Py_None);
+    A(parse, zero);
+    A(css_formats, Py_None);
+    A(sub_parser_state, Py_None);
+    A(default_lang, Py_None);
+    A(attribute_name, Py_None);
+#undef A
+    if (self->tags == NULL) {
+        self->tags = PyList_New(0);
+        if (self->tags == NULL) {
+            Py_TYPE(self)->tp_free((PyObject *)self);
+            return NULL;
+        }
+    } else self->tags = Py_NewRef(self->tags);
     return (PyObject *)self;
 }
 
@@ -258,25 +237,35 @@ html_State_copy(html_State *self, PyObject *args, PyObject *kwargs) {
     PyObject *ans = NULL, *tags = NULL, *tag_being_defined = NULL, *sub_parser_state = NULL;
     Py_ssize_t i = 0;
 
-    if (self->sub_parser_state == Py_None) {sub_parser_state = Py_None; Py_INCREF(sub_parser_state); }
+    if (self->sub_parser_state == Py_None) sub_parser_state = Py_NewRef(Py_None);
     else sub_parser_state = PyObject_CallMethod(self->sub_parser_state, "copy", NULL);
     if (sub_parser_state == NULL) goto end;
 
-    if (self->tag_being_defined == Py_None) { tag_being_defined = Py_None; Py_INCREF(Py_None); }
-    else tag_being_defined = html_Tag_copy((html_Tag*)self->tag_being_defined, NULL, NULL);
+    if (self->tag_being_defined == Py_None) tag_being_defined = Py_NewRef(Py_None);
+    else tag_being_defined = html_Tag_copy((html_Tag *)self->tag_being_defined, NULL, NULL);
     if (tag_being_defined == NULL) goto end;
 
     tags = PyList_New(PyList_GET_SIZE(self->tags));
-    if (tags == NULL) { PyErr_NoMemory(); goto end; }
-    for (i = 0; i < PyList_GET_SIZE(self->tags); i++) {
-        PyList_SET_ITEM(tags, i, PyList_GET_ITEM(self->tags, i));
-        Py_INCREF(PyList_GET_ITEM(self->tags, i));
-    }
+    if (tags == NULL) goto end;
+    for (i = 0; i < PyList_GET_SIZE(self->tags); i++) { PyList_SET_ITEM(tags, i, Py_NewRef(PyList_GET_ITEM(self->tags, i))); }
 
-    ans = PyObject_CallFunctionObjArgs((PyObject *) &html_StateType,
-            tag_being_defined, tags, self->is_bold, self->is_italic, self->current_lang, self->parse, self->css_formats, sub_parser_state, self->default_lang, self->attribute_name, NULL);
+    ans = PyObject_CallFunctionObjArgs(
+        (PyObject *)&html_StateType,
+        tag_being_defined,
+        tags,
+        self->is_bold,
+        self->is_italic,
+        self->current_lang,
+        self->parse,
+        self->css_formats,
+        sub_parser_state,
+        self->default_lang,
+        self->attribute_name,
+        NULL);
 end:
-    Py_XDECREF(tags); Py_XDECREF(tag_being_defined); Py_XDECREF(sub_parser_state);
+    Py_CLEAR(tags);
+    Py_CLEAR(tag_being_defined);
+    Py_CLEAR(sub_parser_state);
     return ans;
 }
 
@@ -285,23 +274,23 @@ static PyObject *
 html_State_compare(html_State *a, html_State *b, int op) {
     if (!PyObject_TypeCheck(a, &html_StateType) || !PyObject_TypeCheck(b, &html_StateType)) {
         switch (op) {
-            case Py_EQ:
-                Py_RETURN_FALSE;
-            case Py_NE:
-                Py_RETURN_TRUE;
-            default:
-                break;
+            case Py_EQ: Py_RETURN_FALSE;
+            case Py_NE: Py_RETURN_TRUE;
+            default: break;
         }
     } else {
         switch (op) {
             case Py_EQ:
-                if (COMPARE(parse, Py_EQ) && COMPARE(sub_parser_state, Py_EQ) && COMPARE(tag_being_defined, Py_EQ) && COMPARE(attribute_name, Py_EQ) && COMPARE(tags, Py_EQ)) Py_RETURN_TRUE;
+                if (COMPARE(parse, Py_EQ) && COMPARE(sub_parser_state, Py_EQ) && COMPARE(tag_being_defined, Py_EQ) && COMPARE(attribute_name, Py_EQ) &&
+                    COMPARE(tags, Py_EQ))
+                    Py_RETURN_TRUE;
                 Py_RETURN_FALSE;
             case Py_NE:
-                if (COMPARE(parse, Py_NE) || COMPARE(sub_parser_state, Py_NE) || COMPARE(tag_being_defined, Py_NE) || COMPARE(attribute_name, Py_NE) || COMPARE(tags, Py_NE)) Py_RETURN_TRUE;
+                if (COMPARE(parse, Py_NE) || COMPARE(sub_parser_state, Py_NE) || COMPARE(tag_being_defined, Py_NE) || COMPARE(attribute_name, Py_NE) ||
+                    COMPARE(tags, Py_NE))
+                    Py_RETURN_TRUE;
                 Py_RETURN_FALSE;
-            default:
-                break;
+            default: break;
         }
     }
     PyErr_SetString(PyExc_TypeError, "Only equals comparison is supported for State objects");
@@ -310,8 +299,7 @@ html_State_compare(html_State *a, html_State *b, int op) {
 
 static PyObject *
 html_State_repr(html_State *self) {
-    return PyUnicode_FromFormat("State(bold=%R, italic=%R, lang=%R)",
-        self->is_bold, self->is_italic, self->current_lang);
+    return PyUnicode_FromFormat("State(bold=%R, italic=%R, lang=%R)", self->is_bold, self->is_italic, self->current_lang);
 }
 
 static PyMemberDef html_State_members[] = {
@@ -325,18 +313,17 @@ static PyMemberDef html_State_members[] = {
     {"sub_parser_state", T_OBJECT_EX, offsetof(html_State, sub_parser_state), 0, "xxx"},
     {"default_lang", T_OBJECT_EX, offsetof(html_State, default_lang), 0, "xxx"},
     {"attribute_name", T_OBJECT_EX, offsetof(html_State, attribute_name), 0, "xxx"},
-    {NULL}  /* Sentinel */
+    {NULL} /* Sentinel */
 };
 
 static PyMethodDef html_State_methods[] = {
-    {"copy", (PyCFunction)html_State_copy, METH_VARARGS,
-     "copy() -> Return a copy of this Tag"
-    },
+    {"copy", (PyCFunction)html_State_copy, METH_VARARGS, "copy() -> Return a copy of this Tag"},
 
-    {NULL}  /* Sentinel */
+    {NULL} /* Sentinel */
 };
 
-static PyTypeObject html_StateType = { // {{{
+static PyTypeObject html_StateType = {
+    // {{{
     PyVarObject_HEAD_INIT(NULL, 0)
     /* tp_name           */ "html.State",
     /* tp_basicsize      */ sizeof(html_State),
@@ -356,7 +343,7 @@ static PyTypeObject html_StateType = { // {{{
     /* tp_getattro       */ 0,
     /* tp_setattro       */ 0,
     /* tp_as_buffer      */ 0,
-    /* tp_flags          */ Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE,
+    /* tp_flags          */ Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
     /* tp_doc            */ "Token",
     /* tp_traverse       */ 0,
     /* tp_clear          */ 0,
@@ -378,19 +365,24 @@ static PyTypeObject html_StateType = { // {{{
 }; // }}}
 // }}}
 
-static PyObject*
+static PyObject *
 html_init(PyObject *self, PyObject *args) {
-    Py_XDECREF(spell_property); Py_XDECREF(recognized); Py_XDECREF(split);
+    Py_XDECREF(spell_property);
+    Py_XDECREF(recognized);
+    Py_XDECREF(split);
     if (!PyArg_ParseTuple(args, "OOO", &spell_property, &recognized, &split)) return NULL;
-    Py_INCREF(spell_property); Py_INCREF(recognized); Py_INCREF(split);
+    Py_INCREF(spell_property);
+    Py_INCREF(recognized);
+    Py_INCREF(split);
     Py_RETURN_NONE;
 }
 
-static inline long number_to_long(PyObject *number) {
+static inline long
+number_to_long(PyObject *number) {
 #if PY_VERSION_HEX >= 0x03030000
     return PyLong_AsLong(number);
 #else
-    if(PyInt_Check(number)) {
+    if (PyInt_Check(number)) {
         return PyInt_AS_LONG(number);
     } else {
         return PyLong_AsLong(number);
@@ -398,7 +390,7 @@ static inline long number_to_long(PyObject *number) {
 #endif
 }
 
-static PyObject*
+static PyObject *
 html_check_spelling(PyObject *self, PyObject *args) {
     PyObject *ans = NULL, *temp = NULL, *items = NULL, *text = NULL, *fmt = NULL, *locale = NULL, *sfmt = NULL, *_store_locale = NULL, *t = NULL, *utmp = NULL;
     long text_len = 0, start = 0, length = 0, ppos = 0;
@@ -410,22 +402,27 @@ html_check_spelling(PyObject *self, PyObject *args) {
     temp = PyObject_GetAttrString(locale, "langcode");
     if (temp == NULL) goto error;
     items = PyObject_CallFunctionObjArgs(split, text, temp, NULL);
-    Py_DECREF(temp); temp = NULL;
+    Py_DECREF(temp);
+    temp = NULL;
     if (items == NULL) goto error;
     ans = PyTuple_New((2 * PyList_GET_SIZE(items)) + 1);
-    if (ans == NULL) { PyErr_NoMemory(); goto error; }
+    if (ans == NULL) {
+        PyErr_NoMemory();
+        goto error;
+    }
 
-#define APPEND(x, y) t = Py_BuildValue("lO", (x), (y)); \
-                     if (t == NULL) goto error; \
-                     PyTuple_SET_ITEM(ans, j, t); \
-                     j += 1;
+#define APPEND(x, y)                   \
+    t = Py_BuildValue("lO", (x), (y)); \
+    if (t == NULL) goto error;         \
+    PyTuple_SET_ITEM(ans, j, t);       \
+    j += 1;
 
     for (i = 0, j = 0; i < PyList_GET_SIZE(items); i++) {
         temp = PyList_GET_ITEM(items, i);
         start = number_to_long(PyTuple_GET_ITEM(temp, 0));
-        if(start == -1 && PyErr_Occurred() != NULL) goto error;
+        if (start == -1 && PyErr_Occurred() != NULL) goto error;
         length = number_to_long(PyTuple_GET_ITEM(temp, 1));
-        if(length == -1 && PyErr_Occurred() != NULL) goto error;
+        if (length == -1 && PyErr_Occurred() != NULL) goto error;
         temp = NULL;
 
         if (start > ppos) { APPEND(start - ppos, fmt) }
@@ -436,12 +433,17 @@ html_check_spelling(PyObject *self, PyObject *args) {
 #else
         utmp = PyUnicode_FromUnicode(PyUnicode_AS_UNICODE(text) + start, length);
 #endif
-        if (utmp == NULL) { PyErr_NoMemory(); goto error; }
+        if (utmp == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
         temp = PyObject_CallFunctionObjArgs(recognized, utmp, locale, NULL);
-        Py_DECREF(utmp); utmp = NULL;
+        Py_DECREF(utmp);
+        utmp = NULL;
         if (temp == NULL) goto error;
         ok = PyObject_IsTrue(temp);
-        Py_DECREF(temp); temp = NULL;
+        Py_DECREF(temp);
+        temp = NULL;
 
         if (ok) {
             APPEND(length, fmt)
@@ -450,44 +452,38 @@ html_check_spelling(PyObject *self, PyObject *args) {
                 temp = PyObject_CallFunctionObjArgs(spell_property, sfmt, locale, NULL);
                 if (temp == NULL) goto error;
                 APPEND(length, temp);
-                Py_DECREF(temp); temp = NULL;
+                Py_DECREF(temp);
+                temp = NULL;
             } else {
                 APPEND(length, sfmt);
             }
         }
     }
-    if (ppos < text_len) {
-        APPEND(text_len - ppos, fmt)
-    }
+    if (ppos < text_len) { APPEND(text_len - ppos, fmt) }
 
     if (j < PyTuple_GET_SIZE(ans)) _PyTuple_Resize(&ans, j);
     goto end;
 
 error:
-    Py_XDECREF(ans); ans = NULL;
+    Py_XDECREF(ans);
+    ans = NULL;
 end:
-    Py_XDECREF(items); Py_XDECREF(temp);
+    Py_XDECREF(items);
+    Py_XDECREF(temp);
     return ans;
 }
 
 static PyMethodDef html_methods[] = {
-    {"init", html_init, METH_VARARGS,
-        "init()\n\n Initialize this module"
-    },
+    {"init", html_init, METH_VARARGS, "init()\n\n Initialize this module"},
 
-    {"check_spelling", html_check_spelling, METH_VARARGS,
-        "html_check_spelling()\n\n Speedup inner loop for spell check"
-    },
+    {"check_spelling", html_check_spelling, METH_VARARGS, "html_check_spelling()\n\n Speedup inner loop for spell check"},
 
-    {NULL, NULL, 0, NULL}
-};
+    {NULL, NULL, 0, NULL}};
 
 static int
 exec_module(PyObject *mod) {
-    if (PyType_Ready(&html_TagType) < 0)
-        return -1;
-    if (PyType_Ready(&html_StateType) < 0)
-        return -1;
+    if (PyType_Ready(&html_TagType) < 0) return -1;
+    if (PyType_Ready(&html_StateType) < 0) return -1;
 
     PyObject *temp = Py_BuildValue("ssssssss", "b", "strong", "h1", "h2", "h3", "h4", "h5", "h6", "h7");
     if (temp == NULL) return -1;
@@ -516,17 +512,18 @@ exec_module(PyObject *mod) {
     PyModule_AddObject(mod, "State", (PyObject *)&html_StateType);
     PyModule_AddObject(mod, "bold_tags", bold_tags);
     PyModule_AddObject(mod, "italic_tags", italic_tags);
-	return 0;
+    return 0;
 }
 
-static PyModuleDef_Slot slots[] = { {Py_mod_exec, exec_module}, {0, NULL} };
+static PyModuleDef_Slot slots[] = {{Py_mod_exec, exec_module}, {0, NULL}};
 
 static struct PyModuleDef module_def = {
-    .m_base     = PyModuleDef_HEAD_INIT,
-    .m_name     = "html_syntax_highlighter",
-    .m_doc      =  "Speedups for the html syntax highlighter",
-    .m_methods  = html_methods,
-    .m_slots    = slots,
+    .m_base = PyModuleDef_HEAD_INIT,
+    .m_name = "html_syntax_highlighter",
+    .m_doc = "Speedups for the html syntax highlighter",
+    .m_methods = html_methods,
+    .m_slots = slots,
 };
 
-CALIBRE_MODINIT_FUNC PyInit_html_syntax_highlighter(void) { return PyModuleDef_Init(&module_def); }
+CALIBRE_MODINIT_FUNC
+PyInit_html_syntax_highlighter(void) { return PyModuleDef_Init(&module_def); }

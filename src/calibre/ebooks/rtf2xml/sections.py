@@ -1,4 +1,3 @@
-
 #########################################################################
 #                                                                       #
 #                                                                       #
@@ -11,11 +10,11 @@
 #                                                                       #
 #                                                                       #
 #########################################################################
-import sys, os
+import os
+import sys
 
 from calibre.ebooks.rtf2xml import copy
 from calibre.ptempfile import better_mktemp
-from polyglot.builtins import unicode_type
 
 from . import open_for_read, open_for_write
 
@@ -43,7 +42,7 @@ class Sections:
     should be nested inside one section tag. After the index is complete, a new
     section should begin.
     In order to write the sections outside of the field blocks, I have to store
-    all of the field block as a string. When I ecounter the \\sect tag, add one to
+    all of the field block as a string. When I encounter the \\sect tag, add one to
     the section counter, but store this number in a list. Likewise, store the
     information describing the section in another list.
     When I reach the end of the field block, choose the first item from the
@@ -52,15 +51,11 @@ class Sections:
     between the section tags.
     Start a new section outside the field-block strings. Use the second number in
     the list; use the second item in the description list.
-    CHANGE (2004-04-26) No longer write sections that occurr in field-blocks.
-    Instead, ingore all section information in a field-block.
+    CHANGE (2004-04-26) No longer write sections that occur in field-blocks.
+    Instead, ignore all section information in a field-block.
     """
 
-    def __init__(self,
-            in_file,
-            bug_handler,
-            copy=None,
-            run_level=1):
+    def __init__(self, in_file: str, bug_handler: type[Exception], copy: int | None = None, run_level: int = 1) -> None:
         """
         Required:
             'file'--file to parse
@@ -70,19 +65,19 @@ class Sections:
             directory from which the script is run.)
         Returns:
             nothing
-            """
+        """
         self.__file = in_file
         self.__bug_handler = bug_handler
         self.__copy = copy
         self.__run_level = run_level
         self.__write_to = better_mktemp()
 
-    def __initiate_values(self):
+    def __initiate_values(self) -> None:
         """
         Initiate all values.
         """
         self.__mark_start = 'mi<mk<sect-start\n'
-        self.__mark_end =   'mi<mk<sect-end__\n'
+        self.__mark_end = 'mi<mk<sect-end__\n'
         self.__in_field = 0
         self.__section_values = {}
         self.__list_of_sec_values = []
@@ -93,41 +88,41 @@ class Sections:
         self.__text_string = ''
         self.__field_instruction_string = ''
         self.__state_dict = {
-        'before_body'       : self.__before_body_func,
-        'body'              : self.__body_func,
-        'before_first_sec'  : self.__before_first_sec_func,
-        'section'           : self.__section_func,
-        'section_def'       : self.__section_def_func,
-        'sec_in_field'      : self.__sec_in_field_func,
+            'before_body': self.__before_body_func,
+            'body': self.__body_func,
+            'before_first_sec': self.__before_first_sec_func,
+            'section': self.__section_func,
+            'section_def': self.__section_def_func,
+            'sec_in_field': self.__sec_in_field_func,
         }
         # cw<sc<sect-defin<nu<true
         self.__body_dict = {
-        'cw<sc<section___'      : self.__found_section_func,
-        'mi<mk<sec-fd-beg'      : self.__found_sec_in_field_func,
-        'cw<sc<sect-defin'      : self.__found_section_def_bef_sec_func,
+            'cw<sc<section___': self.__found_section_func,
+            'mi<mk<sec-fd-beg': self.__found_sec_in_field_func,
+            'cw<sc<sect-defin': self.__found_section_def_bef_sec_func,
         }
         self.__section_def_dict = {
-        'cw<pf<par-def___'      : (self.__end_sec_def_func, None),
-        'mi<mk<body-open_'      : (self.__end_sec_def_func, None),
-        'cw<tb<columns___'      : (self.__attribute_func, 'columns'),
-        'cw<pa<margin-lef'      : (self.__attribute_func, 'margin-left'),
-        'cw<pa<margin-rig'      : (self.__attribute_func, 'margin-right'),
-        'mi<mk<header-ind'      : (self.__end_sec_def_func, None),
-        # premature endings
-        # __end_sec_premature_func
-        'tx<nu<__________'      : (self.__end_sec_premature_func, None),
-        'cw<ci<font-style'      : (self.__end_sec_premature_func, None),
-        'cw<ci<font-size_'      : (self.__end_sec_premature_func, None),
+            'cw<pf<par-def___': (self.__end_sec_def_func, None),
+            'mi<mk<body-open_': (self.__end_sec_def_func, None),
+            'cw<tb<columns___': (self.__attribute_func, 'columns'),
+            'cw<pa<margin-lef': (self.__attribute_func, 'margin-left'),
+            'cw<pa<margin-rig': (self.__attribute_func, 'margin-right'),
+            'mi<mk<header-ind': (self.__end_sec_def_func, None),
+            # premature endings
+            # __end_sec_premature_func
+            'tx<nu<__________': (self.__end_sec_premature_func, None),
+            'cw<ci<font-style': (self.__end_sec_premature_func, None),
+            'cw<ci<font-size_': (self.__end_sec_premature_func, None),
         }
         self.__sec_in_field_dict = {
-        'mi<mk<sec-fd-end'      : self.__end_sec_in_field_func,
-        # changed this 2004-04-26
-        # two lines
-        # 'cw<sc<section___'      : self.__found_section_in_field_func,
-        # 'cw<sc<sect-defin'      : self.__found_section_def_in_field_func,
+            'mi<mk<sec-fd-end': self.__end_sec_in_field_func,
+            # changed this 2004-04-26
+            # two lines
+            # 'cw<sc<section___'  : self.__found_section_in_field_func,
+            # 'cw<sc<sect-defin'  : self.__found_section_def_in_field_func,
         }
 
-    def __found_section_def_func(self, line):
+    def __found_section_def_func(self, line: str) -> None:
         """
         Required:
             line -- the line to parse
@@ -141,7 +136,7 @@ class Sections:
         self.__state = 'section_def'
         self.__section_values.clear()
 
-    def __attribute_func(self, line, name):
+    def __attribute_func(self, line: str, name: str | None) -> None:
         """
         Required:
             line -- the line to be parsed
@@ -151,7 +146,7 @@ class Sections:
             nothing
         Logic:
             I need to add the right data to the section values dictionary so I
-            can retrive it later. The attribute (or key) is the name; the
+            can retrieve it later. The attribute (or key) is the name; the
             value is the last part of the text string.
             ex: cw<tb<columns___<nu<2
         """
@@ -159,7 +154,7 @@ class Sections:
         value = line[20:-1]
         self.__section_values[attribute] = value
 
-    def __found_section_func(self, line):
+    def __found_section_func(self, line: str) -> None:
         """
         Requires:
             line -- the line to parse
@@ -173,7 +168,7 @@ class Sections:
         self.__write_obj.write(line)
         self.__section_num += 1
 
-    def __found_section_def_bef_sec_func(self, line):
+    def __found_section_def_bef_sec_func(self, line: str) -> None:
         """
         Requires:
             line -- the line to parse
@@ -187,7 +182,7 @@ class Sections:
         self.__found_section_def_func(line)
         self.__write_obj.write(line)
 
-    def __section_func(self, line):
+    def __section_func(self, line: str) -> None:
         """
         Requires:
             line --the line to parse
@@ -199,7 +194,7 @@ class Sections:
             self.__found_section_def_func(line)
         self.__write_obj.write(line)
 
-    def __section_def_func(self, line):
+    def __section_def_func(self, line: str) -> None:
         """
         Required:
             line --line to parse
@@ -207,7 +202,7 @@ class Sections:
             nothing
         Logic:
             I have found a section definition. Check if the line is the end of
-            the defnition (a paragraph defintion), or if it contains info that
+            the definition (a paragraph definition), or if it contains info that
             should be added to the values dictionary. If neither of these
             cases are true, output the line to a file.
         """
@@ -221,7 +216,7 @@ class Sections:
         else:
             self.__write_obj.write(line)
 
-    def __end_sec_def_func(self, line, name):
+    def __end_sec_def_func(self, line: str, name: str | None) -> None:
         """
         Requires:
             line --the line to parse
@@ -238,7 +233,7 @@ class Sections:
             self.__state = 'sec_in_field'
         self.__write_section(line)
 
-    def __end_sec_premature_func(self, line, name):
+    def __end_sec_premature_func(self, line: str, name: str | None) -> None:
         """
         Requires:
             line --the line to parse
@@ -247,9 +242,9 @@ class Sections:
             nothing
         Logic:
             Text or control words indicating text have been found
-            before \\pard. This shoud indicate older RTF. Reset the state
-            Write the section defintion. Insert a paragraph definition.
-            Insert {} to mark the end of a paragraph defintion
+            before \\pard. This should indicate older RTF. Reset the state
+            Write the section definition. Insert a paragraph definition.
+            Insert {} to mark the end of a paragraph definition
         """
         if not self.__in_field:
             self.__state = 'body'
@@ -260,7 +255,7 @@ class Sections:
         self.__write_obj.write('ob<nu<open-brack<0000\n')
         self.__write_obj.write('cb<nu<clos-brack<0000\n')
 
-    def __write_section(self, line):
+    def __write_section(self, line: str) -> None:
         """
         Requires:
             nothing
@@ -276,17 +271,17 @@ class Sections:
             my_string += 'mi<tg<close_____<section\n'
         else:
             self.__found_first_sec = 1
-        my_string += 'mi<tg<open-att__<section<num>%s' % unicode_type(self.__section_num)
-        my_string += '<num-in-level>%s' % unicode_type(self.__section_num)
+        my_string += f'mi<tg<open-att__<section<num>{self.__section_num!s}'
+        my_string += f'<num-in-level>{self.__section_num!s}'
         my_string += '<type>rtf-native'
         my_string += '<level>0'
         keys = self.__section_values.keys()
         if len(keys) > 0:
             for key in keys:
-                my_string += '<%s>%s' % (key, self.__section_values[key])
+                my_string += f'<{key}>{self.__section_values[key]}'
         my_string += '\n'
         my_string += self.__mark_end
-        # # my_string += line
+        # my_string += line
         if self.__state == 'body':
             self.__write_obj.write(my_string)
         elif self.__state == 'sec_in_field':
@@ -295,7 +290,7 @@ class Sections:
             msg = 'missed a flag\n'
             raise self.__bug_handler(msg)
 
-    def __handle_sec_def(self, my_string):
+    def __handle_sec_def(self, my_string: str) -> None:
         """
         Requires:
             my_string -- the string of attributes and values. (Do I need this?)
@@ -308,7 +303,7 @@ class Sections:
         values_dict = self.__section_values
         self.__list_of_sec_values.append(values_dict)
 
-    def __body_func(self, line):
+    def __body_func(self, line: str) -> None:
         """
         Requires:
             line --the line to parse
@@ -324,7 +319,7 @@ class Sections:
         else:
             self.__write_obj.write(line)
 
-    def __before_body_func(self, line):
+    def __before_body_func(self, line: str) -> None:
         """
         Requires:
             line --line to parse
@@ -337,7 +332,7 @@ class Sections:
             self.__state = 'before_first_sec'
         self.__write_obj.write(line)
 
-    def __before_first_sec_func(self, line):
+    def __before_first_sec_func(self, line: str) -> None:
         """
         Requires:
             line -- line to parse
@@ -354,31 +349,17 @@ class Sections:
         elif self.__token_info == 'cw<pf<par-def___':
             self.__state = 'body'
             self.__section_num += 1
-            self.__write_obj.write(
-                    'mi<tg<open-att__<section<num>%s'
-                    '<num-in-level>%s'
-                    '<type>rtf-native'
-                    '<level>0\n'
-                    % (unicode_type(self.__section_num), unicode_type(self.__section_num))
-                    )
+            self.__write_obj.write(f'mi<tg<open-att__<section<num>{self.__section_num!s}<num-in-level>{self.__section_num!s}<type>rtf-native<level>0\n')
             self.__found_first_sec = 1
         elif self.__token_info == 'tx<nu<__________':
             self.__state = 'body'
             self.__section_num += 1
-            self.__write_obj.write(
-                    'mi<tg<open-att__<section<num>%s'
-                    '<num-in-level>%s'
-                    '<type>rtf-native'
-                    '<level>0\n'
-                    % (unicode_type(self.__section_num), unicode_type(self.__section_num))
-                    )
-            self.__write_obj.write(
-                'cw<pf<par-def___<true\n'
-                    )
+            self.__write_obj.write(f'mi<tg<open-att__<section<num>{self.__section_num!s}<num-in-level>{self.__section_num!s}<type>rtf-native<level>0\n')
+            self.__write_obj.write('cw<pf<par-def___<true\n')
             self.__found_first_sec = 1
         self.__write_obj.write(line)
 
-    def __found_sec_in_field_func(self, line):
+    def __found_sec_in_field_func(self, line: str) -> None:
         """
         Requires:
             line --line to parse
@@ -393,7 +374,7 @@ class Sections:
         self.__sec_in_field_string = line
         self.__in_field = 1
 
-    def __sec_in_field_func(self, line):
+    def __sec_in_field_func(self, line: str) -> None:
         """
         Requires:
             line --the line to parse
@@ -413,7 +394,7 @@ class Sections:
             # self.__sec_in_field_string += line
             self.__write_obj.write(line)
 
-    def __end_sec_in_field_func(self, line):
+    def __end_sec_in_field_func(self, line: str) -> None:
         """
         Requires:
             line --line to parse
@@ -427,19 +408,19 @@ class Sections:
             Change the state.
         """
         # change this 2004-04-26
-        # Don't do anyting
-        """
-        self.__sec_in_field_string += line
-        self.__print_field_sec_attributes()
-        self.__write_obj.write(self.__sec_in_field_string)
-        self.__print_field_sec_attributes()
-        """
+        # Don't do anything
+        #
+        # self.__sec_in_field_string += line
+        # self.__print_field_sec_attributes()
+        # self.__write_obj.write(self.__sec_in_field_string)
+        # self.__print_field_sec_attributes()
+
         self.__state = 'body'
         self.__in_field = 0
         # this is changed too
         self.__write_obj.write(line)
 
-    def __print_field_sec_attributes(self):
+    def __print_field_sec_attributes(self) -> None:
         """
         Requires:
             nothing
@@ -461,23 +442,19 @@ class Sections:
         """
         num = self.__field_num[0]
         self.__field_num = self.__field_num[1:]
-        self.__write_obj.write(
-        'mi<tg<close_____<section\n'
-        'mi<tg<open-att__<section<num>%s' % unicode_type(num)
-        )
+        self.__write_obj.write(f'mi<tg<close_____<section\nmi<tg<open-att__<section<num>{num!s}')
         if self.__list_of_sec_values:
-            keys =  self.__list_of_sec_values[0].keys()
+            keys = self.__list_of_sec_values[0].keys()
             for key in keys:
-                self.__write_obj.write(
-                '<%s>%s\n' % (key, self.__list_of_sec_values[0][key]))
+                self.__write_obj.write(f'<{key}>{self.__list_of_sec_values[0][key]}\n')
             self.__list_of_sec_values = self.__list_of_sec_values[1:]
         self.__write_obj.write('<level>0')
         self.__write_obj.write('<type>rtf-native')
-        self.__write_obj.write('<num-in-level>%s' % unicode_type(self.__section_num))
+        self.__write_obj.write(f'<num-in-level>{self.__section_num!s}')
         self.__write_obj.write('\n')
         # Look here
 
-    def __found_section_in_field_func(self, line):
+    def __found_section_in_field_func(self, line: str) -> None:
         """
         Requires:
             line --line to parse
@@ -491,7 +468,7 @@ class Sections:
         self.__field_num.append(self.__section_num)
         self.__sec_in_field_string += line
 
-    def __found_section_def_in_field_func(self, line):
+    def __found_section_def_in_field_func(self, line: str) -> None:
         """
         Requires:
             line --line to parse
@@ -504,7 +481,7 @@ class Sections:
         self.__state = 'section_def'
         self.__section_values.clear()
 
-    def make_sections(self):
+    def make_sections(self) -> None:
         """
         Requires:
             nothing
@@ -528,11 +505,12 @@ class Sections:
             if action is None:
                 sys.stderr.write('no matching state in module sections.py\n')
                 sys.stderr.write(self.__state + '\n')
-            action(line)
+            else:
+                action(line)
         read_obj.close()
         self.__write_obj.close()
         copy_obj = copy.Copy(bug_handler=self.__bug_handler)
         if self.__copy:
-            copy_obj.copy_file(self.__write_to, "sections.data")
+            copy_obj.copy_file(self.__write_to, 'sections.data')
         copy_obj.rename(self.__write_to, self.__file)
         os.remove(self.__write_to)

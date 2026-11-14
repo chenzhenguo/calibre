@@ -23,9 +23,9 @@ address:
 
 This will open a page in the browser showing you your calibre libraries, click
 on any one and browse the books in it. Click on a book, and it will show you
-all the metadata about the book, along with buttons to :guilabel:`Read book`
-and :guilabel:`Download book`. Click the :guilabel:`Read book` button to
-start reading the book.
+all the metadata about the book, along with buttons to :guilabel:`Read` and
+:guilabel:`Download` the book. Click the :guilabel:`Read` button to start
+reading the book.
 
 .. note:: The address used above ``http://127.0.0.1:8080`` will only work on
     the computer that is running calibre. To access the server from other
@@ -94,7 +94,7 @@ steps:
      network configurations possible, it is not possible to give you a
      roadmap for doing so.
 
-  #. If you have setup a username and password, first try it without that
+  #. If you have set up a username and password, first try it without that
      to see if it is causing issues. Some e-ink devices have browsers that
      do not handle authentication. You can sometimes workaround this by
      including the username and password in the URL, for example:
@@ -139,11 +139,14 @@ is as follows.
      setup an easy to remember address to use instead of the IP address you
      found in the first step.
 
+
+.. _cs_https_mode:
+
 .. note::
-    For maximum security, you should also enable HTTPS on the content server.
+    For maximum security, you should also enable HTTPS on the Content server.
     You can either do so directly in the server by providing the path to
     the HTTPS certificate to use in the advanced configuration options for
-    the server, or you can setup a reverse proxy as described below, to use
+    the server, or you can set up a reverse proxy as described below, to use
     an existing HTTPS setup.
 
 
@@ -152,7 +155,7 @@ The server interface
 
 The server interface is a simplified version of the main calibre interface,
 optimised for use with touch screens. The home screen shows you books
-you are currently reading as well as allowing to choose a calibre library you
+you are currently reading as well as allowing you to choose a calibre library you
 want to browse. The server in calibre gives you access to all your libraries,
 not just a single one, as before.
 
@@ -174,11 +177,11 @@ A much loved feature of the main program, :guilabel:`Virtual libraries` is
 present in the server interface as well. Click the three vertical dots in the
 top right corner to choose a Virtual library.
 
-The book reader
+The book viewer
 ^^^^^^^^^^^^^^^^
 
 You can read any book in your calibre library by simply tapping on
-it and then tapping the :guilabel:`Read book` button. The books reader
+it and then tapping the :guilabel:`Read` button. The book viewer
 is very simple to operate. You can both tap and swipe to turn pages. Swiping
 up/down skips between chapters. Tapping the top quarter of the screen gets you
 the detailed controls and viewer preferences.
@@ -188,15 +191,61 @@ multiple devices and it will remember your last read position. If it does not
 you can force a sync by tapping in the top quarter and choosing
 :guilabel:`Sync`.
 
+Searching book contents in OPDS applications
+---------------------------------------------
+
+When full text indexing is enabled for a library, its OPDS catalog offers a
+catalog entry titled :guilabel:`Search book contents`. Open this entry and use
+the application's search control to find books by words and phrases inside
+them, using calibre's existing full text index. Each feed has a single search
+link, so clients do not have to choose between multiple search links. Results
+contain the normal book information and download links. A book is listed once
+even if more than one of its formats matches. Only books available to the
+current user are searched.
+
+The original search continues to search book metadata. Content search uses
+the same SQLite full text query syntax as calibre's full text search window.
+It searches the text indexed so far; books still waiting to be indexed will
+not appear yet. The content search entry is absent when indexing is disabled.
+Both OPDS 1 and OPDS 2 catalogs support content search, through the normal
+search URL with ``full_text=y`` added to its query parameters.
+
+
+Reading comics in OPDS applications
+------------------------------------
+
+Applications that support OPDS 2.0 and the `Readium Divina format
+<https://readium.org/webpub-manifest/profiles/divina>`_ can read CBZ comics one
+page at a time, without downloading the entire archive. Connect the application
+to the server's ``/opds`` catalog. OPDS 2.0 applications request the JSON catalog
+using ``Accept: application/opds+json``.
+
+Comic entries link to a Divina manifest. The server lists pages only when the
+application opens that manifest, using the same page order as calibre's comic
+conversion. Each page offers its original image format, including AVIF and
+JPEG XL, and alternate formats the server can produce. GIF pages, which may be
+animated, are only offered in their original format. The application chooses
+an image format it supports from those links. JPEG is offered as the default
+for AVIF and JPEG XL pages when conversion is available.
+
+For manga, a ``ComicInfo.xml`` file with ``Manga`` set to ``YesAndRightToLeft``
+tells the application to use right-to-left reading direction. The file can be
+in the root of the archive or in the folder containing the page images. Page
+images remain in their original order. The reading direction is only given in
+the comic manifest, not in OPDS feeds, as finding it requires opening the
+archive.
+
+The normal username/password and library restrictions apply to manifests and
+page images. Complete archive downloads remain available. This feature supports
+CBZ archives; CBR and CB7 comics can still be downloaded as complete files.
+
+
 Browser support
 ------------------
 
 The new calibre server makes lots of use of advanced HTML 5 and CSS 3 features.
 As such it requires an up-to-date browser to use. It has been tested on Android
-Chrome and iOS Safari as well as Chrome and Firefox on the desktop. It is known
-not to work with Internet Explorer and Microsoft Edge (hopefully Edge will
-start working when Microsoft gets around to implementing a few missing
-standards).
+Chrome and iOS Safari as well as Chrome and Firefox on the desktop.
 
 The server is careful to use functionality that has either been already
 standardised or is on the standards track. As such if it does not currently
@@ -205,7 +254,7 @@ up.
 
 If you are using a particularly old or limited browser or you don't like to run
 JavaScript, you can use the *mobile* view, by simply adding ``/mobile`` to the
-the server address.
+server address.
 
 .. note::
     On iOS, Apple allows only a single browser engine, so Firefox, Chrome and
@@ -216,12 +265,15 @@ the server address.
 Enabling offline support
 ---------------------------
 
-Browser makers have been trying to force people to use SSL by disabling
-advanced features in their browsers for plain HTTP connections. One such
-casualty is offline support. So you may need to enable HTTPS on the server to
-get offline support working. In addition, in Firefox on Android, you will need
-to type ``about:config`` and search for ``browser.tabs.useCache`` and toggle it
-to ``true``.
+The server has full support for offline mode, you can open a book and once it
+is loaded, continue reading it offline. However, typical browsers require the
+use of HTTPS connections to enable offline mode (service workers).
+So :ref:`setup HTTPS support <cs_https_mode>` as described above. Scroll to the
+bottom of the home page and you will see a message about the status of offline
+mode.
+
+Alternately, you can open a book and keep the browser tab open. As long as the
+tab stays open you can continue reading the book, even when offline.
 
 Managing user accounts from the command-line only
 -----------------------------------------------------
@@ -233,17 +285,55 @@ computer/user account, you can also manage users using just the command-line.
 
 You can manage user accounts using the ``--manage-users`` option
 to the standalone ``calibre-server`` program. Suppose you want to store
-the user database in the directory ``/srv/calibre``, then you create it
+the user database in the folder ``/srv/calibre``, then you create it
 by running::
 
     calibre-server --userdb /srv/calibre/users.sqlite --manage-users
 
-Just follow the prompts to create user accounts, set their permission, etc.
+Just follow the prompts to create user accounts, set their permissions, etc.
 Once you are done, you can run the server as::
 
     calibre-server --userdb /srv/calibre/users.sqlite --enable-auth
 
 It will use the user accounts you created in the previous step.
+
+Syncing reading progress with KOReader
+-----------------------------------------
+
+The Content server can act as a progress sync server for the `KOReader
+<https://koreader.rocks>`_ e-book reader, so that devices running KOReader
+can sync your reading position in books with each other. In KOReader, go to
+:guilabel:`Tools->Progress sync->Custom sync server` and enter the address of
+the Content server followed by ``/kosync``, for example::
+
+    http://192.168.1.2:8080/kosync
+
+If you are `Using a URL prefix`_, include it before ``/kosync``.
+Then use :guilabel:`Login` with the username and password of a user account on
+the Content server. Accounts cannot be created from KOReader, they are managed
+by calibre as described above. Users that are only allowed read access cannot
+sync their reading positions. If user accounts are not enabled on the server,
+any username and password can be used, but reading positions can only be synced
+from devices that are allowed to make changes without authentication, see the
+:guilabel:`Allow un-authenticated local connections to make changes` and
+:guilabel:`Allow un-authenticated connections from specific IP addresses to make changes`
+options. Reading positions synced while user accounts are not enabled are kept
+separate from those of user accounts. The reading positions of each user are
+stored separately in the user database of the server.
+
+By default, KOReader identifies books by a checksum of the book file. The
+Content server can change the metadata embedded in books when they are
+downloaded, so copies of a book downloaded at different times can have
+different checksums. Once KOReader has synced with the server, it remembers the
+checksums of downloaded books and of the library files they were created from,
+so that all copies of the same format of a book share one reading position.
+Different formats of a book have separate reading positions, as positions in
+one format cannot be used in another. Copies downloaded before KOReader first
+synced with the server, or obtained other than by downloading them from the
+server, are not recognized. If reading positions do not sync for such copies,
+set :guilabel:`Document matching method` in the KOReader progress sync settings
+to :guilabel:`Filename` on all devices and keep the file names of books the
+same.
 
 
 Integrating the calibre Content server into other servers
@@ -252,7 +342,7 @@ Integrating the calibre Content server into other servers
 Here, we will show you how to integrate the calibre Content server into another
 server. The most common reason for this is to make use of SSL or to serve the
 calibre library as part of a larger site. The basic technique is to run the
-calibre server and setup a reverse proxy to it from the main server.
+calibre server and set up a reverse proxy to it from the main server.
 
 A reverse proxy is when your normal server accepts incoming requests and passes
 them onto the calibre server. It then reads the response from the calibre
@@ -269,6 +359,10 @@ server. In this case, run the calibre server as::
     calibre-server
 
 Now setup the virtual host in your main server, for example, for nginx::
+
+    http {
+        client_max_body_size 64M;  # needed to upload large books
+    }
 
     server {
         listen [::]:80;
@@ -305,6 +399,10 @@ The key parameter here is ``--url-prefix /calibre``. This causes the Content ser
 
 With nginx, the required configuration is::
 
+    http {
+        client_max_body_size 64M;  # needed to upload large books
+    }
+
     proxy_set_header X-Forwarded-For $remote_addr;
     location /calibre/ {
         proxy_buffering off;
@@ -340,7 +438,7 @@ That's all, you will now be able to access the calibre Content server under the 
 
 .. note::
 
-    If you have setup SSL for your main server, you should tell the calibre
+    If you have set up SSL for your main server, you should tell the calibre
     server to use basic authentication instead of digest authentication, as it
     is faster. To do so, pass the ``--auth-mode=basic`` option to
     ``calibre-server``.
@@ -357,14 +455,14 @@ based Linux system. Just create the file
 ``/etc/systemd/system/calibre-server.service`` with the contents shown below::
 
     [Unit]
-    Description=calibre content server
+    Description=calibre Content server
     After=network.target
 
     [Service]
     Type=simple
     User=mylinuxuser
     Group=mylinuxgroup
-    ExecStart=/opt/calibre/calibre-server "/path/to/calibre library directory"
+    ExecStart=/opt/calibre/calibre-server "/path/to/calibre library folder"
 
     [Install]
     WantedBy=multi-user.target
@@ -372,9 +470,9 @@ based Linux system. Just create the file
 
 Change ``mylinuxuser`` and ``mylinuxgroup`` to whatever user and group you want
 the server to run as. This should be the same user and group that own the files
-in the calibre library directory. Note that it is generally not a good idea to
+in the calibre library folder. Note that it is generally not a good idea to
 run the server as root. Also change the path to the calibre library
-directory to suit your system. You can add multiple libraries if needed. See
+folder to suit your system. You can add multiple libraries if needed. See
 the help for the ``calibre-server`` command.
 
 Now run::

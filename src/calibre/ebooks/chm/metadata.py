@@ -1,54 +1,60 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
 
+import codecs
+import re
+from typing import IO, TYPE_CHECKING, cast
 
-__license__   = 'GPL v3'
-__copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-import re, codecs
-
+from calibre import force_unicode
 from calibre.ebooks.BeautifulSoup import BeautifulSoup
 from calibre.ebooks.chardet import xml_to_unicode
-from calibre.ebooks.metadata import string_to_authors, MetaInformation
-from calibre.utils.logging import default_log
+from calibre.ebooks.metadata import MetaInformation, string_to_authors
 from calibre.ptempfile import TemporaryFile
-from calibre import force_unicode
-from polyglot.builtins import iterkeys
+from calibre.utils.localization import _
+from calibre.utils.logging import default_log
+
+if TYPE_CHECKING:
+    from bs4 import BeautifulSoup as Soup
+    from bs4 import Tag
+
+    from calibre.ebooks.chm.reader import CHMReader
+    from calibre.ebooks.metadata.book.base import Metadata
 
 
-def _clean(s):
+def _clean(s: str) -> str:
     return s.replace('\u00a0', ' ')
 
 
-def _detag(tag):
-    ans = ""
+def _detag(tag: Tag | str | None) -> str:
+    ans = ''
     if tag is None:
         return ans
     for elem in tag:
-        if hasattr(elem, "contents"):
-            ans += _detag(elem)
+        # elements with contents are Tags, the rest are NavigableStrings
+        if hasattr(elem, 'contents'):
+            ans += _detag(cast('Tag', elem))
         else:
-            ans += _clean(elem)
+            ans += _clean(cast('str', elem))
     return ans
 
 
-def _metadata_from_table(soup, searchfor):
+def _metadata_from_table(soup: Soup, searchfor: str) -> str | None:
     td = soup.find('td', text=re.compile(searchfor, flags=re.I))
     if td is None:
         return None
     td = td.parent
+    assert td is not None  # an element found in the soup always has a parent
     # there appears to be multiple ways of structuring the metadata
     # on the home page. cue some nasty special-case hacks...
-    if re.match(r'^\s*'+searchfor+r'\s*$', td.decode_contents(), flags=re.I):
+    if re.match(r'^\s*' + searchfor + r'\s*$', td.decode_contents(), flags=re.I):
         meta = _detag(td.findNextSibling('td'))
-        return re.sub('^:', '', meta).strip()
+        return re.sub(r'^:', '', meta).strip()
     else:
         meta = _detag(td)
         return re.sub(r'^[^:]+:', '', meta).strip()
 
 
-def _metadata_from_span(soup, searchfor):
+def _metadata_from_span(soup: Soup, searchfor: str) -> str | None:
     span = soup.find('span', {'class': re.compile(searchfor, flags=re.I)})
     if span is None:
         return None
@@ -56,40 +62,44 @@ def _metadata_from_span(soup, searchfor):
     return _detag(span.decode_contents().strip())
 
 
-def _get_authors(soup):
-    aut = (_metadata_from_span(soup, r'author') or _metadata_from_table(soup, r'^\s*by\s*:?\s+'))
+def _get_authors(soup: Soup) -> list[str]:
+    aut = _metadata_from_span(soup, r'author') or _metadata_from_table(soup, r'^\s*by\s*:?\s+')
     ans = [_('Unknown')]
     if aut is not None:
         ans = string_to_authors(aut)
     return ans
 
 
-def _get_publisher(soup):
-    return (_metadata_from_span(soup, 'imprint') or _metadata_from_table(soup, 'publisher'))
+def _get_publisher(soup: Soup) -> str | None:
+    return _metadata_from_span(soup, 'imprint') or _metadata_from_table(soup, 'publisher')
 
 
-def _get_isbn(soup):
-    return (_metadata_from_span(soup, 'isbn') or _metadata_from_table(soup, 'isbn'))
+def _get_isbn(soup: Soup) -> str | None:
+    return _metadata_from_span(soup, 'isbn') or _metadata_from_table(soup, 'isbn')
 
 
-def _get_comments(soup):
-    date = (_metadata_from_span(soup, 'cwdate') or _metadata_from_table(soup, 'pub date'))
-    pages = (_metadata_from_span(soup, 'pages') or _metadata_from_table(soup, 'pages'))
+def _get_comments(soup: Soup) -> str | None:
+    date = _metadata_from_span(soup, 'cwdate') or _metadata_from_table(soup, 'pub date')
+    pages = _metadata_from_span(soup, 'pages') or _metadata_from_table(soup, 'pages')
     try:
+        assert date is not None and pages is not None  # failures are ignored by the except below
         # date span can have copyright symbols in it...
-        date = date.replace('\u00a9', '').strip()
+        date = date.replace('©', '').strip()
         # and pages often comes as '(\d+ pages)'
-        pages = re.search(r'\d+', pages).group(0)
-        return 'Published %s, %s pages.' % (date, pages)
-    except:
+        m_pages = re.search(r'\d+', pages)
+        assert m_pages is not None
+        pages = m_pages.group(0)
+        return f'Published {date}, {pages} pages.'
+    except Exception:
         pass
     return None
 
 
-def _get_cover(soup, rdr):
+def _get_cover(soup: Soup, rdr: CHMReader) -> bytes | None:
     ans = None
     try:
-        ans = soup.find('img', alt=re.compile('cover', flags=re.I))['src']
+        # find() returning None raises the TypeError handled below
+        ans = cast('str', soup.find('img', alt=re.compile(r'cover', flags=re.I))['src'])  # ty: ignore[not-subscriptable]
     except TypeError:
         # meeehh, no handy alt-tag goodness, try some hackery
         # the basic idea behind this is that in general, the cover image
@@ -101,52 +111,55 @@ def _get_cover(soup, rdr):
         r = {}
         for img in soup('img'):
             try:
-                r[abs(float(re.search(r'[0-9.]+',
-                    img['height']).group())/float(re.search(r'[0-9.]+',
-                        img['width']).group())-1.25)] = img['src']
+                m_h = re.search(r'[0-9.]+', cast('str', img['height']))
+                assert m_h is not None
+                m_w = re.search(r'[0-9.]+', cast('str', img['width']))
+                assert m_w is not None
+                r[abs(float(m_h.group()) / float(m_w.group()) - 1.25)] = cast('str', img['src'])
             except KeyError:
                 # interestingly, occasionally the only image without height
                 # or width attrs is the cover...
-                r[0] = img['src']
-            except:
+                r[0] = cast('str', img['src'])
+            except Exception:
                 # Probably invalid width, height aattributes, ignore
                 continue
         if r:
-            l = sorted(iterkeys(r))
+            l = sorted(r.keys())
             ans = r[l[0]]
     # this link comes from the internal html, which is in a subdir
     if ans is not None:
         try:
             ans = rdr.GetFile(ans)
-        except:
-            ans = rdr.root + "/" + ans
+        except Exception:
+            ans = rdr.root + '/' + ans
             try:
                 ans = rdr.GetFile(ans)
-            except:
+            except Exception:
                 ans = None
         if ans is not None:
-            from PIL import Image
             import io
+
+            from PIL import Image
+
             buf = io.BytesIO()
             try:
                 Image.open(io.BytesIO(ans)).convert('RGB').save(buf, 'JPEG')
                 ans = buf.getvalue()
-            except:
+            except Exception:
                 ans = None
     return ans
 
 
-def get_metadata_from_reader(rdr):
-    raw = rdr.GetFile(rdr.home)
-    home = BeautifulSoup(xml_to_unicode(raw, strip_encoding_pats=True,
-        resolve_entities=True)[0])
+def get_metadata_from_reader(rdr: CHMReader) -> Metadata:
+    raw = rdr.get_home()
+    home = BeautifulSoup(xml_to_unicode(raw, strip_encoding_pats=True, resolve_entities=True)[0])
 
     title = rdr.title
     try:
         x = rdr.GetEncoding()
         codecs.lookup(x)
         enc = x
-    except:
+    except Exception:
         enc = 'cp1252'
     title = force_unicode(title, enc)
     authors = _get_authors(home)
@@ -168,10 +181,11 @@ def get_metadata_from_reader(rdr):
     return mi
 
 
-def get_metadata(stream):
+def get_metadata(stream: IO[bytes]) -> Metadata:
     with TemporaryFile('_chm_metadata.chm') as fname:
         with open(fname, 'wb') as f:
             f.write(stream.read())
         from calibre.ebooks.chm.reader import CHMReader
+
         rdr = CHMReader(fname, default_log)
         return get_metadata_from_reader(rdr)

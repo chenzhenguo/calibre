@@ -1,19 +1,10 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
+
+from calibre.utils.magick.legacy import Image, PixelWand  # ruff: ignore[unused-import]
 
 
-__license__   = 'GPL v3'
-__copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-from calibre.utils.magick.legacy import Image, PixelWand
-from polyglot.builtins import unicode_type
-
-if False:
-    PixelWand
-
-
-def create_canvas(width, height, bgcolor='#ffffff'):
+def create_canvas(width: float, height: float, bgcolor: str = '#ffffff') -> Image:
     canvas = Image()
-    canvas.create_canvas(int(width), int(height), unicode_type(bgcolor))
+    canvas.create_canvas(int(width), int(height), str(bgcolor))
     return canvas

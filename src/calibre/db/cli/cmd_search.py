@@ -1,25 +1,37 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2017, Kovid Goyal <kovid at kovidgoyal.net>
 
+from typing import TYPE_CHECKING, cast
 
 from calibre import prints
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from optparse import Values
+
+    from calibre.db.cache import Cache
+    from calibre.db.cli.main import DBContext
+    from calibre.srv.changes import ChangeEvent
+    from calibre.utils.config import OptionParser
 
 readonly = True
 version = 0  # change this if you change signature of implementation()
 
 
-def implementation(db, notify_changes, query):
+def implementation(db: Cache, notify_changes: Callable[[ChangeEvent], None] | None, query: str) -> set[int]:
     from calibre.utils.search_query_parser import ParseException
+
+    is_remote = notify_changes is not None
     try:
-        return db.search(query)
+        return db.search(query, allow_templates=not is_remote)
     except ParseException as err:
         e = ValueError(_('Failed to parse search query: ({0}) with error: {1}').format(query, err))
-        e.suppress_traceback = True
+        setattr(e, 'suppress_traceback', True)
         raise e from err
 
 
-def option_parser(get_parser, args):
+def option_parser(get_parser: Callable[[str], OptionParser], args: Sequence[str]) -> OptionParser:
     parser = get_parser(
         _(
             '''\
@@ -39,17 +51,17 @@ language, for example: %prog search {0}
         '--limit',
         default=-1,
         type=int,
-        help=_('The maximum number of results to return. Default is all results.')
+        help=_('The maximum number of results to return. Default is all results.'),
     )
     return parser
 
 
-def main(opts, args, dbctx):
+def main(opts: Values, args: list[str], dbctx: DBContext) -> int:
     if len(args) < 1:
         raise SystemExit(_('Error: You must specify the search expression'))
     q = ' '.join(args)
     try:
-        ids = dbctx.run('search', q)
+        ids = cast('list[int] | set[int]', dbctx.run('search', q))
     except Exception as e:
         if getattr(e, 'suppress_traceback', False):
             raise SystemExit(str(e))
@@ -58,6 +70,6 @@ def main(opts, args, dbctx):
         raise SystemExit(_('No books matching the search expression:') + ' ' + q)
     ids = sorted(ids)
     if opts.limit > -1:
-        ids = ids[:opts.limit]
+        ids = ids[: opts.limit]
     prints(','.join(map(str, ids)), end='')
     return 0

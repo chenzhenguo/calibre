@@ -5,66 +5,90 @@ from __python__ import bound_methods, hash_literals
 from elementmaker import E
 from gettext import gettext as _
 
-from dom import add_extra_css, build_rule, clear, svgicon
-from iframe_comm import IframeWrapper
-from read_book.globals import runtime, ui_operations
+from book_list.theme import get_color
+from dom import add_extra_css, build_rule, clear, ensure_id, svgicon
+from iframe_comm import create_wrapped_iframe
+from read_book.book_storage import get_book_storage
+from read_book.globals import runtime, ui_operations, is_dark_theme
 from read_book.resources import load_resources
 
 CLASS_NAME = 'book-content-popup-container'
 TOP_LEVEL_DISPLAY = 'flex'
 
-add_extra_css(def():
+add_extra_css(def ():
     sel = '.' + CLASS_NAME
     style = ''
     style += build_rule(sel, justify_content='center', align_items='center', height='100%')
-
-    sel += ' > div'
+    sel += ' > div[role=dialog]'
     style += build_rule(sel, border_radius='8px', border='solid currentColor 2px', margin='1rem', padding='0.5rem', box_shadow='2px 2px 4px currentColor')
-
     sel += ' > div'
-    style += build_rule(sel, padding_bottom='1ex', margin_bottom='1ex', border_bottom='solid currentColor 2px', display='flex', justify_content='space-between', align_items='center')
-
-    sel += ' > div' # button container
     style += build_rule(sel, display='flex', justify_content='space-between', align_items='center')
-
-    sel += ' > a'  # buttons
-    style += build_rule(sel, margin_left='1ex', cursor='pointer', display='inline-block')
+    sel += ' > div'  # button container
+    style += build_rule(sel, display='flex', justify_content='space-between', align_items='center')
+    sel += ' > button'  # buttons
+    style += build_rule(sel, margin_left='1ex', cursor='pointer', display='inline-block',
+        # The buttons were links, keep their color
+        padding='0', border='none', background='none', color='LinkText', font='inherit', line_height='0')
     style += build_rule(sel + ':hover', transform='scale(1.5)')
     style += build_rule(sel + ':active', transform='scale(2)')
+    style += build_rule(sel + ':focus-visible', outline='2px solid ' + get_color('link-foreground'), outline_offset='2px')
     return style
 )
 
 
 class ContentPopupOverlay:
-
     def __init__(self, view):
         self.view = view
         self.loaded_resources = {}
         c = self.container
         c.classList.add(CLASS_NAME)
-        sandbox = 'allow-scripts'
-        if runtime.is_standalone_viewer:
-            sandbox += ' allow-same-origin'
-        iframe = E.iframe(seamless=True, sandbox=sandbox, style='width: 100%; max-height: 70vh')
-
-        c.appendChild(E.div(
-            E.div(),
-            iframe
-        ))
+        c.appendChild(E.div(E.div(), role='dialog', aria_modal='true'))
+        # Tabbing past the footnote, which is last in the popup, wraps
+        # around to the first button, so that focus stays in the popup
+        c.appendChild(E.div(tabindex='0', style='position: absolute; width: 0; height: 0; overflow: hidden', onfocus=def (): self.focus_first_button();))
         c.addEventListener('click', self.hide)
-        c.firstChild.addEventListener('click', def(ev):
+        c.firstChild.addEventListener('click', def (ev):
             ev.stopPropagation(), ev.preventDefault()
         )
+        c.firstChild.addEventListener('keydown', self.on_keydown)
+        self.pending_load = None
+
+    def reset(self):
+        if self.iframe_wrapper:
+            self.iframe_wrapper.reset()
+
+    def create_iframe(self):
         handlers = {
             'ready': self.on_iframe_ready,
             'error': self.view.on_iframe_error,
             'content_loaded': self.on_content_loaded,
+            'print': self.on_print,
+            'link_activated': self.on_link_activated,
+            'close_requested': self.on_close_requested,
+            'book_storage_changed': self.view.on_book_storage_changed,
         }
-        entry_point = None if runtime.is_standalone_viewer else 'read_book.footnotes'
-        self.iframe_wrapper = IframeWrapper(
-            handlers, iframe, entry_point, _('Loading data, please wait...'),
-            f'{runtime.FAKE_PROTOCOL}://{runtime.SANDBOX_HOST}/book/__popup__')
-        self.pending_load = None
+        iframe_kw = {
+            'seamless': True, 'sandbox': 'allow-scripts', 'style': 'width: 100%; max-height: 70vh'
+        }
+        if runtime.is_standalone_viewer:
+            entry_point = f'{runtime.FAKE_PROTOCOL}://{runtime.SANDBOX_HOST}/book/__popup__'
+        else:
+            entry_point = 'read_book.footnotes'
+        iframe, self.iframe_wrapper = create_wrapped_iframe(
+            handlers, _('Loading data, please wait...'), entry_point, iframe_kw
+        )
+        iframe.style.colorScheme = 'dark' if is_dark_theme() else 'light'
+        c = self.container
+        c.firstChild.appendChild(iframe)
+
+    def on_print(self, data):
+        print(data.string)
+
+    def on_link_activated(self, data):
+        self.view.link_in_content_popup_activated(data.name, data.frag, data.is_popup, data.title)
+
+    def on_close_requested(self, data):
+        self.hide()
 
     @property
     def container(self):
@@ -80,7 +104,33 @@ class ContentPopupOverlay:
 
     def hide(self):
         self.container.style.display = 'none'
+        # This also puts focus back on the link to the footnote in the book,
+        # as browsers restore focus in a window that regains it
         ui_operations.focus_iframe()
+
+    def buttons(self):
+        return self.container.firstChild.firstChild.querySelectorAll('button')
+
+    def focus_first_button(self):
+        b = self.buttons()[0]
+        if b:
+            b.focus()
+
+    def focus_footnote(self):
+        if self.iframe_wrapper:
+            self.iframe.focus()
+            self.iframe.contentWindow.focus()
+
+    def on_keydown(self, ev):
+        # Keys pressed in the footnote itself are handled in its frame, so
+        # these are for the buttons
+        if ev.key is 'Escape':
+            ev.stopPropagation(), ev.preventDefault()
+            self.hide()
+        elif ev.key is 'Tab' and ev.shiftKey and document.activeElement is self.buttons()[0]:
+            # Wrap around to the footnote, which is last in the popup
+            ev.stopPropagation(), ev.preventDefault()
+            self.focus_footnote()
 
     def show(self):
         c = self.container
@@ -93,17 +143,26 @@ class ContentPopupOverlay:
         c = self.container.firstChild
         c.style.backgroundColor = bg
         c.style.color = fg
+        try:
+            self.iframe.style.colorScheme = 'dark' if is_dark_theme() else 'light'
+        except:
+            pass
 
     def create_footnote_header(self, header):
         clear(header)
-        header.appendChild(
-            E.h3(self.current_footnote_data.title or _('Footnote')),
-        )
+        title = E.h3(self.current_footnote_data.title or _('Footnote'))
+        header.appendChild(title)
+        # The popup is a dialog named by its title
+        header.parentNode.setAttribute('aria-labelledby', ensure_id(title, 'footnote-title'))
+
+        def button(icon, text):
+            return E.button(svgicon(icon), type='button', title=text, aria_label=text)
+
         bc = E.div(
-            E.a(svgicon('arrow-right'), title=_('Go to this footnote in the main view'), href='javascript:void(0)'),
-            E.a(svgicon('close'), title=_('Close the footnotes window'), href='javascript:void(0)')
+            button('arrow-right', _('Go to this footnote in the main view')),
+            button('close', _('Close the footnotes window')),
         )
-        bc.firstChild.addEventListener('click', def():
+        bc.firstChild.addEventListener('click', def ():
                 self.hide()
                 self.view.goto_named_destination(self.current_footnote_data.name, self.current_footnote_data.frag)
         )
@@ -117,14 +176,34 @@ class ContentPopupOverlay:
         load_resources(self.view.book, name, self.loaded_resources, cb)
 
     def show_footnote(self, data):
+        if not self.iframe_wrapper:
+            self.create_iframe()
         self.current_footnote_data = data
-        width = 100 // data.cols_per_screen
         c = self.container.firstChild
-        c.style.width = f'{width}vw'
         header = c.firstChild
+        s = header.style
+        s.paddingLeft = s.paddingRight = s.paddingBottom = s.paddingTop = '0'
+        s.marginLeft = s.marginRight = s.marginBottom = s.marginTop = '0'
+        s.borderBottom = s.borderTop = s.borderLeft = s.borderRight = 'solid currentColor 0'
+        bs = 'solid currentColor 2px'
+        if self.current_footnote_data.vertical_writing_mode:
+            c.style.width = str(50 // data.cols_per_screen) + 'vw'
+            self.iframe.style.height = '80vh'
+            c.style.writingMode = 'vertical-rl' if self.current_footnote_data.rtl else 'vertical-lr'
+            if self.current_footnote_data.rtl:
+                s.paddingLeft = s.marginLeft = '1ex'
+                s.borderLeft = bs
+            else:
+                s.paddingRight = s.marginRight = '1ex'
+                s.borderRight = bs
+        else:
+            c.style.width = str(100 // data.cols_per_screen) + 'vw'
+            self.iframe.style.height = '12ex'
+            c.style.writingMode = 'horizontal-rl' if self.current_footnote_data.rtl else 'horizontal-lr'
+            s.paddingBottom = s.marginBottom = '1ex'
+            s.borderBottom = bs
         self.create_footnote_header(header)
         self.load_doc(data.name, self.show_footnote_item)
-        self.iframe.style.height = '12ex'
         self.iframe_wrapper.send_message('clear', text=_('Loading note, please wait...'))
 
     def show_footnote_item(self, resource_data):
@@ -143,7 +222,12 @@ class ContentPopupOverlay:
     def show_footnote_item_stage2(self, resource_data):
         self.iframe_wrapper.send_unencrypted_message('display',
             resource_data=resource_data, book=self.view.book, name=self.current_footnote_data.name,
-            frag=self.current_footnote_data.frag, settings=self.view.currently_showing.settings)
+            frag=self.current_footnote_data.frag, settings=self.view.currently_showing.settings,
+            book_storage=get_book_storage(self.view.book))
 
     def on_content_loaded(self, data):
         self.iframe.style.height = f'{data.height}px'
+        if self.is_visible:
+            # Move focus to the footnote, so that it is read out and can be
+            # scrolled with the keyboard
+            self.focus_footnote()

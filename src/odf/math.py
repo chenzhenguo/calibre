@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (C) 2006-2007 Søren Roug, European Environment Agency
 #
 # This library is free software; you can redistribute it and/or
@@ -19,8 +18,8 @@
 #
 
 
-from .namespaces import MATHNS
 from .element import Element
+from .namespaces import MATHNS
 
 # ODF 1.0 section 12.5
 # Mathematical content is represented by MathML 2.0
@@ -29,4 +28,4 @@ from .element import Element
 
 
 def Math(**args):
-    return Element(qname=(MATHNS,'math'), **args)
+    return Element(qname=(MATHNS, 'math'), **args)

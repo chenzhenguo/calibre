@@ -1,4 +1,3 @@
-
 __license__ = 'GPL v3'
 __copyright__ = '2010, Darko Miletic <darko.miletic at gmail.com>'
 '''
@@ -11,7 +10,7 @@ from calibre.web.feeds.news import BasicNewsRecipe
 class theonlinephotographer(BasicNewsRecipe):
     title = 'The Online Photographer'
     __author__ = 'Darko Miletic'
-    description = 'A photography news and information website in the form of a weblog with multiple authors who write on a variety of photography and art-photography related issues.'  # noqa
+    description = 'A photography news and information website in the form of a weblog with multiple authors who write on a variety of photography and art-photography related issues.'  # ruff: ignore[line-too-long]
     publisher = 'The Online Photographer'
     category = 'news, blog, photograph, international'
     oldest_article = 15
@@ -24,11 +23,9 @@ class theonlinephotographer(BasicNewsRecipe):
 
     extra_css = ' body{font-family: Georgia,"Times New Roman",serif } '
 
-    conversion_options = {
-        'comment': description, 'tags': category, 'publisher': publisher, 'language': language
-    }
+    conversion_options = {'comment': description, 'tags': category, 'publisher': publisher, 'language': language}
 
-    feeds = [(u'Articles', u'http://feeds.feedburner.com/typepad/ZSjz')]
+    feeds = [('Articles', 'http://feeds.feedburner.com/typepad/ZSjz')]
     remove_tags_before = dict(name='h3', attrs={'class': 'entry-header'})
     remove_tags_after = dict(name='div', attrs={'class': 'entry-footer'})
     remove_tags = [dict(name=['object', 'link', 'iframe'])]

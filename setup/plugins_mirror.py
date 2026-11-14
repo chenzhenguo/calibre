@@ -1,11 +1,8 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
-from __future__ import absolute_import, division, print_function, unicode_literals
 
 # Imports {{{
-
-
+import argparse
 import ast
 import atexit
 import bz2
@@ -25,18 +22,19 @@ import tempfile
 import time
 import zipfile
 import zlib
-from collections import namedtuple
 from contextlib import closing
 from datetime import datetime
 from email.utils import parsedate
 from functools import partial
 from multiprocessing.pool import ThreadPool
+from typing import NamedTuple
 from xml.sax.saxutils import escape, quoteattr
 
 try:
     from html import unescape as u
 except ImportError:
     from HTMLParser import HTMLParser
+
     u = HTMLParser().unescape
 
 try:
@@ -46,37 +44,51 @@ except ImportError:
 
 
 try:
-    from urllib.error import URLError
-    from urllib.request import urlopen, Request, build_opener
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, build_opener, urlopen
 except Exception:
-    from urllib2 import urlopen, Request, build_opener, URLError
+    from urllib2 import HTTPError, Request, URLError, build_opener, urlopen
 # }}}
 
 USER_AGENT = 'calibre mirror'
 MR_URL = 'https://www.mobileread.com/forums/'
 IS_PRODUCTION = os.path.exists('/srv/plugins')
-WORKDIR = '/srv/plugins' if IS_PRODUCTION else '/t/plugins'
 PLUGINS = 'plugins.json.bz2'
 INDEX = MR_URL + 'showpost.php?p=1362767&postcount=1'
 # INDEX = 'file:///t/raw.html'
 
-IndexEntry = namedtuple('IndexEntry', 'name url donate history uninstall deprecated thread_id')
 socket.setdefaulttimeout(30)
 
 
+class IndexEntry(NamedTuple):
+    name: str
+    url: str
+    donate: str | None
+    history: bool
+    uninstall: tuple[str, ...] | None
+    deprecated: bool
+    thread_id: str | None
+    category: str
+
+
 def read(url, get_info=False):  # {{{
-    if url.startswith("file://"):
+    if url.startswith('file://'):
         return urlopen(url).read()
     opener = build_opener()
     opener.addheaders = [
         ('User-Agent', USER_AGENT),
         ('Accept-Encoding', 'gzip,deflate'),
     ]
-    # Sporadic network failures in rackspace, so retry with random sleeps
+    # Sporadic network failures in rackspace, so retry with random sleeps.
+    # Also retry on HTTP 429 (rate-limit) with exponential backoff: 5s, 10s, 20s, 40s, 60s, 60s, ...
     for i in range(10):
         try:
             res = opener.open(url)
             break
+        except HTTPError as e:
+            if e.code != 429 or i == 9:
+                raise
+            time.sleep(min(5 * (2**i), 60))
         except URLError as e:
             if not isinstance(e.reason, socket.timeout) or i == 9:
                 raise
@@ -93,6 +105,8 @@ def read(url, get_info=False):  # {{{
     if get_info:
         return raw, info
     return raw
+
+
 # }}}
 
 
@@ -104,19 +118,60 @@ def url_to_plugin_id(url, deprecated):
     return ans
 
 
-def parse_index(raw=None):  # {{{
-    raw = raw or read(INDEX).decode('utf-8', 'replace')
+def decode_html(raw_bytes, info=None):
+    charset = 'cp1252'
+    if info is not None:
+        try:
+            content_type = info.get('Content-Type', '')
+            if 'charset=' in content_type:
+                charset = content_type.split('charset=')[-1].strip()
+        except Exception:
+            pass
+    c = charset.lower().replace('_', '-').replace(' ', '')
+    if c in ('iso-8859-1', 'latin-1', 'latin1', 'iso8859-1', 'iso_8859-1'):
+        charset = 'cp1252'
+    try:
+        return raw_bytes.decode(charset, 'replace')
+    except Exception:
+        return raw_bytes.decode('cp1252', 'replace')
 
-    dep_start = raw.index('>Deprecated/Renamed/Retired Plugins:<')
+
+def parse_index(raw=None):  # {{{
+    if raw is None:
+        res = read(INDEX, get_info=True)
+        if isinstance(res, tuple):
+            raw_bytes, info = res
+            raw = decode_html(raw_bytes, info)
+        else:
+            raw = decode_html(res)
+
     dpat = re.compile(r'''(?is)Donate\s*:\s*<a\s+href=['"](.+?)['"]''')
     key_pat = re.compile(r'''(?is)(History|Uninstall)\s*:\s*([^<;]+)[<;]''')
     seen = {}
+    dep_start = -1
+    category_offsets = []
+    deprecated_category = 'Deprecated/Renamed/Retired'
+    for match in re.finditer(r'''<b>\s*(.+?)\s*Plugins:?\s*</b>''', raw):
+        category = match.group(1).strip()
+        category_offsets.append((category, match.start()))
+        if category == deprecated_category:
+            dep_start = match.start()
+    if dep_start < 1:
+        raise ValueError('Could not find start of deprecated plugins')
+    category_offsets = tuple(reversed(category_offsets))
 
-    for match in re.finditer(r'''(?is)<li.+?<a\s+href=['"](https://www.mobileread.com/forums/showthread.php\?[pt]=\d+).+?>(.+?)<(.+?)</li>''', raw):
-        deprecated = match.start() > dep_start
+    def category_at(offset):
+        for category, q in category_offsets:
+            if offset >= q:
+                return category
+        raise ValueError('Could not find category for offset: ' + str(offset))
+
+    for match in re.finditer(r'''(?is)<li.+?<a\s+href=['"](https://www\.mobileread\.com/forums/showthread\.php\?[pt]=\d+).+?>(.+?)<(.+?)</li>''', raw):
+        name, url, rest = u(match.group(2)), u(match.group(1)), match.group(3)
+        category = category_at(match.start(2))
+        deprecated = category == deprecated_category
         donate = uninstall = None
         history = False
-        name, url, rest = u(match.group(2)), u(match.group(1)), match.group(3)
         m = dpat.search(rest)
         if m is not None:
             donate = u(m.group(1))
@@ -129,10 +184,12 @@ def parse_index(raw=None):  # {{{
 
         thread_id = url_to_plugin_id(url, deprecated)
         if thread_id in seen:
-            raise ValueError('thread_id for %s and %s is the same: %s' % (seen[thread_id], name, thread_id))
+            raise ValueError(f'thread_id for {seen[thread_id]} and {name} is the same: {thread_id}')
         seen[thread_id] = name
-        entry = IndexEntry(name, url, donate, history, uninstall, deprecated, thread_id)
+        entry = IndexEntry(name, url, donate, history, uninstall, deprecated, thread_id, category)
         yield entry
+
+
 # }}}
 
 
@@ -148,18 +205,24 @@ def load_plugins_index():
     try:
         with open(PLUGINS, 'rb') as f:
             raw = f.read()
-    except IOError as err:
+    except OSError as err:
         if err.errno == errno.ENOENT:
             return {}
         raise
     return json.loads(bz2.decompress(raw))
 
+
 # Get metadata from plugin zip file {{{
 
 
-def convert_node(fields, x, names={}, import_data=None):
+def convert_node(fields, x, names=None, import_data=None):
+    if names is None:
+        names = {}
     name = x.__class__.__name__
-    conv = lambda x:convert_node(fields, x, names=names, import_data=import_data)
+
+    def conv(x):
+        return convert_node(fields, x, names=names, import_data=import_data)
+
     if name == 'Str':
         return x.s.decode('utf-8') if isinstance(x.s, bytes) else x.s
     elif name == 'Num':
@@ -167,20 +230,20 @@ def convert_node(fields, x, names={}, import_data=None):
     elif name == 'Constant':
         return x.value
     elif name in {'Set', 'List', 'Tuple'}:
-        func = {'Set':set, 'List':list, 'Tuple':tuple}[name]
+        func = {'Set': set, 'List': list, 'Tuple': tuple}[name]
         return func(list(map(conv, x.elts)))
     elif name == 'Dict':
         keys, values = list(map(conv, x.keys)), list(map(conv, x.values))
         return dict(zip(keys, values))
     elif name == 'Call':
         if len(x.args) != 1 and len(x.keywords) != 0:
-            raise TypeError('Unsupported function call for fields: %s' % (fields,))
+            raise TypeError(f'Unsupported function call for fields: {fields}')
         return tuple(map(conv, x.args))[0]
     elif name == 'Name':
         if x.id not in names:
             if import_data is not None and x.id in import_data[0]:
                 return get_import_data(x.id, import_data[0][x.id], *import_data[1:])
-            raise ValueError('Could not find name %s for fields: %s' % (x.id, fields))
+            raise ValueError(f'Could not find name {x.id} for fields: {fields}')
         return names[x.id]
     elif name == 'BinOp':
         if x.right.__class__.__name__ == 'Str':
@@ -189,13 +252,15 @@ def convert_node(fields, x, names={}, import_data=None):
             return x.right.value
     elif name == 'Attribute':
         return conv(getattr(conv(x.value), x.attr))
-    raise TypeError('Unknown datatype %s for fields: %s' % (x, fields))
+    raise TypeError(f'Unknown datatype {x} for fields: {fields}')
 
 
-Alias = namedtuple('Alias', 'name asname')
+class Alias(NamedTuple):
+    name: str
+    asname: str | None
 
 
-class Module(object):
+class Module:
     pass
 
 
@@ -222,9 +287,9 @@ def get_import_data(name, mod, zf, names):
                     return convert_node({x}, node.value)
         if is_module_import:
             return module
-        raise ValueError('Failed to find name: %r in module: %r' % (name, mod))
+        raise ValueError(f'Failed to find name: {name!r} in module: {mod!r}')
     else:
-        raise ValueError('Failed to find module: %r' % mod)
+        raise ValueError(f'Failed to find module: {mod!r}')
 
 
 def parse_metadata(raw, namelist, zf):
@@ -233,11 +298,12 @@ def parse_metadata(raw, namelist, zf):
     top_level_classes = tuple(x for x in ast.iter_child_nodes(module) if x.__class__.__name__ == 'ClassDef')
     top_level_assigments = [x for x in ast.iter_child_nodes(module) if x.__class__.__name__ == 'Assign']
     defaults = {
-        'name':'', 'description':'',
-        'supported_platforms':['windows', 'osx', 'linux'],
-        'version':(1, 0, 0),
-        'author':'Unknown',
-        'minimum_calibre_version':(0, 9, 42)
+        'name': '',
+        'description': '',
+        'supported_platforms': ['windows', 'osx', 'linux'],
+        'version': (1, 0, 0),
+        'author': 'Unknown',
+        'minimum_calibre_version': (0, 9, 42),
     }
     field_names = set(defaults)
     imported_names = {}
@@ -249,23 +315,34 @@ def parse_metadata(raw, namelist, zf):
         mod = getattr(node, 'module', None)
         if names and mod:
             names = [Alias(n.name, getattr(n, 'asname', None)) for n in names]
-            if mod in {
-                'calibre.customize', 'calibre.customize.conversion',
-                'calibre.ebooks.metadata.sources.base', 'calibre.ebooks.metadata.sources.amazon', 'calibre.ebooks.metadata.covers',
-                'calibre.devices.interface', 'calibre.ebooks.metadata.fetch', 'calibre.customize.builtins',
-                       } or re.match(r'calibre\.devices\.[a-z0-9]+\.driver', mod) is not None:
+            if (
+                mod
+                in {
+                    'calibre.customize',
+                    'calibre.customize.conversion',
+                    'calibre.ebooks.metadata.sources.base',
+                    'calibre.ebooks.metadata.sources.amazon',
+                    'calibre.ebooks.metadata.covers',
+                    'calibre.devices.interface',
+                    'calibre.ebooks.metadata.fetch',
+                    'calibre.customize.builtins',
+                }
+                or re.match(r'calibre\.devices\.[a-z0-9]+\.driver', mod) is not None
+            ):
                 inames = {n.asname or n.name for n in names}
                 inames = {x for x in inames if x.lower() != x}
                 plugin_import_found |= inames
             else:
                 all_imports.append((mod, [n.name for n in names]))
-                imported_names[names[-1].asname or names[-1].name] = mod
+                for alias in names:
+                    imported_names[alias.asname or alias.name] = mod
     if not plugin_import_found:
         return all_imports
 
     import_data = (imported_names, zf, namelist)
 
     names = {}
+    top_level_ann_assigments = [x for x in ast.iter_child_nodes(module) if x.__class__.__name__ == 'AnnAssign']
     for node in top_level_assigments:
         targets = {getattr(t, 'id', None) for t in node.targets}
         targets.discard(None)
@@ -276,14 +353,38 @@ def parse_metadata(raw, namelist, zf):
                 pass
             else:
                 names[x] = val
+    for node in top_level_ann_assigments:
+        if node.value is None:
+            continue
+        x = getattr(node.target, 'id', None)
+        if x is None or x in field_names:
+            continue
+        try:
+            val = convert_node({x}, node.value, import_data=import_data)
+        except Exception:
+            pass
+        else:
+            names[x] = val
 
     def parse_class(node):
         class_assigments = [x for x in ast.iter_child_nodes(node) if x.__class__.__name__ == 'Assign']
+        class_ann_assigments = [x for x in ast.iter_child_nodes(node) if x.__class__.__name__ == 'AnnAssign']
         found = {}
         for node in class_assigments:
             targets = {getattr(t, 'id', None) for t in node.targets}
             targets.discard(None)
             fields = field_names.intersection(targets)
+            if fields:
+                val = convert_node(fields, node.value, names=names, import_data=import_data)
+                for field in fields:
+                    found[field] = val
+        for node in class_ann_assigments:
+            if node.value is None:
+                continue
+            target_id = getattr(node.target, 'id', None)
+            if target_id is None:
+                continue
+            fields = field_names.intersection({target_id})
             if fields:
                 val = convert_node(fields, node.value, names=names, import_data=import_data)
                 for field in fields:
@@ -308,63 +409,83 @@ def parse_metadata(raw, namelist, zf):
     raise ValueError('Could not find plugin class')
 
 
-def get_plugin_info(raw):
-    metadata = None
-    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-        names = {x.decode('utf-8') if isinstance(x, bytes) else x : x for x in zf.namelist()}
-        inits = [x for x in names if x.rpartition('/')[-1] == '__init__.py']
-        inits.sort(key=lambda x:x.count('/'))
-        if inits and inits[0] == '__init__.py':
-            metadata = names[inits[0]]
-        else:
-            # Legacy plugin
-            for name, val in names.items():
-                if name.endswith('plugin.py'):
-                    metadata = val
-                    break
-        if metadata is None:
-            raise ValueError('No __init__.py found in plugin')
-        raw = zf.open(metadata).read()
-        ans = parse_metadata(raw, names, zf)
-        if isinstance(ans, dict):
-            return ans
-        # The plugin is importing its base class from somewhere else, le sigh
-        for mod, _ in ans:
-            mod = mod.split('.')
-            if mod[0] == 'calibre_plugins':
-                mod = mod[2:]
-            mod = '/'.join(mod) + '.py'
-            if mod in names:
-                raw = zf.open(names[mod]).read()
-                ans = parse_metadata(raw, names, zf)
-                if isinstance(ans, dict):
-                    return ans
+def parse_plugin(raw, names, zf):
+    ans = parse_metadata(raw, names, zf)
+    if isinstance(ans, dict):
+        return ans
+    # The plugin is importing its base class from somewhere else, le sigh
+    for mod, _ in ans:
+        mod = mod.split('.')
+        if mod[0] == 'calibre_plugins':
+            mod = mod[2:]
+        mod = '/'.join(mod) + '.py'
+        if mod in names:
+            raw = zf.open(names[mod]).read()
+            ans = parse_metadata(raw, names, zf)
+            if isinstance(ans, dict):
+                return ans
 
     raise ValueError('Failed to find plugin class')
 
 
+def get_plugin_init(zf):
+    metadata = None
+    names = {x.decode('utf-8') if isinstance(x, bytes) else x: x for x in zf.namelist()}
+    inits = [x for x in names if x.rpartition('/')[-1] == '__init__.py']
+    inits.sort(key=lambda x: x.count('/'))
+    if inits and inits[0] == '__init__.py':
+        metadata = names[inits[0]]
+    else:
+        # Legacy plugin
+        for name, val in names.items():
+            if name.endswith('plugin.py'):
+                metadata = val
+                break
+    if metadata is None:
+        raise ValueError('No __init__.py found in plugin')
+    return zf.open(metadata).read(), names
+
+
+def get_plugin_info(raw_zip):
+    with zipfile.ZipFile(io.BytesIO(raw_zip)) as zf:
+        raw, names = get_plugin_init(zf)
+        try:
+            return parse_plugin(raw, names, zf)
+        except (SyntaxError, TabError, IndentationError):  # fmt: skip
+            with tempfile.NamedTemporaryFile(suffix='.zip') as f:
+                f.write(raw_zip)
+                f.flush()
+                res = subprocess.run(['python2', __file__, f.name], stdout=subprocess.PIPE)
+                if res.returncode == 0:
+                    return json.loads(res.stdout)
+            raise
+
+
 # }}}
+
 
 def update_plugin_from_entry(plugin, entry):
     plugin['index_name'] = entry.name
     plugin['thread_url'] = entry.url
+    plugin['category'] = entry.category
     for x in ('donate', 'history', 'deprecated', 'uninstall', 'thread_id'):
         plugin[x] = getattr(entry, x)
 
 
 def fetch_plugin(old_index, entry):
-    lm_map = {plugin['thread_id']:plugin for plugin in old_index.values()}
-    raw = read(entry.url).decode('utf-8', 'replace')
+    lm_map = {plugin['thread_id']: plugin for plugin in old_index.values()}
+    res = read(entry.url, get_info=True)
+    raw = decode_html(*res)
     url, name = parse_plugin_zip_url(raw)
     if url is None:
-        raise ValueError('Failed to find zip file URL for entry: %s' % repr(entry))
+        raise ValueError(f'Failed to find zip file URL for entry: {entry!r}')
     plugin = lm_map.get(entry.thread_id, None)
 
     if plugin is not None:
         # Previously downloaded plugin
         lm = datetime(*tuple(map(int, re.split(r'\D', plugin['last_modified'])))[:6])
         request = Request(url)
-        request.get_method = lambda : 'HEAD'
+        request.get_method = lambda: 'HEAD'
         with closing(urlopen(request)) as response:
             info = response.info()
         slm = datetime(*parsedate(info.get('Last-Modified'))[:6])
@@ -377,7 +498,7 @@ def fetch_plugin(old_index, entry):
     slm = datetime(*parsedate(info.get('Last-Modified'))[:6])
     plugin = get_plugin_info(raw)
     plugin['last_modified'] = slm.isoformat()
-    plugin['file'] = 'staging_%s.zip' % entry.thread_id
+    plugin['file'] = f'staging_{entry.thread_id}.zip'
     plugin['size'] = len(raw)
     plugin['original_url'] = url
     update_plugin_from_entry(plugin, entry)
@@ -391,6 +512,7 @@ def parallel_fetch(old_index, entry):
         return fetch_plugin(old_index, entry)
     except Exception:
         import traceback
+
         return traceback.format_exc()
 
 
@@ -404,16 +526,23 @@ def log(*args, **kwargs):
 def atomic_write(raw, name):
     with tempfile.NamedTemporaryFile(dir=os.getcwd(), delete=False) as f:
         f.write(raw)
-        os.fchmod(f.fileno(), stat.S_IREAD|stat.S_IWRITE|stat.S_IRGRP|stat.S_IROTH)
+        os.fchmod(f.fileno(), stat.S_IREAD | stat.S_IWRITE | stat.S_IRGRP | stat.S_IROTH)
         os.rename(f.name, name)
 
 
-def fetch_plugins(old_index):
-    ans = {}
-    pool = ThreadPool(processes=10)
-    entries = tuple(parse_index())
-    if not entries:
+def fetch_plugins(old_index, thread_id=None):
+    all_entries = tuple(parse_index())
+    if not all_entries:
         raise SystemExit('Could not find any plugins, probably the markup on the MR index page has changed')
+    if thread_id is not None:
+        entries = tuple(e for e in all_entries if e.thread_id == thread_id)
+        if not entries:
+            raise SystemExit(f'No plugin with thread_id {thread_id!r} found in the MR index')
+        ans = dict(old_index)
+    else:
+        entries = all_entries
+        ans = {}
+    pool = ThreadPool(processes=min(10, len(entries)))
     with closing(pool):
         result = pool.map(partial(parallel_fetch, old_index), entries)
     for entry, plugin in zip(entries, result):
@@ -422,7 +551,7 @@ def fetch_plugins(old_index):
         else:
             if entry.name in old_index:
                 ans[entry.name] = old_index[entry.name]
-            log('Failed to get plugin', entry.name, 'at', datetime.utcnow().isoformat(), 'with error:')
+            log('Failed to get plugin', entry.name, 'at', datetime.now().isoformat(), 'with error:')
             log(plugin)
     # Move staged files
     for plugin in ans.values():
@@ -432,42 +561,43 @@ def fetch_plugins(old_index):
             os.rename(src, plugin['file'])
     raw = bz2.compress(json.dumps(ans, sort_keys=True, indent=4, separators=(',', ': ')).encode('utf-8'))
     atomic_write(raw, PLUGINS)
-    # Cleanup any extra .zip files
-    all_plugin_files = {p['file'] for p in ans.values()}
-    extra = set(glob.glob('*.zip')) - all_plugin_files
-    for x in extra:
-        os.unlink(x)
+    if thread_id is None:
+        # Cleanup any extra .zip files only on full sync
+        all_plugin_files = {p['file'] for p in ans.values()}
+        extra = set(glob.glob('*.zip')) - all_plugin_files
+        for x in extra:
+            os.unlink(x)
     return ans
 
 
 def plugin_to_index(plugin, count):
-    title = '<h3><img src="plugin-icon.png"><a href=%s title="Plugin forum thread">%s</a></h3>' % (  # noqa
-        quoteattr(plugin['thread_url']), escape(plugin['name']))
+    title = '<h3><img src="plugin-icon.png"><a href={} title="Plugin forum thread">{}</a></h3>'.format(quoteattr(plugin['thread_url']), escape(plugin['name']))
     released = datetime(*tuple(map(int, re.split(r'\D', plugin['last_modified'])))[:6]).strftime('%e %b, %Y').lstrip()
     details = [
-        'Version: <b>%s</b>' % escape('.'.join(map(str, plugin['version']))),
-        'Released: <b>%s</b>' % escape(released),
-        'Author: %s' % escape(plugin['author']),
-        'calibre: %s' % escape('.'.join(map(str, plugin['minimum_calibre_version']))),
-        'Platforms: %s' % escape(', '.join(sorted(plugin['supported_platforms']) or ['all'])),
+        'Version: <b>{}</b>'.format(escape('.'.join(map(str, plugin['version'])))),
+        f'Released: <b>{escape(released)}</b>',
+        'Author: {}'.format(escape(plugin['author'])),
+        'calibre: {}'.format(escape('.'.join(map(str, plugin['minimum_calibre_version'])))),
+        'Platforms: {}'.format(escape(', '.join(sorted(plugin['supported_platforms']) or ['all']))),
     ]
     if plugin['uninstall']:
-        details.append('Uninstall: %s' % escape(', '.join(plugin['uninstall'])))
+        details.append('Uninstall: {}'.format(escape(', '.join(plugin['uninstall']))))
     if plugin['donate']:
-        details.append('<a href=%s title="Donate">Donate</a>' % quoteattr(plugin['donate']))
+        details.append('<a href={} title="Donate">Donate</a>'.format(quoteattr(plugin['donate'])))
     block = []
     for li in details:
         if li.startswith('calibre:'):
             block.append('<br>')
-        block.append('<li>%s</li>' % li)
-    block = '<ul>%s</ul>' % ('\n'.join(block))
-    downloads = ('\xa0<span class="download-count">[%d total downloads]</span>' % count) if count else ''
-    zipfile = '<div class="end"><a href=%s title="Download plugin" download=%s>Download plugin \u2193</a>%s</div>' % (
-        quoteattr(plugin['file']), quoteattr(plugin['name'] + '.zip'), downloads)
+        block.append(f'<li>{li}</li>')
+    block = '<ul>{}</ul>'.format('\n'.join(block))
+    downloads = (f'\xa0<span class="download-count">[{count} total downloads]</span>') if count else ''
+    zipfile = '<div class="end"><a href={} title="Download plugin" download={}>Download plugin \u2193</a>{}</div>'.format(
+        quoteattr(plugin['file']), quoteattr(plugin['name'] + '.zip'), downloads
+    )
     desc = plugin['description'] or ''
     if desc:
-        desc = '<p>%s</p>' % desc
-    return '%s\n%s\n%s\n%s\n\n' % (title, desc, block, zipfile)
+        desc = f'<p>{desc}</p>'
+    return f'{title}\n{desc}\n{block}\n{zipfile}\n\n'
 
 
 def create_index(index, raw_stats):
@@ -479,8 +609,7 @@ def create_index(index, raw_stats):
             count = raw_stats.get(plugin['file'].rpartition('.')[0], 0)
             if count > 0:
                 stats[plugin['name']] = count
-            plugins.append(
-                plugin_to_index(plugin, count))
+            plugins.append(plugin_to_index(plugin, count))
     index = '''\
 <!DOCTYPE html>
 <html>
@@ -505,21 +634,21 @@ h1 { text-align: center }
 <div style="text-align:center"><a href="stats.html">Download counts for all plugins</a></div>
 %s
 </body>
-</html>''' % ('\n'.join(plugins))
+</html>''' % ('\n'.join(plugins))  # ruff: ignore[printf-string-formatting]
     raw = index.encode('utf-8')
     try:
         with open('index.html', 'rb') as f:
             oraw = f.read()
-    except EnvironmentError:
+    except OSError:
         oraw = None
     if raw != oraw:
         atomic_write(raw, 'index.html')
 
     def plugin_stats(x):
         name, count = x
-        return '<tr><td>%s</td><td>%s</td></tr>\n' % (escape(name), count)
+        return f'<tr><td>{escape(name)}</td><td>{count}</td></tr>\n'
 
-    pstats = list(map(plugin_stats, sorted(stats.items(), reverse=True, key=lambda x:x[1])))
+    pstats = list(map(plugin_stats, sorted(stats.items(), reverse=True, key=lambda x: x[1])))
     stats = '''\
 <!DOCTYPE html>
 <html>
@@ -539,12 +668,12 @@ h1 { text-align: center }
 </table>
 </body>
 </html>
-    ''' % ('\n'.join(pstats))
+    ''' % ('\n'.join(pstats))  # ruff: ignore[printf-string-formatting]
     raw = stats.encode('utf-8')
     try:
         with open('stats.html', 'rb') as f:
             oraw = f.read()
-    except EnvironmentError:
+    except OSError:
         oraw = None
     if raw != oraw:
         atomic_write(raw, 'stats.html')
@@ -558,7 +687,7 @@ def singleinstance():
     s = _singleinstance = socket.socket(socket.AF_UNIX)
     try:
         s.bind(b'\0calibre-plugins-mirror-singleinstance')
-    except socket.error as err:
+    except OSError as err:
         if getattr(err, 'errno', None) == errno.EADDRINUSE:
             return False
         raise
@@ -574,7 +703,7 @@ def update_stats():
         try:
             with open('stats.json', 'rb') as f:
                 stats = json.load(f)
-        except EnvironmentError as err:
+        except OSError as err:
             if err.errno != errno.ENOENT:
                 raise
         if os.geteuid() != 0:
@@ -583,12 +712,13 @@ def update_stats():
         os.rename(olog, log)
         subprocess.check_call(['/usr/sbin/nginx', '-s', 'reopen'])
         atexit.register(os.remove, log)
-    pat = re.compile(br'GET /(\d+)(?:-deprecated){0,1}\.zip')
-    for line in open(log, 'rb'):
-        m = pat.search(line)
-        if m is not None:
-            plugin = m.group(1).decode('utf-8')
-            stats[plugin] = stats.get(plugin, 0) + 1
+    pat = re.compile(rb'GET /(\d+)(?:-deprecated){0,1}\.zip')
+    with open(log, 'rb') as f:
+        for line in f:
+            m = pat.search(line)
+            if m is not None:
+                plugin = m.group(1).decode('utf-8')
+                stats[plugin] = stats.get(plugin, 0) + 1
     data = json.dumps(stats, indent=2)
     if not isinstance(data, bytes):
         data = data.encode('utf-8')
@@ -597,18 +727,25 @@ def update_stats():
     return stats
 
 
+def parse_single_plugin(zipfile_path):
+    with zipfile.ZipFile(zipfile_path) as zf:
+        raw, names = get_plugin_init(zf)
+        ans = parse_plugin(raw, names, zf)
+        sys.stdout.write(json.dumps(ans, ensure_ascii=True))
+
+
 def main():
-    try:
-        os.chdir(WORKDIR)
-    except OSError as err:
-        if err.errno == errno.ENOENT:
-            try:
-                os.makedirs(WORKDIR)
-            except EnvironmentError:
-                pass
-            os.chdir(WORKDIR)
-        else:
-            raise
+    p = argparse.ArgumentParser(description='Mirror calibre plugins from the forums. Or parse a single plugin zip file if specified on the command line')
+    p.add_argument('plugin_path', nargs='?', default='', help='Path to plugin zip file to parse')
+    WORKDIR = '/srv/plugins' if IS_PRODUCTION else '/t/plugins'
+    p.add_argument('-o', '--output-dir', default=WORKDIR, help='Where to place the mirrored plugins. Default is: ' + WORKDIR)
+    p.add_argument('--thread-id', default=None, help='Only download/update the plugin with this thread ID (e.g. 1234 or 1234-deprecated)')
+    args = p.parse_args()
+    if args.plugin_path:
+        return parse_single_plugin(args.plugin_path)
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    os.chdir(args.output_dir)
     if os.geteuid() == 0 and not singleinstance():
         print('Another instance of plugins-mirror is running', file=sys.stderr)
         raise SystemExit(1)
@@ -616,70 +753,17 @@ def main():
     stats = update_stats()
     try:
         plugins_index = load_plugins_index()
-        plugins_index = fetch_plugins(plugins_index)
+        plugins_index = fetch_plugins(plugins_index, thread_id=args.thread_id)
         create_index(plugins_index, stats)
-    except:
+    except KeyboardInterrupt:
+        raise SystemExit('Exiting on user interrupt')
+    except Exception:
         import traceback
-        log('Failed to run at:', datetime.utcnow().isoformat())
+
+        log('Failed to run at:', datetime.now().isoformat())
         log(traceback.format_exc())
         raise SystemExit(1)
 
-
-def test_parse():  # {{{
-    raw = read(INDEX).decode('utf-8', 'replace')
-
-    old_entries = []
-    from lxml import html
-    root = html.fromstring(raw)
-    list_nodes = root.xpath('//div[@id="post_message_1362767"]/ul/li')
-    # Add our deprecated plugins which are nested in a grey span
-    list_nodes.extend(root.xpath('//div[@id="post_message_1362767"]/span/ul/li'))
-    for list_node in list_nodes:
-        name = list_node.xpath('a')[0].text_content().strip()
-        url = list_node.xpath('a/@href')[0].strip()
-
-        description_text = list_node.xpath('i')[0].text_content()
-        description_parts = description_text.partition('Version:')
-
-        details_text = description_parts[1] + description_parts[2].replace('\r\n','')
-        details_pairs = details_text.split(';')
-        details = {}
-        for details_pair in details_pairs:
-            pair = details_pair.split(':')
-            if len(pair) == 2:
-                key = pair[0].strip().lower()
-                value = pair[1].strip()
-                details[key] = value
-
-        donation_node = list_node.xpath('i/span/a/@href')
-        donate = donation_node[0] if donation_node else None
-        uninstall = tuple(x.strip() for x in details.get('uninstall', '').strip().split(',') if x.strip()) or None
-        history = details.get('history', 'No').lower() in ['yes', 'true']
-        deprecated = details.get('deprecated', 'No').lower() in ['yes', 'true']
-        old_entries.append(IndexEntry(name, url, donate, history, uninstall, deprecated, url_to_plugin_id(url, deprecated)))
-
-    new_entries = tuple(parse_index(raw))
-    for i, entry in enumerate(old_entries):
-        if entry != new_entries[i]:
-            print('The new entry: %s != %s' % (new_entries[i], entry))
-            raise SystemExit(1)
-    pool = ThreadPool(processes=20)
-    urls = [e.url for e in new_entries]
-    data = pool.map(read, urls)
-    for url, raw in zip(urls, data):
-        sys.stdout.flush()
-        root = html.fromstring(raw)
-        attachment_nodes = root.xpath('//fieldset/table/tr/td/a')
-        full_url = None
-        for attachment_node in attachment_nodes:
-            filename = attachment_node.text_content().lower()
-            if filename.find('.zip') != -1:
-                full_url = MR_URL + attachment_node.attrib['href']
-                break
-        new_url, aname = parse_plugin_zip_url(raw)
-        if new_url != full_url:
-            print('new url (%s): %s != %s for plugin at: %s' % (aname, new_url, full_url, url))
-            raise SystemExit(1)
 
 # }}}
 
@@ -688,25 +772,29 @@ def test_parse_metadata():  # {{{
     raw = b'''\
 import os
 from calibre.customize import FileTypePlugin
+# import_placeholder
 
 MV = (0, 7, 53)
 
 class HelloWorld(FileTypePlugin):
 
-    name                = _('name') # Name of the plugin
+    name: str           = _('name') # Name of the plugin
     description         = {1, 2}
     supported_platforms = ['windows', 'osx', 'linux'] # Platforms this plugin will run on
-    author              = u'Acme Inc.' # The author of this plugin
-    version             = {1:'a', 'b':2}
+    author              = 'Acme Inc.' # The author of this plugin
+    version: dict[str, int]       = {1:'a', 'b':2}
     file_types          = set(['epub', 'mobi']) # The file types that this plugin will be applied to
     on_postprocess      = True # Run this plugin after conversion is complete
     minimum_calibre_version = MV
     '''
     vals = {
-        'name':'name', 'description':{1, 2},
-        'supported_platforms':['windows', 'osx', 'linux'],
-        'author':'Acme Inc.', 'version':{1:'a', 'b':2},
-        'minimum_calibre_version':(0, 7, 53)}
+        'name': 'name',
+        'description': {1, 2},
+        'supported_platforms': ['windows', 'osx', 'linux'],
+        'author': 'Acme Inc.',
+        'version': {1: 'a', 'b': 2},
+        'minimum_calibre_version': (0, 7, 53),
+    }
     assert parse_metadata(raw, None, None) == vals
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w') as zf:
@@ -714,13 +802,120 @@ class HelloWorld(FileTypePlugin):
         zf.writestr('very/ver.py', b'MV = (0, 7, 53)')
         zf.writestr('__init__.py', b'from xxx import yyy\nfrom very.lovely import HelloWorld')
     assert get_plugin_info(buf.getvalue()) == vals
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as zf:
+        zf.writestr('very/ver.py', b'NAME = "name"\nVERSION = (1,2,3)')
+        zf.writestr(
+            '__init__.py',
+            raw.replace(b"_('name')", b'NAME').replace(b"{1:'a', 'b':2}", b'VERSION').replace(b'# import_placeholder', b'from very.ver import NAME, VERSION'),
+        )
+    vals['version'] = (1, 2, 3)
+    assert get_plugin_info(buf.getvalue()) == vals
+
+    # Test: annotated top-level variable used as class attribute value
+    raw2 = b'''\
+from calibre.customize import FileTypePlugin
+
+MV: tuple = (0, 8, 0)
+
+class MyPlugin(FileTypePlugin):
+    name: str = 'TestPlugin'
+    author: str = 'Test Author'
+    version = MV
+    minimum_calibre_version = MV
+    description = 'A test plugin'
+    supported_platforms = ['linux']
+    '''
+    vals2 = {
+        'name': 'TestPlugin',
+        'description': 'A test plugin',
+        'supported_platforms': ['linux'],
+        'author': 'Test Author',
+        'version': (0, 8, 0),
+        'minimum_calibre_version': (0, 8, 0),
+    }
+    assert parse_metadata(raw2, None, None) == vals2
+
+    # Test: annotation without value (bare annotation) is ignored gracefully
+    raw3 = b'''\
+from calibre.customize import FileTypePlugin
+
+class MyPlugin(FileTypePlugin):
+    name: str = 'BareAnnot'
+    author: str = 'Some Author'
+    description: str
+    version = (2, 0, 0)
+    minimum_calibre_version = (1, 0, 0)
+    supported_platforms: list = ['windows', 'linux']
+    '''
+    vals3 = {
+        'name': 'BareAnnot',
+        'description': '',
+        'supported_platforms': ['windows', 'linux'],
+        'author': 'Some Author',
+        'version': (2, 0, 0),
+        'minimum_calibre_version': (1, 0, 0),
+    }
+    assert parse_metadata(raw3, None, None) == vals3
+
+    # Test: multiple classes, only the one inheriting from a plugin base is used
+    raw4 = b'''\
+from calibre.customize import FileTypePlugin
+
+class Helper:
+    name = 'should-be-ignored'
+    author = 'ignored'
+
+class RealPlugin(FileTypePlugin):
+    name = 'RealPlugin'
+    author = 'Real Author'
+    version = (3, 1, 4)
+    minimum_calibre_version = (0, 9, 42)
+    supported_platforms = ['windows', 'osx', 'linux']
+    description = 'The real one'
+    '''
+    vals4 = {
+        'name': 'RealPlugin',
+        'description': 'The real one',
+        'supported_platforms': ['windows', 'osx', 'linux'],
+        'author': 'Real Author',
+        'version': (3, 1, 4),
+        'minimum_calibre_version': (0, 9, 42),
+    }
+    assert parse_metadata(raw4, None, None) == vals4
+
+    # Test: all class attributes are type-annotated
+    raw5 = b'''\
+from calibre.customize import FileTypePlugin
+
+class FullAnnotPlugin(FileTypePlugin):
+    name: str = 'AllAnnotated'
+    description: str = 'fully annotated plugin'
+    supported_platforms: list = ['osx']
+    author: str = 'Annotated Author'
+    version: tuple = (1, 2, 3)
+    minimum_calibre_version: tuple = (0, 9, 42)
+    '''
+    vals5 = {
+        'name': 'AllAnnotated',
+        'description': 'fully annotated plugin',
+        'supported_platforms': ['osx'],
+        'author': 'Annotated Author',
+        'version': (1, 2, 3),
+        'minimum_calibre_version': (0, 9, 42),
+    }
+    assert parse_metadata(raw5, None, None) == vals5
+
 
 # }}}
 
 
 if __name__ == '__main__':
-    # test_parse_metadata()
+    # Run test_parse_metadata() with:
+    # python -c 'import runpy; runpy.run_path("setup/plugins_mirror.py")["test_parse_metadata"]()'
     # import pprint
     # pprint.pprint(get_plugin_info(open(sys.argv[-1], 'rb').read()))
+
+    # print('\n'.join(map(str, parse_index())))
 
     main()

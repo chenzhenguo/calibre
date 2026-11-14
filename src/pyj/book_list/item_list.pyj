@@ -2,23 +2,85 @@
 # License: GPL v3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
 from __python__ import hash_literals
 
-from dom import build_rule, svgicon, add_extra_css, clear
 from elementmaker import E
 
 from book_list.theme import get_font_size, get_color
+from dom import add_extra_css, build_rule, button_space_key_event, clear, ensure_id, svgicon
 
 CLASS_NAME = 'generic-items-list'
 
-add_extra_css(def():
+add_extra_css(def ():
     sel = '.' + CLASS_NAME + ' '
     style = ''
-    style += build_rule(sel + 'li', padding='0', border_bottom='solid 1px ' + get_color('window-foreground'), border_top='solid 1px ' + get_color('window-background'), cursor='pointer', list_style='none')
-    style += build_rule(sel + '.item-title', font_size=get_font_size('item-list-title'))
-    style += build_rule(sel + ' .item-subtitle', font_size=get_font_size('item-list-subtitle'), font_style='italic')
+    style += build_rule(sel, padding='0.75rem 1rem')
+    style += build_rule(sel + ' > p',
+        margin='0 0 0.75rem 0',
+        padding='0.6rem 0.75rem',
+        border='var(--calibre-border-style-subtle)',
+        border_radius='12px',
+        background_color='var(--calibre-color-faint-background)',
+        font_style='normal',
+        opacity='0.8'
+    )
+    style += build_rule(sel + ' ul', list_style='none', margin='0', padding='0', display='flex', flex_direction='column', gap='0.5rem')
+    style += build_rule(sel + 'li',
+        padding='0',
+        border='var(--calibre-border-style-subtle)',
+        border_radius='14px',
+        background_color=get_color('window-background'),
+        box_shadow='var(--calibre-shadow-hairline)',
+        cursor='pointer',
+        overflow='hidden'
+    )
+    style += build_rule(sel + 'li:hover',
+        background_color='var(--calibre-color-primary-light)',
+        box_shadow='var(--calibre-shadow-lift)',
+        transform='translateY(-1px)'
+    )
+    style += build_rule(sel + 'li:active', transform='translateY(0px)')
+    style += build_rule(sel + ' .item-title-body .item-title',
+        font_size=get_font_size('item-list-title'), font_weight='700')
+    style += build_rule(sel + ' .item-subtitle',
+        font_size=get_font_size('item-list-subtitle'), font_style='normal', opacity='0.78')
+    # Unlike the padded side action buttons, the title has no padding, so
+    # draw the outline outside it rather than over the text
+    style += build_rule(sel + '.item-primary-action:focus-visible',
+        outline='2px solid ' + get_color('link-foreground'), outline_offset='3px', border_radius='4px')
+    style += build_rule(sel + 'button.item-side-action',
+        display='block', margin='0', padding='0.5rem', border='0', background='none',
+        color='inherit', font='inherit', text_align='inherit')
+    style += build_rule(sel + 'button.item-side-action:not([aria-disabled="true"]):hover',
+        color=get_color('window-hover-foreground'))
+    style += build_rule(sel + 'button.item-side-action[aria-disabled="true"]',
+        cursor='default', opacity='0.4')
+    style += build_rule(sel + 'button.item-side-action[aria-disabled="true"]:active', transform='none')
+    style += build_rule(sel + 'button.item-side-action:focus-visible',
+        outline='2px solid ' + get_color('link-foreground'), outline_offset='-2px')
     sel += ' li > div:nth-child(1)'
-    style += build_rule(sel, padding='1rem')
-    style += build_rule(sel + ':hover', color=get_color('list-hover-foreground'), background_color=get_color('list-hover-background'), border_top_color=get_color('list-hover-foreground'))
-    style += build_rule(sel + ':active', transform='scale(1, 1.5)')
+    style += build_rule(sel,
+        padding='0.85rem 0.95rem',
+        position='relative',
+        display='flex',
+        align_items='flex-start',
+        flex_wrap='wrap',
+        gap='0.5rem',
+        box_sizing='border-box',
+    )
+    style += build_rule(sel + ' .item-title-body',
+        display='flex',
+        align_items='center',
+        gap='0.5rem',
+        min_width='0',
+        flex='1 1 auto',
+    )
+    style += build_rule(sel + ' .item-title-body > span:not(.item-title)', opacity='0.8')
+    style += r'''
+@media (max-width: 420px) {
+  .generic-items-list { padding: 0.6rem 0.75rem; }
+  .generic-items-list ul { gap: 0.45rem; }
+  .generic-items-list li > div:nth-child(1) { padding: 0.75rem 0.75rem; }
+}
+'''
     return style
 )
 
@@ -27,15 +89,130 @@ def side_action(action, ev):
     ev.stopPropagation(), ev.preventDefault()
     if action:
         li = ev.currentTarget.closest('li')
-        action(li)
+        action(li, ev.currentTarget)
+
+
+def primary_action_key_event(ev):
+    # Activate like a native button: Enter on press, Space on release
+    target = ev.currentTarget
+    target.item_pointer_focus = False
+    if button_space_key_event(ev):
+        return
+    if ev.key is 'Enter' and ev.type is 'keydown' and not ev.ctrlKey and not ev.altKey and not ev.metaKey:
+        ev.preventDefault(), ev.stopPropagation()
+        target.click()
+
+
+def primary_action_pointer_down(ev):
+    # Focus that came from the mouse is not restored after a rebuild, so that
+    # clicking a row never scrolls the list to wherever focus ends up
+    ev.currentTarget.item_pointer_focus = True
+
+
+def primary_action_blur(ev):
+    ev.currentTarget.item_pointer_focus = False
+    button_space_key_event(ev)
+
+
+def make_primary_action(elem, description):
+    elem.classList.add('item-primary-action')
+    elem.setAttribute('role', 'button')
+    elem.setAttribute('tabindex', '0')
+    if description:
+        elem.setAttribute('aria-describedby', ensure_id(description, 'item-desc'))
+    # The listeners are module level functions so that adding them again to
+    # a title element reused across rebuilds does not duplicate them. The click
+    # bubbles to the row, preserving the callback's currentTarget.
+    elem.addEventListener('keydown', primary_action_key_event)
+    elem.addEventListener('keyup', primary_action_key_event)
+    elem.addEventListener('pointerdown', primary_action_pointer_down)
+    elem.addEventListener('blur', primary_action_blur)
+
+
+def is_visible(elem):
+    return bool(elem and elem.isConnected and elem.getClientRects().length)
+
+
+def side_action_buttons(row):
+    return [b for b in row.querySelectorAll('button.item-side-action') if b.getAttribute('aria-disabled') is not 'true']
+
+
+def focus_item_action_near(container, row_index, action_index=0, fallback=None, primary=False):
+    # Move focus to a primary or side action in the row at row_index, or the nearest
+    # visible row after or before it, then to fallback. Does nothing if focus
+    # is still on a visible element, so it never steals focus from the user.
+    active = document.activeElement
+    if active and active is not document.body and is_visible(active):
+        return False
+    ul = container if container.tagName is 'UL' else container.querySelector('ul')
+    rows = ul.children if ul else []
+    candidates = [i for i in range(row_index, rows.length)]
+    for i in range(min(row_index, rows.length) - 1, -1, -1):
+        candidates.push(i)
+    for i in candidates:
+        row = rows[i]
+        if is_visible(row):
+            if primary:
+                buttons = [x for x in [row.querySelector('.item-primary-action')] if x]
+            else:
+                buttons = side_action_buttons(row)
+            if buttons.length:
+                buttons[min(action_index, buttons.length - 1)].focus()
+                return True
+    if is_visible(fallback):
+        fallback.focus()
+        return True
+    return False
+
+
+def focused_item_action(container):
+    # Return the position of the focused primary or side action, if any
+    active = document.activeElement
+    if not active or not active.classList or not container.contains(active):
+        return None
+    primary = active.classList.contains('item-primary-action')
+    if primary:
+        if active.item_pointer_focus:
+            return None
+    elif not active.classList.contains('item-side-action'):
+        return None
+    li = active.closest('li')
+    title = li.querySelector('.item-title') or li.querySelector('.item-primary-action')
+    return {
+        'row': Array.prototype.indexOf.call(li.parentNode.children, li),
+        'action': 0 if primary else Array.prototype.indexOf.call(active.parentNode.children, active),
+        'title': title.textContent if title else None,
+        'primary': primary,
+    }
+
+
+def restore_item_action_focus(container, state):
+    # Restore the same primary or side action after rebuilding the list,
+    # matching the row by title, or use the nearest row with that kind of action
+    ul = container.querySelector('ul')
+    row_index = state.row
+    if state.title is not None:
+        for i, row in enumerate(ul.children):
+            title = row.querySelector('.item-title') or row.querySelector('.item-primary-action')
+            if title and title.textContent is state.title:
+                row_index = i
+                break
+    focus_item_action_near(ul, row_index, state.action, primary=state.primary)
+
+
+def add_classes(elem, class_names):
+    for cls in (class_names or '').toString().split(/\s+/):
+        if cls:
+            elem.classList.add(cls)
 
 
 def build_list(container, items, subtitle):
     c = container
+    focus_state = focused_item_action(c)
     clear(c)
     c.classList.add(CLASS_NAME)
     if subtitle:
-        c.appendChild(E.p(subtitle, style="font-style:italic; padding: 1em 1ex; border-bottom: solid 1px currentColor"))
+        c.appendChild(E.p(subtitle, style='font-style:normal; font-weight:700; padding: 1em 1ex; border-bottom: var(--calibre-border-style-strong)'))
     ul = E.ul()
     c.appendChild(ul)
     has_icons = False
@@ -45,15 +222,36 @@ def build_list(container, items, subtitle):
             break
 
     for item in items:
-        ic = ''
+        title_body = E.div(class_='item-title-body')
         if has_icons:
+            ic = ''
             if item.icon:
                 ic = svgicon(item.icon)
-            ic = E.span(ic, '\xa0')
-        li = E.li(E.div(ic, item.title, class_='item-title'))
+            title_body.appendChild(E.span(ic, '\xa0'))
+        tit = item.title
+        if jstype(tit) is 'string':
+            tit = E.span(tit or '', class_='item-title')
+        title_body.appendChild(tit)
+        row = E.div(class_='item-first-row')
+        add_classes(row, item.row_class)
+        row.appendChild(title_body)
+        nm = item.nav_list_meta
+        description = None
+        if nm and (nm.rating or nm.count):
+            description = E.div(class_='item-subtitle item-subtitle-nav')
+            if nm.rating:
+                description.appendChild(E.div(nm.rating, class_='item-subtitle-rating'))
+            if nm.count:
+                description.appendChild(E.div(nm.count, class_='item-subtitle-count'))
+            row.appendChild(description)
+        elif item.subtitle:
+            description = E.div(item.subtitle, class_='item-subtitle', style='padding-top:1ex')
+            row.appendChild(description)
+        if item.action:
+            make_primary_action(tit, description)
+        li = E.li(row)
+        add_classes(li, item.li_class)
         ul.appendChild(li)
-        if item.subtitle:
-            li.firstChild.appendChild(E.div(item.subtitle, class_='item-subtitle', style='padding-top:1ex'))
         if item.action:
             li.addEventListener('click', item.action)
         if item.data:
@@ -67,21 +265,32 @@ def build_list(container, items, subtitle):
                 style='display: flex; align-items: center; margin-left: 0.5rem'
             ))
             for x in item.side_actions:
-                li.lastChild.appendChild(E.div(
-                    class_='simple-link',
-                    style='padding: 0.5rem',
-                    title=x.tooltip or '',
+                # Use aria-disabled rather than disabled so that the click
+                # handler still runs and stops clicks reaching the row action
+                li.lastChild.appendChild(E.button(
+                    type='button', class_='simple-link item-side-action',
+                    aria_disabled='false' if x.action else 'true',
+                    title=x.tooltip or '', aria_label=x.tooltip or '',
                     onclick=side_action.bind(None, x.action),
                     svgicon(x.icon)
                 ))
+    if focus_state:
+        restore_item_action_focus(c, focus_state)
 
 
 def create_side_action(icon, action=None, tooltip=None):
-    return {'icon':icon, 'action': action, 'tooltip': tooltip}
+    return {'icon': icon, 'action': action, 'tooltip': tooltip}
 
 
-def create_item(title, action=None, subtitle=None, icon=None, data=None, side_actions=None):
-    return {'title':title, 'action':action, 'subtitle':subtitle, 'icon':icon, 'data': data, 'side_actions': side_actions or v'[]'}
+# title can be a string or a DOM element. If action is set, the title becomes
+# the keyboard accessible control for the row, so an element passed as the
+# title is given the button role, a tabindex and key handlers.
+def create_item(title, action=None, subtitle=None, icon=None, data=None, side_actions=None, nav_list_meta=None, li_class=None, row_class=None):
+    return {
+        'title': title, 'action': action, 'subtitle': subtitle, 'icon': icon, 'data': data,
+        'side_actions': side_actions or [], 'nav_list_meta': nav_list_meta,
+        'li_class': li_class, 'row_class': row_class,
+    }
 
 
 def create_item_list(container, items, subtitle=None):

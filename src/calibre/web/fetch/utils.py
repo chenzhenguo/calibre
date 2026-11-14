@@ -1,12 +1,15 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2016, Kovid Goyal <kovid at kovidgoyal.net>
 
+from calibre.utils.img import blend_on_canvas, image_from_data, image_to_data, scale_image
 
-from calibre.utils.img import image_from_data, scale_image, image_to_data, blend_on_canvas
 
-
-def rescale_image(data, scale_news_images, compress_news_images_max_size, compress_news_images_auto_size):
+def rescale_image(
+    data: bytes,
+    scale_news_images: tuple[float, float] | None,
+    compress_news_images_max_size: float | None,
+    compress_news_images_auto_size: float | None,
+) -> bytes:
     orig_data = data  # save it in case compression fails
     img = image_from_data(data)
     orig_w, orig_h = img.width(), img.height()
@@ -17,7 +20,7 @@ def rescale_image(data, scale_news_images, compress_news_images_max_size, compre
     if compress_news_images_max_size is None:
         if compress_news_images_auto_size is None:  # not compressing
             return data
-        maxsizeb = (orig_w * orig_h)/compress_news_images_auto_size
+        maxsizeb = (orig_w * orig_h) / compress_news_images_auto_size
     else:
         maxsizeb = compress_news_images_max_size * 1024
 
@@ -39,15 +42,16 @@ def rescale_image(data, scale_news_images, compress_news_images_max_size, compre
     return data
 
 
-def prepare_masthead_image(path_to_image, out_path, mi_width, mi_height):
-    with lopen(path_to_image, 'rb') as f:
+def prepare_masthead_image(path_to_image: str, out_path: str, mi_width: float, mi_height: float) -> None:
+    with open(path_to_image, 'rb') as f:
         img = image_from_data(f.read())
     img = blend_on_canvas(img, mi_width, mi_height)
-    with lopen(out_path, 'wb') as f:
+    with open(out_path, 'wb') as f:
         f.write(image_to_data(img))
 
 
 if __name__ == '__main__':
     import sys
+
     data = sys.stdin.read()
-    sys.stdout.write(rescale_image(data, (768, 1024), None, 8))
+    sys.stdout.write(rescale_image(data, (768, 1024), None, 8))  # ty: ignore[invalid-argument-type, no-matching-overload]

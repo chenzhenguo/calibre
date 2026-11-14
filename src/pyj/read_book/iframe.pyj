@@ -3,74 +3,104 @@
 from __python__ import bound_methods, hash_literals
 
 import traceback
+
 from fs_images import fix_fullscreen_svg_images
-from gettext import gettext as _
 from iframe_comm import IframeClient
 from range_utils import (
+    all_annots_in_selection,
     highlight_associated_with_selection,
-    last_span_for_crw, reset_highlight_counter, select_crw, unwrap_all_crw,
-    unwrap_crw, wrap_text_in_range
+    last_span_for_crw,
+    reset_highlight_counter,
+    select_crw,
+    set_title_for_crw,
+    unwrap_all_crw,
+    unwrap_crw,
+    wrap_text_in_range
 )
-from read_book.hints import hint_visible_links, unhint_links, apply_prefix_to_hints
+from read_book.anchor_visibility import ensure_page_list_target_is_displayed, invalidate_anchor_position_cache
+from read_book.book_storage import IframeBookStorage
 from read_book.cfi import cfi_for_selection, range_from_cfi
 from read_book.extract import get_elements
-from read_book.find import (
-    reset_find_caches, select_search_result, select_tts_mark, tts_data
-)
-from read_book.flow_mode import (
-    anchor_funcs as flow_anchor_funcs, auto_scroll_action as flow_auto_scroll_action,
-    cancel_drag_scroll as cancel_drag_scroll_flow, ensure_selection_visible,
-    flow_onwheel, flow_to_scroll_fraction, handle_gesture as flow_handle_gesture,
-    handle_shortcut as flow_handle_shortcut, jump_to_cfi as flow_jump_to_cfi,
-    layout as flow_layout, scroll_by_page as flow_scroll_by_page,
-    scroll_to_extend_annotation as flow_annotation_scroll,
-    start_drag_scroll as start_drag_scroll_flow
-)
+from read_book.find import first_tts_word_after_viewport_start, reset_find_caches, select_search_result, select_tts_mark, tts_data
+from read_book.flow_mode import anchor_funcs as flow_anchor_funcs
+from read_book.flow_mode import auto_scroll_action as flow_auto_scroll_action
+from read_book.flow_mode import cancel_drag_scroll as cancel_drag_scroll_flow
+from read_book.flow_mode import ensure_selection_boundary_visible as ensure_selection_boundary_visible_flow
+from read_book.flow_mode import ensure_selection_visible, flow_onwheel, flow_to_scroll_fraction
+from read_book.flow_mode import handle_gesture as flow_handle_gesture
+from read_book.flow_mode import handle_shortcut as flow_handle_shortcut
+from read_book.flow_mode import jump_to_cfi as flow_jump_to_cfi
+from read_book.flow_mode import layout as flow_layout
+from read_book.flow_mode import scroll_by_page as flow_scroll_by_page
+from read_book.flow_mode import scroll_to_extend_annotation as flow_annotation_scroll
+from read_book.flow_mode import start_drag_scroll as start_drag_scroll_flow
 from read_book.footnotes import is_footnote_link
+from read_book.gestures import action_for_gesture
 from read_book.globals import (
-    annot_id_uuid_map, clear_annot_id_uuid_map, current_book, current_layout_mode,
-    current_spine_item, runtime, set_boss, set_current_spine_item, set_layout_mode,
+    annot_id_uuid_map,
+    clear_annot_id_uuid_map,
+    current_book,
+    current_layout_mode,
+    current_spine_item,
+    runtime,
+    set_boss,
+    set_current_spine_item,
+    set_layout_mode,
     set_toc_anchor_map
 )
 from read_book.highlights import highlight_style_as_css
+from read_book.hints import apply_prefix_to_hints, hint_visible_links, unhint_links
 from read_book.mathjax import apply_mathjax
+from read_book.paged_mode import anchor_funcs as paged_anchor_funcs
+from read_book.paged_mode import auto_scroll_action as paged_auto_scroll_action
 from read_book.paged_mode import (
-    anchor_funcs as paged_anchor_funcs,
-    auto_scroll_action as paged_auto_scroll_action, calc_columns_per_screen,
-    cancel_drag_scroll as cancel_drag_scroll_paged, current_cfi,
-    get_columns_per_screen_data, handle_gesture as paged_handle_gesture,
-    handle_shortcut as paged_handle_shortcut, jump_to_cfi as paged_jump_to_cfi,
-    layout as paged_layout, onwheel as paged_onwheel, page_counts,
-    prepare_for_resize as paged_prepare_for_resize, progress_frac,
-    reset_paged_mode_globals, resize_done as paged_resize_done,
-    scroll_by_page as paged_scroll_by_page, scroll_to_elem,
-    scroll_to_extend_annotation as paged_annotation_scroll,
-    scroll_to_fraction as paged_scroll_to_fraction, snap_to_selection,
-    start_drag_scroll as start_drag_scroll_paged, will_columns_per_screen_change
+    calc_columns_per_screen,
+    current_cfi,
+    get_columns_per_screen_data,
+    page_counts,
+    progress_frac,
+    reset_paged_mode_globals,
+    scroll_to_elem,
+    snap_to_selection,
+    will_columns_per_screen_change
 )
-from read_book.referencing import (
-    elem_for_ref, end_reference_mode, start_reference_mode
-)
+from read_book.paged_mode import cancel_drag_scroll as cancel_drag_scroll_paged
+from read_book.paged_mode import ensure_selection_boundary_visible as ensure_selection_boundary_visible_paged
+from read_book.paged_mode import handle_gesture as paged_handle_gesture
+from read_book.paged_mode import handle_shortcut as paged_handle_shortcut
+from read_book.paged_mode import jump_to_cfi as paged_jump_to_cfi
+from read_book.paged_mode import layout as paged_layout
+from read_book.paged_mode import onwheel as paged_onwheel
+from read_book.paged_mode import prepare_for_resize as paged_prepare_for_resize
+from read_book.paged_mode import resize_done as paged_resize_done
+from read_book.paged_mode import scroll_by_page as paged_scroll_by_page
+from read_book.paged_mode import scroll_to_extend_annotation as paged_annotation_scroll
+from read_book.paged_mode import scroll_to_fraction as paged_scroll_to_fraction
+from read_book.paged_mode import start_drag_scroll as start_drag_scroll_paged
+from read_book.referencing import elem_for_ref, end_reference_mode, start_reference_mode
 from read_book.resources import finalize_resources, unserialize_html
 from read_book.settings import (
-    apply_colors, apply_font_size, apply_settings, apply_stylesheet, opts,
-    set_color_scheme_class, set_selection_style, update_settings
+    apply_colors,
+    apply_font_size,
+    apply_settings,
+    apply_stylesheet,
+    opts,
+    set_color_scheme_class,
+    set_selection_style,
+    update_settings
 )
-from read_book.shortcuts import (
-    create_shortcut_map, keyevent_as_shortcut, shortcut_for_key_event
-)
-from read_book.toc import find_anchor_before_range, update_visible_toc_anchors
-from read_book.touch import (
-    create_handlers as create_touch_handlers, reset_handlers as reset_touch_handlers
-)
+from read_book.shortcuts import create_shortcut_map, keyevent_as_shortcut, shortcut_for_key_event
+from read_book.smil import flatten_smil_map, mark_smil_element, smil_element_at
+from read_book.toc import find_anchor_before_range, toc_anchor_map_is_current, update_visible_toc_anchors
+from read_book.touch import create_handlers as create_touch_handlers
+from read_book.touch import reset_handlers as reset_touch_handlers
 from read_book.viewport import scroll_viewport
-from select import (
-    move_end_of_selection, selection_extents, word_at_point, first_visible_word
-)
+from select import first_visible_word, is_start_closer_to_point, move_end_of_selection, selection_extents, word_at_point
 from utils import debounce, is_ios
 
 FORCE_FLOW_MODE = False
 CALIBRE_VERSION = '__CALIBRE_VERSION__'
+ONSCROLL_DEBOUNCE_TIME = 1000
 ERS_SUPPORTED_FEATURES = {'dom-manipulation', 'layout-changes', 'touch-events', 'mouse-events', 'keyboard-events', 'spine-scripting'}
 
 
@@ -87,7 +117,6 @@ def cancel_drag_scroll():
 
 
 class EPUBReadingSystem:
-
     @property
     def name(self):
         return 'calibre'
@@ -110,11 +139,21 @@ class EPUBReadingSystem:
         return self.__repr__()
 
 
-class IframeBoss:
+class FullBookSearch:
+    def __init__(self):
+        start_spine_index = current_spine_item()?.index
+        if not start_spine_index?:
+            start_spine_index = -1
+        self.start_spine_index = start_spine_index
+        self.progress_frac_at_start = progress_frac()
+        self.first_result_shown = False
 
+
+class IframeBoss:
     def __init__(self):
         window.navigator.epubReadingSystem = EPUBReadingSystem()
         self.last_cfi = None
+        self.last_toc_position = None
         self.last_search_at = -1001
         self.reference_mode_enabled = False
         self.replace_history_on_next_cfi_update = True
@@ -122,6 +161,7 @@ class IframeBoss:
         self.content_ready = False
         self.last_window_width = self.last_window_height = -1
         self.forward_keypresses = False
+        self.full_book_search_in_progress = None
         set_boss(self)
         handlers = {
             'change_color_scheme': self.change_color_scheme,
@@ -131,15 +171,16 @@ class IframeBoss:
             'number_of_columns_changed': self.number_of_columns_changed,
             'change_scroll_speed': self.change_scroll_speed,
             'display': self.display,
-            'find': self.find,
             'gesture_from_margin': self.gesture_from_margin,
+            'native_gesture': self.native_gesture,
             'get_current_cfi': self.get_current_cfi,
-            'initialize':self.initialize,
+            'initialize': self.initialize,
             'modify_selection': self.modify_selection,
             'next_screen': self.on_next_screen,
             'scroll_to_anchor': self.on_scroll_to_anchor,
             'scroll_to_frac': self.on_scroll_to_frac,
             'scroll_to_ref': self.on_scroll_to_ref,
+            'fake_popup_activation': self.on_fake_popup_activation,
             'set_reference_mode': self.set_reference_mode,
             'toggle_autoscroll': self.toggle_autoscroll,
             'fake_wheel_event': self.fake_wheel_event,
@@ -149,12 +190,17 @@ class IframeBoss:
             'handle_navigation_shortcut': self.on_handle_navigation_shortcut,
             'annotations': self.annotations_msg_received,
             'tts': self.tts_msg_received,
+            'audio-ebook': self.audio_ebook_msg_received,
             'hints': self.hints_msg_received,
             'copy_selection': self.copy_selection,
             'replace_highlights': self.replace_highlights,
-            'clear_selection': def(): window.getSelection().removeAllRanges();,
+            'replace_book_storage': self.replace_book_storage,
+            'clear_selection': def (): window.getSelection().removeAllRanges();,
         }
-        self.comm = IframeClient(handlers)
+        self.comm = IframeClient(handlers, 'main-iframe')
+        self.book_storage = IframeBookStorage(def (book_key, entry):
+            self.send_message('book_storage_changed', book_key=book_key, entry=entry)
+        )
         self.last_window_ypos = 0
         self.length_before = None
 
@@ -173,12 +219,25 @@ class IframeBoss:
 
     def modify_selection(self, data):
         sel = window.getSelection()
-        sel.modify('extend', data.direction, data.granularity)
+        use_end = False
+        if data.granularity is 'all':
+            r = document.createRange()
+            r.selectNode(document.body)
+            sel.removeAllRanges()
+            sel.addRange(r)
+        else:
+            use_end = data.direction is 'forward' or data.direction is 'right'
+            try:
+                sel.modify('extend', data.direction, data.granularity)
+            except:
+                if data.granularity is 'paragraph':
+                    sel.modify('extend', data.direction, 'line')
+        self.ensure_selection_boundary_visible(use_end)
 
     def initialize(self, data):
         scroll_viewport.update_window_size(data.width, data.height)
         window.addEventListener('error', self.onerror)
-        window.addEventListener('scroll', debounce(self.onscroll, 1000))
+        window.addEventListener('scroll', debounce(self.onscroll, ONSCROLL_DEBOUNCE_TIME))
         window.addEventListener('scroll', self.no_latency_onscroll)
         window.addEventListener('resize', debounce(self.onresize, 500))
         window.addEventListener('wheel', self.onwheel, {'passive': False})
@@ -206,19 +265,17 @@ class IframeBoss:
             console.log(f'Unhandled error from external javascript, ignoring: {msg} {script_url} {line_number}')
             return
         is_internal_error = script_url in ('about:srcdoc', 'userscript:viewer.js')
-        if is_internal_error:  # dont report errors from scripts in the book itself
-            console.log(f'{script_url}: {error_object}')
+        if is_internal_error:  # don't report errors from scripts in the book itself
             try:
-                fname = script_url.rpartition('/')[-1] or script_url
-                msg = msg + '<br><span style="font-size:smaller">' + 'Error at {}:{}:{}'.format(fname, line_number, column_number or '') + '</span>'
-                details = traceback.format_exception(error_object).join('') if error_object else ''
-                if details:
-                    console.log(details)
-                self.send_message('error', title=_('Unhandled error'), details=details, msg=msg)
+                (console.error or console.log)(error_object)
+                self.send_message('error', errkey='unhandled-error', msg=msg,
+                    script_url=script_url, line_number=line_number, column_number=column_number,
+                    error_object=traceback.serialize_error_for_formatting(error_object))
             except:
                 console.log('There was an error in the iframe unhandled exception handler')
         else:
             (console.error or console.log)('There was an error in the JavaScript from within the book')
+            (console.error or console.log)(error_object)
 
     def display(self, data):
         cancel_drag_scroll()
@@ -230,6 +287,9 @@ class IframeBoss:
         set_toc_anchor_map()
         self.replace_history_on_next_cfi_update = True
         self.book = current_book.book = data.book
+        self.book_storage.update_from_parent(self.book.key, data.book_storage)
+        self.smil_map = data.smil_map
+        self.smil_anchor_map, self.smil_par_list = flatten_smil_map(self.smil_map)
         self.link_attr = 'data-' + self.book.manifest.link_uid
         self.reference_mode_enabled = data.reference_mode_enabled
         self.is_titlepage = data.is_titlepage
@@ -248,6 +308,7 @@ class IframeBoss:
             self.auto_scroll_action = flow_auto_scroll_action
             self.scroll_to_extend_annotation = flow_annotation_scroll
             self.ensure_selection_visible = ensure_selection_visible
+            self.ensure_selection_boundary_visible = ensure_selection_boundary_visible_flow
             self.start_drag_scroll = start_drag_scroll_flow
             paged_auto_scroll_action('stop')
         else:
@@ -261,16 +322,17 @@ class IframeBoss:
             self.auto_scroll_action = paged_auto_scroll_action
             self.scroll_to_extend_annotation = paged_annotation_scroll
             self.ensure_selection_visible = snap_to_selection
+            self.ensure_selection_boundary_visible = ensure_selection_boundary_visible_paged
             self.start_drag_scroll = start_drag_scroll_paged
             flow_auto_scroll_action('stop')
         update_settings(data.settings)
         self.keyboard_shortcut_map = create_shortcut_map(data.settings.keyboard_shortcuts)
         set_current_spine_item({
-            'name':data.name,
-            'is_first':index is 0,
-            'is_last':index is spine.length - 1,
+            'name': data.name,
+            'is_first': index is 0,
+            'is_last': index is spine.length - 1,
             'index': index,
-            'initial_position':data.initial_position
+            'initial_position': data.initial_position
         })
         self.last_cfi = None
         for name in self.blob_url_map:
@@ -280,6 +342,9 @@ class IframeBoss:
         self.highlights_to_apply = data.highlights
         unserialize_html(root_data, self.content_loaded, None, data.name)
 
+    def replace_book_storage(self, data):
+        self.book_storage.replace(data.entry)
+
     def on_scroll_to_frac(self, data):
         self.to_scroll_fraction(data.frac, False)
 
@@ -287,11 +352,14 @@ class IframeBoss:
         self.auto_scroll_action('toggle')
 
     def handle_gesture(self, gesture):
-        if gesture.type is 'show-chrome':
+        gesture.resolved_action = action_for_gesture(gesture, current_layout_mode() is 'flow')
+        if gesture.resolved_action is 'show_chrome':
             self.send_message('show_chrome')
-        elif gesture.type is 'pinch':
-            self.send_message('bump_font_size', increase=gesture.direction is 'out')
-        elif gesture.type is 'long-tap':
+        elif gesture.resolved_action is 'decrease_font_size':
+            self.send_message('bump_font_size', increase=False)
+        elif gesture.resolved_action is 'increase_font_size':
+            self.send_message('bump_font_size', increase=True)
+        elif gesture.resolved_action is 'highlight_or_inspect':
             self.handle_long_tap(gesture)
         else:
             self._handle_gesture(gesture)
@@ -313,6 +381,9 @@ class IframeBoss:
     def gesture_from_margin(self, data):
         self.handle_gesture(data.gesture)
 
+    def native_gesture(self, data):
+        self.handle_gesture(data.gesture)
+
     def fake_wheel_event(self, data):
         # these are wheel events from margin or selection mode
         self.onwheel(data.evt)
@@ -323,6 +394,7 @@ class IframeBoss:
     def on_scroll_to_anchor(self, data):
         frag = data.frag
         if frag:
+            self.replace_history_on_next_cfi_update = False
             self.scroll_to_anchor(frag)
         else:
             self.to_scroll_fraction(0.0, False)
@@ -333,7 +405,6 @@ class IframeBoss:
             flow_scroll_by_page(-1 if backwards else 1, data.flip_if_rtl_page_progression)
         else:
             paged_scroll_by_page(backwards, data.all_pages_on_screen, data.flip_if_rtl_page_progression)
-
 
     def change_font_size(self, data):
         if data.base_font_size? and data.base_font_size != opts.base_font_size:
@@ -349,8 +420,7 @@ class IframeBoss:
 
     def change_number_of_columns(self, data):
         if current_layout_mode() is 'flow':
-            self.send_message('error', title=_('In flow mode'), msg=_(
-                'Cannot change number of pages per screen in flow mode, switch to paged mode first.'))
+            self.send_message('error', errkey='changing-columns-in-flow-mode')
             return
         cdata = get_columns_per_screen_data()
         delta = int(data.delta)
@@ -370,7 +440,8 @@ class IframeBoss:
                 if cfi:
                     self.jump_to_cfi('/' + cfi)
             self.update_cfi()
-            self.update_toc_position()
+        invalidate_anchor_position_cache()
+        self.update_toc_position(True)
 
     def number_of_columns_changed(self, data):
         opts.columns_per_screen = data.columns_per_screen
@@ -387,6 +458,7 @@ class IframeBoss:
     def change_color_scheme(self, data):
         if data.color_scheme and data.color_scheme.foreground and data.color_scheme.background:
             opts.color_scheme = data.color_scheme
+            opts.is_dark_theme = v'!!data.color_scheme.is_dark_theme'
             apply_colors()
             set_color_scheme_class()
 
@@ -403,6 +475,7 @@ class IframeBoss:
             self.apply_highlights_on_load(self.highlights_to_apply)
             self.highlights_to_apply = None
         apply_settings()
+        invalidate_anchor_position_cache()
         fix_fullscreen_svg_images()
         self.do_layout(self.is_titlepage)
         if self.mathjax:
@@ -416,9 +489,10 @@ class IframeBoss:
         if runtime.is_standalone_viewer:
             self.listen_for_image_double_clicks()
         self.content_ready = True
-        # this is the loading styles used to suppress scrollbars during load
-        # added in unserialize_html
-        document.head.removeChild(document.head.firstChild)
+        if document.head?.firstChild:
+            # this is the loading styles used to suppress scrollbars during load
+            # added in unserialize_html
+            document.head.removeChild(document.head.firstChild)
 
         csi = current_spine_item()
         if csi.initial_position:
@@ -434,12 +508,14 @@ class IframeBoss:
                 self.jump_to_cfi(ipos.cfi)
             elif ipos.type is 'search_result':
                 self.show_search_result(ipos, True)
-            elif ipos.type is 'search':
-                self.find(ipos.search_data, True)
             elif ipos.type is 'edit_annotation':
-                window.setTimeout(def():
+                window.setTimeout(def ():
                     self.annotations_msg_received({'type': 'edit-highlight', 'uuid': ipos.uuid})
                 , 5)
+            elif ipos.type is 'smil_id':
+                self.audio_ebook_msg_received({'type': 'play', 'anchor': ipos.anchor})
+            elif ipos.type is 'pagelist_ref':
+                self.scroll_to_pagelist_ref(ipos.anchor)
         spine = self.book.manifest.spine
         files = self.book.manifest.files
         spine_index = csi.index
@@ -454,11 +530,15 @@ class IframeBoss:
             file_progress_frac=progress_frac(), page_counts=page_counts()
         )
         self.last_cfi = None
+        self.last_toc_position = None
         self.auto_scroll_action('resume')
-        reset_touch_handlers() # Needed to mitigate issue https://bugs.chromium.org/p/chromium/issues/detail?id=464579
+        reset_touch_handlers()  # Needed to mitigate issue https://bugs.chromium.org/p/chromium/issues/detail?id=464579
 
-        window.setTimeout(self.update_cfi, 0)
+        window.setTimeout(self.update_cfi, ONSCROLL_DEBOUNCE_TIME)
         window.setTimeout(self.update_toc_position, 0)
+        load_event = document.createEvent('Event')
+        load_event.initEvent('load', False, False)
+        window.dispatchEvent(load_event)
 
     def calculate_progress_frac(self):
         current_name = current_spine_item().name
@@ -467,15 +547,17 @@ class IframeBoss:
         if self.length_before is None:
             return 0
         frac = progress_frac()
-        ans = (self.length_before + (file_length * frac)) / self.book.manifest.spine_length
-        return ans
+        spine_length = self.book.manifest.spine_length
+        if not spine_length:
+            return frac
+        return (self.length_before + (file_length * frac)) / spine_length
 
     def get_current_cfi(self, data):
         cfi = current_cfi()
         csi = current_spine_item()
 
         def epubcfi(cfi):
-            return 'epubcfi(/{}{})'.format(2*(index+1), cfi) if cfi else None
+            return 'epubcfi(/{}{})'.format(2 * (index + 1), cfi) if cfi else None
 
         if cfi and csi:
             index = csi.index
@@ -496,15 +578,15 @@ class IframeBoss:
         self.send_message(
             'report_cfi', cfi=None, progress_frac=0, file_progress_frac=0, page_counts=page_counts(), request_id=data.request_id)
 
-    def update_cfi(self):
+    def update_cfi(self, force_update):
         cfi = current_cfi()
         if cfi:
             index = current_spine_item().index
             if index > -1:
-                cfi = 'epubcfi(/{}{})'.format(2*(index+1), cfi)
+                cfi = 'epubcfi(/{}{})'.format(2 * (index + 1), cfi)
                 pf = self.calculate_progress_frac()
                 fpf = progress_frac()
-                if cfi is not self.last_cfi:
+                if cfi is not self.last_cfi or force_update:
                     self.last_cfi = cfi
                     self.send_message(
                         'update_cfi', cfi=cfi, replace_history=self.replace_history_on_next_cfi_update,
@@ -514,9 +596,18 @@ class IframeBoss:
                     self.send_message(
                         'update_progress_frac', progress_frac=pf, file_progress_frac=fpf, page_counts=page_counts())
 
-    def update_toc_position(self):
-        visible_anchors = update_visible_toc_anchors(self.book.manifest.toc_anchor_map, self.anchor_funcs)
-        self.send_message('update_toc_position', visible_anchors=visible_anchors)
+    def update_toc_position(self, recalculate_toc_anchor_positions):
+        visible_anchors = update_visible_toc_anchors(
+            self.book.manifest.toc_anchor_map,
+            self.book.manifest.page_list_anchor_map,
+            bool(recalculate_toc_anchor_positions)
+        )
+        # This is called on every scroll event, so only send a message when
+        # the set of visible anchors has actually changed
+        serialized = JSON.stringify(visible_anchors)
+        if serialized is not self.last_toc_position:
+            self.last_toc_position = serialized
+            self.send_message('update_toc_position', visible_anchors=visible_anchors)
 
     def onscroll(self):
         if self.content_ready:
@@ -524,10 +615,16 @@ class IframeBoss:
             self.update_toc_position()
 
     def no_latency_onscroll(self):
+        if not self.content_ready or self.length_before is None:
+            return
         pf = self.calculate_progress_frac()
         fpf = progress_frac()
         self.send_message(
             'update_progress_frac', progress_frac=pf, file_progress_frac=fpf, page_counts=page_counts())
+        if toc_anchor_map_is_current():
+            # Only use cached anchor positions here as recalculating them is
+            # expensive, the debounced onscroll will take care of that
+            self.update_toc_position()
         sel = window.getSelection()
         if sel and not sel.isCollapsed:
             self.send_message('update_selection_position', selection_extents=selection_extents(current_layout_mode() is 'flow', True))
@@ -653,9 +750,8 @@ class IframeBoss:
     def send_message(self, action, **data):
         self.comm.send_message(action, data)
 
-
     def connect_links(self):
-        for a in document.body.querySelectorAll(f'a[{self.link_attr}]'):
+        for a in document.body.querySelectorAll(f'a[{self.link_attr}],area[{self.link_attr}]'):
             a.addEventListener('click', self.link_activated)
         if runtime.is_standalone_viewer:
             # links with a target get turned into requests to open a new window by Qt
@@ -677,7 +773,10 @@ class IframeBoss:
         except:
             print('WARNING: Failed to parse link data {}, ignoring'.format(evt.currentTarget?.getAttribute?(self.link_attr)))
             return
-        self.activate_link(data.name, data.frag, evt.currentTarget)
+        if data.missing:
+            self.send_message('link_to_missing_activated', name=data.name)
+        else:
+            self.activate_link(data.name, data.frag, evt.currentTarget)
 
     def activate_link(self, name, frag, target_elem):
         if not name:
@@ -689,13 +788,20 @@ class IframeBoss:
             traceback.print_exc()
             is_popup = False
         if is_popup:
-            self.send_message('show_footnote', name=name, frag=frag, title=target_elem.textContent, cols_per_screen=calc_columns_per_screen())
+            self.on_fake_popup_activation({'name': name, 'frag': frag, 'title': target_elem.textContent})
             return
         if name is current_spine_item().name:
             self.replace_history_on_next_cfi_update = False
             self.scroll_to_anchor(frag)
         else:
             self.send_message('scroll_to_anchor', name=name, frag=frag)
+
+    def on_fake_popup_activation(self, data):
+        self.send_message(
+            'show_footnote', name=data.name, frag=data.frag, title=data.title,
+            cols_per_screen=calc_columns_per_screen(), rtl=scroll_viewport.rtl,
+            vertical_writing_mode=scroll_viewport.vertical_writing_mode
+        )
 
     def scroll_to_anchor(self, frag):
         if frag:
@@ -709,6 +815,16 @@ class IframeBoss:
         else:
             scroll_viewport.scroll_to(0, 0)
 
+    def scroll_to_pagelist_ref(self, frag):
+        elem = document.getElementById(frag)
+        if not elem:
+            c = document.getElementsByName(frag)
+            if c and c.length:
+                elem = c[0]
+        if elem:
+            ensure_page_list_target_is_displayed(elem)
+            scroll_to_elem(elem)
+
     def scroll_to_ref(self, refnum):
         refnum = int(refnum)
         elem = elem_for_ref(refnum)
@@ -720,38 +836,54 @@ class IframeBoss:
         if refnum?:
             self.scroll_to_ref(refnum)
 
-    def find(self, data, from_load):
-        self.last_search_at = window.performance.now()
-        if data.searched_in_spine:
-            window.getSelection().removeAllRanges()
-        wrap_search = from_load and data.backwards
-        found = window.find(data.text, False, data.backwards, wrap_search)
-        if not found and wrap_search:
-            # wrapping is not implemented on Firefox
-            prev_range = None
-            while window.find(data.text, False):
-                prev_range = window.getSelection().getRangeAt(0)
-            if prev_range:
-                sel = window.getSelection()
-                sel.removeAllRanges()
-                sel.addRange(prev_range)
-                found = window.find(data.text, False, True)
-        if found:
-            if current_layout_mode() is not 'flow':
-                snap_to_selection()
-        else:
-            msg_type = 'invisible_text' if from_load else 'find_in_spine'
-            self.send_message(msg_type, text=data.text, backwards=data.backwards, searched_in_spine=data.searched_in_spine)
-
     def show_search_result(self, data, from_load):
+        if self.load_search_result_timer:
+            window.clearTimeout(self.load_search_result_timer)
+            self.load_search_result_timer = None
+        sr = data.search_result
+        if sr.on_discovery:
+            if sr.result_num is 1:
+                self.full_book_search_in_progress = FullBookSearch()
+            elif self.full_book_search_in_progress?.first_result_shown:
+                return
         self.last_search_at = window.performance.now()
-        if select_search_result(data.search_result):
-            self.ensure_selection_visible()
+        before_select_pos = {'x': scroll_viewport.x(), 'y': scroll_viewport.y()}
+        if select_search_result(sr):
+            self.ensure_selection_boundary_visible()
+            need_workaround = from_load and current_layout_mode() is 'paged'
+            if need_workaround:
+                # workaround bug in chrome where sizes are incorrect in paged
+                # mode on initial load for some books
+                self.load_search_result_timer = window.setTimeout(
+                    self.ensure_search_result_visible.bind(None, before_select_pos),
+                    int(3 * ONSCROLL_DEBOUNCE_TIME / 4)
+                )
+            if self.full_book_search_in_progress and not self.full_book_search_in_progress.first_result_shown and sr.on_discovery:
+                discovered = False
+                if (sr.force_jump_to
+                        or progress_frac() >= self.full_book_search_in_progress.progress_frac_at_start
+                        or current_spine_item().index is not self.full_book_search_in_progress.start_spine_index):
+                    self.full_book_search_in_progress.first_result_shown = True
+                    discovered = True
+                else:
+                    scroll_viewport.scroll_to(before_select_pos.x, before_select_pos.y)
+                self.send_message('search_result_discovered', search_result=data.search_result, discovered=discovered)
+            if not need_workaround:
+                self.add_search_result_to_history_stack(before_select_pos)
         else:
             self.send_message('search_result_not_found', search_result=data.search_result)
 
-    def reference_item_changed(self, ref_num_or_none):
-        self.send_message('reference_item_changed', refnum=ref_num_or_none, index=current_spine_item().index)
+    def add_search_result_to_history_stack(self, before_select_pos):
+        self.replace_history_on_next_cfi_update = False
+        self.update_cfi(True)
+
+    def ensure_search_result_visible(self, before_select_pos):
+        self.load_search_result_timer = None
+        sel = window.getSelection()
+        if sel.isCollapsed or sel.rangeCount is 0:
+            return
+        self.ensure_selection_boundary_visible()
+        self.add_search_result_to_history_stack(before_select_pos)
 
     def set_reference_mode(self, data):
         self.reference_mode_enabled = data.enabled
@@ -759,6 +891,46 @@ class IframeBoss:
             start_reference_mode()
         else:
             end_reference_mode()
+
+    def apply_highlight(self, uuid, existing, has_notes, style_defn, notes):
+        sel = window.getSelection()
+        if not sel.rangeCount:
+            return
+        anchor_before = find_anchor_before_range(sel.getRangeAt(0), self.book.manifest.toc_anchor_map, self.book.manifest.page_list_anchor_map)
+        text = sel.toString()
+        bounds = cfi_for_selection()
+        style = highlight_style_as_css(style_defn, opts.is_dark_theme, opts.color_scheme.foreground)
+        cls = 'crw-has-dot' if has_notes else None
+        title = None if opts.hide_tooltips else notes
+        annot_id, intersecting_wrappers = wrap_text_in_range(style, None, cls, self.add_highlight_listeners, title)
+        removed_highlights = []
+        if annot_id is not None:
+            intersecting_uuids = {annot_id_uuid_map[x]: True for x in intersecting_wrappers}
+            if existing and intersecting_uuids[existing]:
+                uuid = existing
+            elif intersecting_wrappers.length is 1 and annot_id_uuid_map[intersecting_wrappers[0]]:
+                uuid = annot_id_uuid_map[intersecting_wrappers[0]]
+                intersecting_wrappers = []
+            removed_highlights = {}
+            for crw in intersecting_wrappers:
+                unwrap_crw(crw)
+                if annot_id_uuid_map[crw]:
+                    if annot_id_uuid_map[crw] is not uuid:
+                        removed_highlights[annot_id_uuid_map[crw]] = True
+                    v'delete annot_id_uuid_map[crw]'
+            removed_highlights = Object.keys(removed_highlights)
+            sel.removeAllRanges()
+            annot_id_uuid_map[annot_id] = uuid
+        self.send_message(
+            'annotations',
+            type='highlight-applied',
+            uuid=uuid, ok=annot_id is not None,
+            bounds=bounds, style=style_defn,
+            removed_highlights=removed_highlights,
+            highlighted_text=text,
+            anchor_before=anchor_before
+        )
+        reset_find_caches()
 
     def annotations_msg_received(self, data):
         dtype = data?.type
@@ -783,72 +955,62 @@ class IframeBoss:
                 sel.setBaseAndExtent(sel.focusNode, sel.focusOffset, end_node, end_offset)
             except:
                 (console.error or console.log)('Failed to extend selection to paragraph')
+        elif dtype is 'extend-to-point':
+            move_end_of_selection(data.pos, is_start_closer_to_point(data.pos))
         elif dtype is 'drag-scroll':
             self.scroll_to_extend_annotation(data.backwards)
         elif dtype is 'edit-highlight':
-            crw_ = {v: k for k, v in Object.entries(annot_id_uuid_map)}[data.uuid]
-            if crw_ and select_crw(crw_):
+            found_highlight_to_edit = False
+            for qcrw, quuid in Object.entries(annot_id_uuid_map):
+                if quuid is data.uuid and select_crw(qcrw):
+                    found_highlight_to_edit = True
+                    break
+            if found_highlight_to_edit:
                 self.ensure_selection_visible()
-                window.setTimeout(def():
+                window.setTimeout(def ():
                     self.send_message('annotations', type='edit-highlight')
                 , 50)
             else:
                 self.send_message('annotations', type='edit-highlight-failed', uuid=data.uuid)
         elif dtype is 'notes-edited':
             cls = 'crw-has-dot'
-            crw_ = {v: k for k, v in Object.entries(annot_id_uuid_map)}[data.uuid]
-            if crw_:
-                node = last_span_for_crw(crw_)
-                if node:
-                    if data.has_notes:
-                        node.classList.add(cls)
-                    else:
-                        node.classList.remove(cls)
+            for qcrw, quuid in Object.entries(annot_id_uuid_map):
+                if quuid is data.uuid:
+                    node = last_span_for_crw(qcrw)
+                    if node:
+                        if data.has_notes:
+                            node.classList.add(cls)
+                        else:
+                            node.classList.remove(cls)
+                    set_title_for_crw(qcrw, None if opts.hide_tooltips else data.notes)
         elif dtype is 'remove-highlight':
-            crw_ = {v: k for k, v in Object.entries(annot_id_uuid_map)}[data.uuid]
-            if crw_:
-                unwrap_crw(crw_)
-                v'delete annot_id_uuid_map[crw_]'
+            found_highlight_to_remove = False
+            for qcrw, quuid in Object.entries(annot_id_uuid_map):
+                if quuid is data.uuid:
+                    found_highlight_to_remove = True
+                    unwrap_crw(qcrw)
+                    v'delete annot_id_uuid_map[qcrw]'
+            if found_highlight_to_remove:
                 # have to remove selection otherwise selection bar does
                 # not hide itself on multiline selections
                 window.getSelection().removeAllRanges()
         elif dtype is 'apply-highlight':
+            existing = all_annots_in_selection(window.getSelection(), annot_id_uuid_map)
+            if existing.length is 0 or (existing.length is 1 and existing[0] is data.existing):
+                self.apply_highlight(data.uuid, data.existing, data.has_notes, data.style, data.notes)
+            else:
+                self.send_message(
+                    'annotations', type='highlight-overlapped',
+                    uuid=data.uuid, existing=data.existing, has_notes=data.has_notes, style=data.style, notes=data.notes)
+        elif dtype is 'apply-highlight-overwrite':
+            self.apply_highlight(data.uuid, data.existing, data.has_notes, data.style, data.notes)
+        elif dtype is 'cite-current-selection':
             sel = window.getSelection()
             if not sel.rangeCount:
                 return
-            anchor_before = find_anchor_before_range(sel.getRangeAt(0), self.book.manifest.toc_anchor_map, self.anchor_funcs)
-            text = sel.toString()
             bounds = cfi_for_selection()
-            style = highlight_style_as_css(data.style, opts.is_dark_theme, opts.color_scheme.foreground)
-            cls = 'crw-has-dot' if data.has_notes else None
-            annot_id, intersecting_wrappers = wrap_text_in_range(style, None, cls, self.add_highlight_listeners)
-            removed_highlights = v'[]'
-            if annot_id is not None:
-                intersecting_uuids = {annot_id_uuid_map[x]:True for x in intersecting_wrappers}
-                if data.existing and intersecting_uuids[data.existing]:
-                    data.uuid = data.existing
-                elif intersecting_wrappers.length is 1 and annot_id_uuid_map[intersecting_wrappers[0]]:
-                    data.uuid = annot_id_uuid_map[intersecting_wrappers[0]]
-                    intersecting_wrappers = v'[]'
-                removed_highlights = {}
-                for crw in intersecting_wrappers:
-                    unwrap_crw(crw)
-                    if annot_id_uuid_map[crw] and annot_id_uuid_map[crw] is not data.uuid:
-                        removed_highlights[annot_id_uuid_map[crw]] = True
-                        v'delete annot_id_uuid_map[crw]'
-                removed_highlights = Object.keys(removed_highlights)
-                sel.removeAllRanges()
-                annot_id_uuid_map[annot_id] = data.uuid
-            self.send_message(
-                'annotations',
-                type='highlight-applied',
-                uuid=data.uuid, ok=annot_id is not None,
-                bounds=bounds,
-                removed_highlights=removed_highlights,
-                highlighted_text=text,
-                anchor_before=anchor_before
-            )
-            reset_find_caches()
+            text = sel.toString()
+            self.send_message('annotations', type='cite-data', bounds=bounds, highlighted_text=text)
         else:
             console.log('Ignoring annotations message to iframe with unknown type: ' + dtype)
 
@@ -863,7 +1025,8 @@ class IframeBoss:
                 continue
             style = highlight_style_as_css(h.style, opts.is_dark_theme, opts.color_scheme.foreground)
             cls = 'crw-has-dot' if h.notes else None
-            annot_id, intersecting_wrappers = wrap_text_in_range(style, r, cls, self.add_highlight_listeners)
+            title = None if opts.hide_tooltips else h.notes
+            annot_id, intersecting_wrappers = wrap_text_in_range(style, r, cls, self.add_highlight_listeners, title)
             if annot_id is not None:
                 annot_id_uuid_map[annot_id] = h.uuid
                 for crw in intersecting_wrappers:
@@ -873,7 +1036,7 @@ class IframeBoss:
     def replace_highlights(self, data):
         highlights = data.highlights
         unwrap_all_crw()
-        self.apply_highlights_on_load(highlights or v'[]')
+        self.apply_highlights_on_load(highlights or [])
 
     def add_highlight_listeners(self, wrapper):
         wrapper.addEventListener('dblclick', self.highlight_wrapper_dblclicked)
@@ -885,12 +1048,11 @@ class IframeBoss:
             select_crw(crw)
 
     def copy_selection(self):
-        if not runtime.is_standalone_viewer:
-            try:
-                if document.execCommand('copy'):
-                    return
-            except:
-                pass
+        try:
+            if document.execCommand('copy'):
+                return
+        except:
+            pass
 
         s = window.getSelection()
         text = s.toString()
@@ -904,22 +1066,55 @@ class IframeBoss:
         if data.type is 'mark':
             self.mark_word_being_spoken(data.num)
         elif data.type is 'play':
-            text_node, offset = None, 0
             if data.pos:
                 r = word_at_point(data.pos.x, data.pos.y)
+                if not r:
+                    return
             else:
                 r = first_visible_word()
             if r and r.startContainer?.nodeType is Node.TEXT_NODE:
-                text_node, offset = r.startContainer, r.startOffset
-            marked_text = tts_data(text_node, offset)
+                marked_text = tts_data(r.startContainer, r.startOffset)
+            else:
+                # no text visible in the viewport (e.g. a full page image).
+                # Start from the first word after the viewport start rather
+                # than from the start of the file, see https://bugs.launchpad.net/bugs/2165923
+                entry = first_tts_word_after_viewport_start()
+                marked_text = tts_data(entry.node, 0) if entry else v'[]'
             sel = window.getSelection()
             sel.removeAllRanges()
             self.send_message('tts', type='text-extracted', marked_text=marked_text, pos=data.pos)
 
-    def mark_word_being_spoken(self, occurrence_number):
+    def mark_word_being_spoken(self, x):
+        if jstype(x) is 'number':
+            x = {'first': x, 'last': x}
         self.last_search_at = window.performance.now()
-        if select_tts_mark(occurrence_number):
-            self.ensure_selection_visible()
+        if select_tts_mark(x.first, x.last):
+            self.ensure_selection_boundary_visible()
+
+    def audio_ebook_msg_received(self, data):
+        if data.type is 'mark':
+            if data.anchor:
+                self.last_search_at = window.performance.now()
+                if mark_smil_element(data.anchor):
+                    self.ensure_selection_boundary_visible()
+                    self.send_message('audio_ebook_message', type='marked', anchor=data.anchor, idx=data.idx)
+                else:
+                    self.send_message('audio_ebook_message', type='marked')
+            else:
+                window.getSelection().removeAllRanges()
+                self.send_message('audio_ebook_message', type='marked')
+        elif data.type is 'play':
+            if data.anchor:
+                pos = self.smil_anchor_map[data.anchor]
+                if pos?:
+                    par = self.smil_par_list[pos]
+                else:
+                    par = None
+            else:
+                par = smil_element_at(data.pos, self.smil_anchor_map, self.smil_par_list)
+            self.send_message('audio_ebook_message', type='start_play_at', par=par or None, anchor=data.anchor or None, pos=data.pos or None)
+        else:
+            console.error(f'Unknown audio ebook message type from main: {data.type}')
 
     def hints_msg_received(self, data):
         if data.type is 'show':
@@ -945,5 +1140,7 @@ class IframeBoss:
         a.click()
 
 
+@no_prune
 def main():
-    main.boss = IframeBoss()
+    if not main.boss:
+        main.boss = IframeBoss()

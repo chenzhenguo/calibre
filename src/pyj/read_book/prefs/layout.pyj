@@ -7,9 +7,10 @@ from gettext import gettext as _
 
 from book_list.globals import get_session_data
 from dom import add_extra_css, build_rule, element, unique_id
-from read_book.prefs.utils import create_button_box
 from read_book.globals import runtime
-from session import defaults
+from read_book.prefs.utils import create_button_box
+from session import session_defaults
+from utils import safe_set_inner_html
 
 CONTAINER = unique_id('reader-page-layout')
 MARGINS = unique_id('reader-page-margins')
@@ -18,14 +19,16 @@ FS_MODE = unique_id('fs-mode')
 COLS = unique_id('cols-per-screen')
 TEXT_AREA = unique_id('text-area')
 
-add_extra_css(def():
+add_extra_css(def ():
     sel = '#' + MARGINS
     style = build_rule(sel, margin_left='1rem', margin_top='-1ex')
     style += build_rule('#{} td'.format(CONTAINER), padding='1ex')
     return style
 )
 
+
 def restore_defaults():
+    defaults = session_defaults()
     container = document.getElementById(CONTAINER)
     for which in 'top bottom left right'.split(' '):
         container.querySelector('input[name={}]'.format(which)).value = str(defaults['margin_' + which])
@@ -33,6 +36,7 @@ def restore_defaults():
         container.querySelector(f'#{READ_MODE} input[data-name={name}]').checked = defaults.read_mode is name
     if not runtime.is_standalone_viewer:
         container.querySelector(f'#{FS_MODE} input[value={defaults.fullscreen_when_opening}]').checked = True
+        container.querySelector('input[name=end_of_book_popup]').checked = defaults.end_of_book_popup
     for name in 'portrait landscape'.split(' '):
         container.querySelector('input[name={}]'.format(name)).value = str(defaults.columns_per_screen[name])
     for which in 'width height'.split(' '):
@@ -44,9 +48,11 @@ def create_layout_panel(container, apply_func, cancel_func):
     container.appendChild(E.div(id=CONTAINER))
     container = container.lastChild
     sd = get_session_data()
+    container.appendChild(E.p(style='margin:1ex 1rem; padding: 1ex 0'))
+    safe_set_inner_html(container.lastChild, _('Current window size is: <b>{0}x{1}</b> pixels').format(window.innerWidth, window.innerHeight))
     container.appendChild(E.p(_('Change the page margins (in pixels) below'), style='margin:1ex 1rem; padding: 1ex 0'))
     container.appendChild(E.table(id=MARGINS))
-    labels = {'top':_('Top:'), 'bottom':_('Bottom:'), 'left':_('Left:'), 'right':_('Right:')}
+    labels = {'top': _('Top:'), 'bottom': _('Bottom:'), 'left': _('Left:'), 'right': _('Right:')}
 
     def item(which, tr):
         tr.appendChild(E.td(labels[which]))
@@ -67,6 +73,7 @@ def create_layout_panel(container, apply_func, cancel_func):
     container.appendChild(E.div(id=READ_MODE, style='margin: 1ex 2rem; display: flex;'))
     rm = sd.get('read_mode')
     rm = 'flow' if rm is 'flow' else 'paged'
+
     def rb(name, text):
         d = container.lastChild
         d.appendChild(E.label(E.input(type='radio', name='page-layout-mode', data_name=name, checked=rm is name), text))
@@ -79,17 +86,15 @@ def create_layout_panel(container, apply_func, cancel_func):
     cps = sd.get('columns_per_screen')
     container.appendChild(E.table(style='margin: 1ex 1rem', id=COLS,
         E.tr(
-            E.td(_('Portrait:')), E.td(E.input(type='number', name='portrait',   min='0', step='1', max='20', value=str(cps.portrait))),
+            E.td(_('Portrait:')), E.td(E.input(type='number', name='portrait', min='0', step='1', max='20', value=str(cps.portrait))),
             E.td(_('Landscape:')), E.td(E.input(type='number', name='landscape', min='0', step='1', max='20', value=str(cps.landscape))),
     )))
 
     sec(_('Change the maximum screen area (in pixels) used to display text.'
-          ' A value of zero means that all available screen area is used.'
-          ' Current window width is {0} and height is {1} pixels.'
-    ).format(window.innerWidth, window.innerHeight))
+          ' A value of zero means that all available screen area is used.'))
     container.appendChild(E.table(style='margin: 1ex 1rem', id=TEXT_AREA,
         E.tr(
-            E.td(_('Width:')), E.td(E.input(type='number', name='width',   min='0', step='10', max='99999', value=str(sd.get('max_text_width')))),
+            E.td(_('Width:')), E.td(E.input(type='number', name='width', min='0', step='10', max='99999', value=str(sd.get('max_text_width')))),
             E.td(_('Height:')), E.td(E.input(type='number', name='height', min='0', step='10', max='99999', value=str(sd.get('max_text_height')))),
     )))
 
@@ -100,7 +105,7 @@ def create_layout_panel(container, apply_func, cancel_func):
         name = 'fullscreen_when_opening'
         val = sd.get(name)
         if 'auto always never'.split(' ').indexOf(val or '') < 0:
-            val = defaults.fullscreen_when_opening
+            val = session_defaults().fullscreen_when_opening
         container.appendChild(E.div(
             E.div(style='margin: 1ex 2rem', id=FS_MODE,
                 _('When opening a book enter fullscreen:'), ' ',
@@ -111,6 +116,9 @@ def create_layout_panel(container, apply_func, cancel_func):
                 E.label(E.input(type='radio', name=name, value='never', checked=val is 'never'), _('Never')),
             )
         ))
+        container.appendChild(E.div(style='margin: 1ex 2rem; display: flex;',
+            E.label(E.input(type='checkbox', name='end_of_book_popup', checked=sd.get('end_of_book_popup')),
+                _('Offer to rate and remove the book when reaching its end'))))
 
     container.appendChild(E.div(style='margin: 1rem', create_button_box(restore_defaults, apply_func, cancel_func)))
 
@@ -142,6 +150,10 @@ def commit_layout(onchange, container):
         if cfs is not fs:
             was_changed = True
             sd.set('fullscreen_when_opening', cfs)
+        # Does not affect the display of the book, so was_changed is not set
+        end_of_book_popup = element(CONTAINER, 'input[name=end_of_book_popup]').checked
+        if end_of_book_popup is not sd.get('end_of_book_popup'):
+            sd.set('end_of_book_popup', end_of_book_popup)
     cps = sd.get('columns_per_screen')
     cps = {'portrait': cps.portrait, 'landscape': cps.landscape}
     for which in ('portrait', 'landscape'):

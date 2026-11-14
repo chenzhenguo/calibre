@@ -5,10 +5,10 @@ from __python__ import bound_methods, hash_literals
 FUNCTIONS = 'x y scroll_to scroll_into_view reset_globals __reset_transforms window_scroll_pos content_size'.split(' ')
 
 from read_book.globals import get_boss, viewport_mode_changer
-from utils import document_height, document_width, is_ios
+from utils import document_height, document_width, ios_major_version
+
 
 class ScrollViewport:
-
     def __init__(self):
         self.set_mode('flow')
         self.window_width_from_parent = self.window_height_from_parent = None
@@ -30,18 +30,18 @@ class ScrollViewport:
         self.vertical_writing_mode = False
         self.ltr = True
         self.rtl = False
-        if body_style.direction is "rtl":
+        if body_style.direction is 'rtl':
             self.rtl = True
             self.ltr = False
 
-        css_vertical_rl = body_style.getPropertyValue("writing-mode") is "vertical-rl"
+        css_vertical_rl = body_style.getPropertyValue('writing-mode') is 'vertical-rl'
         if css_vertical_rl:
             self.vertical_writing_mode = True
             self.horizontal_writing_mode = False
             self.rtl = True
             self.ltr = False
         else:
-            css_vertical_lr = body_style.getPropertyValue("writing-mode") is "vertical-lr"
+            css_vertical_lr = body_style.getPropertyValue('writing-mode') is 'vertical-lr'
             if css_vertical_lr:
                 self.vertical_writing_mode = True
                 self.horizontal_writing_mode = False
@@ -71,24 +71,24 @@ class ScrollViewport:
 
     def flow_scroll_to(self, x, y):
         if self.rtl:
-            window.scrollTo(-x,y)
+            window.scrollTo(-x, y)
         else:
             window.scrollTo(x, y)
 
-    def scroll_to_in_inline_direction(self, pos):
+    def scroll_to_in_inline_direction(self, pos, preserve_other):
         # Lines flow vertically, so inline is vertical.
         if self.vertical_writing_mode:
-            self.scroll_to(0, pos)
+            self.scroll_to(self.x() if preserve_other else 0, pos)
         else:
-            self.scroll_to(pos, 0)
+            self.scroll_to(pos, self.y() if preserve_other else 0)
 
-    def scroll_to_in_block_direction(self, pos):
+    def scroll_to_in_block_direction(self, pos, preserve_other):
         # In horizontal modes, the block direction is vertical.
         if self.horizontal_writing_mode:
-            self.scroll_to(0, pos)
+            self.scroll_to(self.x() if preserve_other else 0, pos)
         # In vertical modes, the block direction is horizontal.
         else:
-            self.scroll_to(pos, 0)
+            self.scroll_to(pos, self.y() if preserve_other else 0)
 
     def flow_scroll_into_view(self, elem):
         elem.scrollIntoView()
@@ -98,7 +98,7 @@ class ScrollViewport:
             window.scrollBy(x, y)
         # Swap inline direction if in RTL mode.
         else:
-            window.scrollBy(-x,y)
+            window.scrollBy(-x, y)
 
     def scroll_by_in_inline_direction(self, offset):
         # Same logic as scroll_to_in_inline_direction
@@ -164,8 +164,8 @@ class ScrollViewport:
     # Assure that the viewport position returned is corrected for the RTL
     # mode of ScrollViewport.
     def viewport_to_document(self, x, y, doc):
-        # Convert x, y from the viewport (window) co-ordinate system to the
-        # document (body) co-ordinate system
+        # Convert x, y from the viewport (window) coordinate system to the
+        # document (body) coordinate system
         doc = doc or window.document
         topdoc = window.document
         while doc is not topdoc and doc.defaultView:
@@ -245,7 +245,6 @@ class ScrollViewport:
 
 
 class IOSScrollViewport(ScrollViewport):
-
     def width(self):
         return self.window_width_from_parent or window.innerWidth
 
@@ -321,7 +320,7 @@ class IOSScrollViewport(ScrollViewport):
         self.__reset_transforms()
 
 
-if is_ios:
+if 1 < ios_major_version < 15:
     scroll_viewport = IOSScrollViewport()
 else:
     scroll_viewport = ScrollViewport()
@@ -329,6 +328,22 @@ for attr in FUNCTIONS:
     if not scroll_viewport['paged_' + attr]:
         scroll_viewport['paged_' + attr] = scroll_viewport[attr]
 viewport_mode_changer(scroll_viewport.set_mode)
+
+
+def get_unit_size_in_pixels(unit):
+    d = document.createElement('span')
+    d.style.position = 'absolute'
+    d.style.visibility = 'hidden'
+    d.style.width = f'1{unit}'
+    d.style.fontSize = f'1{unit}'
+    d.style.paddingTop = d.style.paddingBottom = d.style.paddingLeft = d.style.paddingRight = '0'
+    d.style.marginTop = d.style.marginBottom = d.style.marginLeft = d.style.marginRight = '0'
+    d.style.borderStyle = 'none'
+    document.body.appendChild(d)
+    ans = d.clientWidth
+    document.body.removeChild(d)
+    return ans
+
 
 def rem_size(reset):
     if reset:
@@ -344,9 +359,10 @@ def rem_size(reset):
         d.style.marginTop = d.style.marginBottom = d.style.marginLeft = d.style.marginRight = '0'
         d.style.borderStyle = 'none'
         document.body.appendChild(d)
-        rem_size.ans = d.clientWidth
+        rem_size.ans = max(2, d.clientWidth)
         document.body.removeChild(d)
     return rem_size.ans
+
 
 def line_height(reset):
     if reset:

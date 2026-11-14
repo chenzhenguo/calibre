@@ -1,30 +1,47 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPL v3 Copyright: 2020, Kovid Goyal <kovid at kovidgoyal.net>
 
 import json
-import regex
 from collections import Counter, OrderedDict
-from PyQt5.Qt import (
-    QCheckBox, QComboBox, QFont, QHBoxLayout, QIcon, QLabel, Qt, QToolButton,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, pyqtSignal
-)
-from threading import Thread
+from functools import cache, lru_cache
 from html import escape
+from queue import Queue
+from threading import Thread
+
+import regex
+from qt.core import (
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QFont,
+    QHBoxLayout,
+    QIcon,
+    QKeySequence,
+    QLabel,
+    QMenu,
+    Qt,
+    QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    pyqtSignal,
+)
 
 from calibre.ebooks.conversion.search_replace import REGEX_FLAGS
-from calibre.gui2 import warning_dialog
+from calibre.gui2 import error_dialog, warning_dialog
+from calibre.gui2.gestures import GestureManager
 from calibre.gui2.progress_indicator import ProgressIndicator
-from calibre.gui2.viewer.web_view import get_data, get_manifest, vprefs
+from calibre.gui2.viewer import get_boss
+from calibre.gui2.viewer.config import vprefs
+from calibre.gui2.viewer.web_view import get_data, get_manifest
 from calibre.gui2.viewer.widgets import ResultsDelegate, SearchBox
-from polyglot.builtins import iteritems, map, unicode_type
-from polyglot.functools import lru_cache
-from polyglot.queue import Queue
+from calibre.utils.icu import primary_collator_without_punctuation
+from calibre.utils.localization import _, ngettext
 
 
 class BusySpinner(QWidget):  # {{{
-
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QWidget.__init__(self, parent)
         self.l = l = QHBoxLayout(self)
         l.setContentsMargins(0, 0, 0, 0)
@@ -35,22 +52,26 @@ class BusySpinner(QWidget):  # {{{
         l.addStretch(10)
         self.is_running = False
 
-    def start(self):
+    def start(self) -> None:
         self.setVisible(True)
         self.pi.start()
         self.is_running = True
 
-    def stop(self):
+    def stop(self) -> None:
         self.setVisible(False)
         self.pi.stop()
         self.is_running = False
+
+
 # }}}
 
-
-quote_map= {'"':'"“”', "'": "'‘’"}
+quote_map = {'"': '"“”', "'": "'‘’"}
 qpat = regex.compile(r'''(['"])''')
 spat = regex.compile(r'(\s+)')
 invisible_chars = '(?:[\u00ad\u200c\u200d]{0,1})'
+SEARCH_RESULT_ROLE = Qt.ItemDataRole.UserRole
+RESULT_NUMBER_ROLE = SEARCH_RESULT_ROLE + 1
+SPINE_IDX_ROLE = RESULT_NUMBER_ROLE + 1
 
 
 def text_to_regex(text):
@@ -77,59 +98,160 @@ def text_to_regex(text):
     return ''.join(ans)
 
 
-class Search(object):
+def words_and_interval_for_near(expr, default_interval=60):
+    parts = expr.split()
+    words = []
+    interval = default_interval
 
-    def __init__(self, text, mode, case_sensitive, backwards):
+    for i, q in enumerate(parts):
+        if q is parts[-1] and q.isdigit() and i > 1:
+            interval = int(q)
+        else:
+            words.append(text_to_regex(q))
+    return words, interval
+
+
+class ChapterScope:
+    """
+    A chapter that a search is restricted to. spine_indices are the spine
+    items that can contain results attributed to the chapter, in spine order.
+    """
+
+    def __init__(self, node_id: int, title: str, spine_indices: tuple[int, ...]) -> None:
+        self.node_id, self.title, self.spine_indices = node_id, title, spine_indices
+
+    def __eq__(self, other):
+        return isinstance(other, ChapterScope) and self.node_id == other.node_id
+
+    def contains(self, toc_nodes) -> bool:
+        return any(node.get('id') == self.node_id for node in toc_nodes)
+
+
+class Search:
+    def __init__(self, text, mode, case_sensitive, backwards, scope='book') -> None:
         self.text, self.mode = text, mode
         self.case_sensitive = case_sensitive
         self.backwards = backwards
-        self._regex = None
+        self.scope = scope
+        # Resolved from the reading position when the search is started
+        self.chapter: ChapterScope | None = None
+        self._regex = self._nsd = None
 
     def __eq__(self, other):
         if not isinstance(other, Search):
             return False
-        return self.text == other.text and self.mode == other.mode and self.case_sensitive == other.case_sensitive
+        return (
+            self.text == other.text
+            and self.mode == other.mode
+            and self.case_sensitive == other.case_sensitive
+            and self.scope == other.scope
+            and self.chapter == other.chapter
+        )
+
+    @property
+    def regex_flags(self):
+        flags = REGEX_FLAGS
+        if not self.case_sensitive:
+            flags |= regex.IGNORECASE
+        return flags
 
     @property
     def regex(self):
         if self._regex is None:
             expr = self.text
-            flags = REGEX_FLAGS
-            if not self.case_sensitive:
-                flags = regex.IGNORECASE
             if self.mode != 'regex':
                 if self.mode == 'word':
                     words = []
                     for part in expr.split():
-                        words.append(r'\b{}\b'.format(text_to_regex(part)))
+                        words.append(rf'\b{text_to_regex(part)}\b')
                     expr = r'\s+'.join(words)
                 else:
                     expr = text_to_regex(expr)
-            self._regex = regex.compile(expr, flags)
+            self._regex = regex.compile(expr, self.regex_flags)
         return self._regex
 
-    def __str__(self):
+    @property
+    def near_search_data(self):
+        if self._nsd is None:
+            words, interval = words_and_interval_for_near(self.text)
+            interval = max(1, interval)
+            flags = self.regex_flags
+            flags |= regex.DOTALL
+            match_any_word = r'(?:\b(?:' + '|'.join(words) + r')\b)'
+            joiner = f'.{{1,{interval}}}'
+            full_pat = regex.compile(joiner.join(match_any_word for x in words), flags=flags)
+            word_pats = tuple(regex.compile(rf'\b{x}\b', flags) for x in words)
+            self._nsd = word_pats, full_pat
+        return self._nsd
+
+    def validate(self, gui) -> bool:
+        if self.mode == 'near':
+            word_pats, full_pat = self.near_search_data
+            if len(word_pats) < 2:
+                error_dialog(
+                    gui,
+                    _('Invalid search expression'),
+                    _(
+                        'In nearby words mode, you must specify at least two words and an optional trailing number of characters.'
+                        ' The expression: {} does not have at least two words.'
+                    ).format(self.text),
+                    show=True,
+                )
+                return False
+        elif self.mode == 'regex':
+            try:
+                self.regex  # ruff: ignore[useless-expression]
+            except Exception as e:
+                error_dialog(
+                    gui,
+                    _('Invalid search expression'),
+                    _('The search expression {} is not a valid regex.').format(self.text),
+                    det_msg=str(e),
+                    show=True,
+                )
+                return False
+        return True
+
+    @property
+    def is_empty(self) -> bool:
+        if not self.text:
+            return True
+        if self.mode in ('normal', 'word') and not regex.sub(r'[\s\p{P}]+', '', self.text):
+            return True
+        return False
+
+    def __str__(self) -> str:
         from collections import namedtuple
-        s = ('text', 'mode', 'case_sensitive', 'backwards')
-        return str(namedtuple('Search', s)(*tuple(getattr(self, x) for x in s)))
+
+        s = ('text', 'mode', 'case_sensitive', 'backwards', 'scope')
+        return str(namedtuple('Search', s)(*tuple(getattr(self, x) for x in s)))  # ruff: ignore[collections-named-tuple]
 
 
-class SearchFinished(object):
-
-    def __init__(self, search_query):
+class SearchFinished:
+    def __init__(self, search_query) -> None:
         self.search_query = search_query
 
 
-class SearchResult(object):
-
+class SearchResult:
     __slots__ = (
-        'search_query', 'before', 'text', 'after', 'q', 'spine_idx',
-        'index', 'file_name', 'is_hidden', 'offset', 'toc_nodes'
+        'after',
+        'before',
+        'file_name',
+        'index',
+        'is_hidden',
+        'offset',
+        'q',
+        'result_num',
+        'search_query',
+        'spine_idx',
+        'text',
+        'toc_nodes',
     )
 
-    def __init__(self, search_query, before, text, after, q, name, spine_idx, index, offset):
+    def __init__(self, search_query, before, text, after, q, name, spine_idx, index, offset, result_num) -> None:
         self.search_query = search_query
         self.q = q
+        self.result_num = result_num
         self.before, self.text, self.after = before, text, after
         self.spine_idx, self.index = spine_idx, index
         self.file_name = name
@@ -139,40 +261,57 @@ class SearchResult(object):
             self.toc_nodes = toc_nodes_for_search_result(self)
         except Exception:
             import traceback
+
             traceback.print_exc()
             self.toc_nodes = ()
 
     @property
     def for_js(self):
         return {
-            'file_name': self.file_name, 'spine_idx': self.spine_idx, 'index': self.index, 'text': self.text,
-            'before': self.before, 'after': self.after, 'mode': self.search_query.mode, 'q': self.q
+            'file_name': self.file_name,
+            'spine_idx': self.spine_idx,
+            'index': self.index,
+            'text': self.text,
+            'before': self.before,
+            'after': self.after,
+            'mode': self.search_query.mode,
+            'q': self.q,
+            'result_num': self.result_num,
         }
 
     def is_result(self, result_from_js):
         return result_from_js['spine_idx'] == self.spine_idx and self.index == result_from_js['index'] and result_from_js['q'] == self.q
 
-    def __str__(self):
+    def __str__(self) -> str:
         from collections import namedtuple
+
         s = self.__slots__[:-1]
-        return str(namedtuple('SearchResult', s)(*tuple(getattr(self, x) for x in s)))
+        return str(namedtuple('SearchResult', s)(*tuple(getattr(self, x) for x in s)))  # ruff: ignore[collections-named-tuple]
 
 
-@lru_cache(maxsize=None)
+@cache
 def searchable_text_for_name(name):
     ans = []
+    add_text = ans.append
     serialized_data = json.loads(get_data(name)[0])
     stack = []
+    a = stack.append
+    removed_tails = []
+    no_visit = frozenset({'script', 'style', 'title', 'head'})
+    ignore_text = frozenset({'img', 'math', 'rt', 'rp', 'rtc'})
     for child in serialized_data['tree']['c']:
         if child.get('n') == 'body':
-            stack.append(child)
-    ignore_text = {'script', 'style', 'title'}
+            a((child, False, False))
+            # the JS code does not add the tail of body tags to flat text
+            removed_tails.append((child.pop('l', None), child))
     text_pos = 0
     anchor_offset_map = OrderedDict()
     while stack:
-        node = stack.pop()
-        if isinstance(node, unicode_type):
-            ans.append(node)
+        node, text_ignored_in_parent, in_ruby = stack.pop()
+        if isinstance(node, str):
+            if in_ruby:
+                node = node.strip()
+            add_text(node)
             text_pos += len(node)
             continue
         g = node.get
@@ -187,61 +326,96 @@ def searchable_text_for_name(name):
                     aid = x[1]
                     if aid not in anchor_offset_map:
                         anchor_offset_map[aid] = text_pos
-        if name and text and name not in ignore_text:
-            ans.append(text)
+        if name in no_visit:
+            continue
+        node_in_ruby = in_ruby
+        if not in_ruby and name == 'ruby':
+            in_ruby = True
+        ignore_text_in_node_and_children = text_ignored_in_parent or name in ignore_text
+
+        if text and not ignore_text_in_node_and_children:
+            if in_ruby:
+                text = text.strip()
+            add_text(text)
             text_pos += len(text)
-        if tail:
-            stack.append(tail)
+        if tail and not text_ignored_in_parent:
+            a((tail, ignore_text_in_node_and_children, node_in_ruby))
         if children:
-            stack.extend(reversed(children))
+            for child in reversed(children):
+                a((child, ignore_text_in_node_and_children, in_ruby))
+    for tail, body in removed_tails:
+        if tail is not None:
+            body['l'] = tail
     return ''.join(ans), anchor_offset_map
 
 
 @lru_cache(maxsize=2)
 def get_toc_data():
-    manifest = get_manifest() or {}
+    return toc_data_from_manifest(get_manifest() or {})
+
+
+def toc_data_from_manifest(manifest):
     spine = manifest.get('spine') or []
     spine_toc_map = {name: [] for name in spine}
+    parent_map = {}
+    id_map = {}
 
-    def process_node(node):
-        items = spine_toc_map.get(node['dest'])
+    def process_node(node) -> None:
+        items = spine_toc_map.get(node.get('dest'))
         if items is not None:
             items.append(node)
+        node_id = node.get('id')
+        if node_id is not None:
+            id_map[node_id] = node
         children = node.get('children')
         if children:
             for child in children:
+                parent_map[id(child)] = node
                 process_node(child)
 
     toc = manifest.get('toc')
     if toc:
         process_node(toc)
     return {
-        'spine': tuple(spine), 'spine_toc_map': spine_toc_map,
-        'spine_idx_map': {name: idx for idx, name in enumerate(spine)}
+        'spine': tuple(spine),
+        'spine_toc_map': spine_toc_map,
+        'spine_idx_map': {name: idx for idx, name in enumerate(spine)},
+        'parent_map': parent_map,
+        'id_map': id_map,
     }
 
 
-class ToCOffsetMap(object):
-
-    def __init__(self, toc_nodes=(), offset_map=None, previous_toc_node=None):
+class ToCOffsetMap:
+    def __init__(self, toc_nodes=(), offset_map=None, previous_toc_node=None, parent_map=None) -> None:
         self.toc_nodes = toc_nodes
         self.offset_map = offset_map or {}
         self.previous_toc_node = previous_toc_node
+        self.parent_map = parent_map or {}
 
     def toc_nodes_for_offset(self, offset):
-        found = False
+        matches = []
         for node in self.toc_nodes:
             q = self.offset_map.get(node.get('id'))
             if q is not None:
                 if q > offset:
                     break
-                yield node
-                found = True
-        if not found and self.previous_toc_node is not None:
-            yield self.previous_toc_node
+                matches.append(node)
+        if not matches and self.previous_toc_node is not None:
+            matches.append(self.previous_toc_node)
+        if matches:
+            ancestors = []
+            node = matches[-1]
+            parent = self.parent_map.get(id(node))
+            while parent is not None:
+                ancestors.append(parent)
+                parent = self.parent_map.get(id(parent))
+            if len(ancestors) > 1:
+                ancestors.pop()  # root node
+                yield from reversed(ancestors)
+            yield node
 
 
-@lru_cache(maxsize=None)
+@cache
 def toc_offset_map_for_name(name):
     anchor_map = searchable_text_for_name(name)[1]
     toc_data = get_toc_data()
@@ -268,7 +442,7 @@ def toc_offset_map_for_name(name):
         if ptn:
             prev_toc_node = ptn[-1]
             break
-    return ToCOffsetMap(toc_nodes, offset_map, prev_toc_node)
+    return ToCOffsetMap(toc_nodes, offset_map, prev_toc_node, toc_data['parent_map'])
 
 
 def toc_nodes_for_search_result(sr):
@@ -282,24 +456,109 @@ def toc_nodes_for_search_result(sr):
     return tuple(tmap.toc_nodes_for_offset(sr.offset))
 
 
+def chapter_node_for_toc_node(toc_data, node_id):
+    """
+    Return the chapter containing the specified ToC node: its top level
+    ancestor. Single top level entries wrapping the whole book, such as an
+    entry for the book title, are not treated as chapters, their children are
+    used instead.
+    """
+    node = toc_data['id_map'].get(node_id)
+    if node is None:
+        return None
+    parent_map = toc_data['parent_map']
+    family = []
+    while node is not None:
+        family.append(node)
+        node = parent_map.get(id(node))
+    family.reverse()
+    family = family[1:]  # the root node is not a ToC entry
+    while len(family) > 1 and len(parent_map[id(family[0])].get('children') or ()) == 1:
+        del family[0]
+    return family[0] if family else None
+
+
+def spine_indices_for_chapter(toc_data, chapter_node):
+    """
+    Return the indices of the spine items that can contain search results
+    attributed to the chapter, in spine order. This mirrors the attribution in
+    toc_offset_map_for_name(): text in a spine item belongs to a ToC node in
+    that item or, before the first such node, to the last ToC node of the
+    nearest preceding spine item that has ToC nodes.
+    """
+    node_ids = set()
+    stack = [chapter_node]
+    while stack:
+        node = stack.pop()
+        node_ids.add(node.get('id'))
+        stack.extend(node.get('children') or ())
+    ans = []
+    previous_node = None
+    for idx, name in enumerate(toc_data['spine']):
+        nodes = toc_data['spine_toc_map'].get(name) or ()
+        if (previous_node is not None and previous_node.get('id') in node_ids) or any(n.get('id') in node_ids for n in nodes):
+            ans.append(idx)
+        if nodes:
+            previous_node = nodes[-1]
+    return tuple(ans)
+
+
+def chapter_scope_for_toc_node(toc_data, node_id) -> ChapterScope | None:
+    chapter_node = chapter_node_for_toc_node(toc_data, node_id)
+    if chapter_node is None or chapter_node.get('id') is None:
+        return None
+    return ChapterScope(chapter_node['id'], chapter_node.get('title') or _('Unknown'), spine_indices_for_chapter(toc_data, chapter_node))
+
+
 def search_in_name(name, search_query, ctx_size=75):
     raw = searchable_text_for_name(name)[0]
-    for match in search_query.regex.finditer(raw):
-        start, end = match.span()
-        before = raw[max(0, start-ctx_size):start]
-        after = raw[end:end+ctx_size]
-        yield before, match.group(), after, start
+
+    if search_query.mode == 'near':
+        word_pats, full_pat = search_query.near_search_data
+
+        def miter():
+            for match in full_pat.finditer(raw):
+                text = match.group()
+                for word_pat in word_pats:
+                    if not word_pat.search(text):
+                        break
+                else:
+                    yield match.span()
+
+    elif search_query.mode == 'regex' or search_query.case_sensitive:
+
+        def miter():
+            for match in search_query.regex.finditer(raw):
+                yield match.span()
+
+    else:
+        spans = []
+
+        def miter():
+            return spans
+
+        if raw:
+
+            def a(s, l):
+                return spans.append((s, s + l))
+
+            primary_collator_without_punctuation().find_all(search_query.text, raw, a, search_query.mode == 'word')
+
+    for start, end in miter():
+        before = raw[max(0, start - ctx_size) : start]
+        after = raw[end : end + ctx_size]
+        yield before, raw[start:end], after, start
 
 
 class SearchInput(QWidget):  # {{{
-
     do_search = pyqtSignal(object)
     cleared = pyqtSignal()
     go_back = pyqtSignal()
 
-    def __init__(self, parent=None, panel_name='search'):
+    def __init__(self, parent=None, panel_name='search', show_return_button=True, show_scope=False) -> None:
         QWidget.__init__(self, parent)
         self.ignore_search_type_changes = False
+        self.show_scope = show_scope
         self.l = l = QVBoxLayout(self)
         l.setContentsMargins(0, 0, 0, 0)
         h = QHBoxLayout()
@@ -308,24 +567,28 @@ class SearchInput(QWidget):  # {{{
 
         self.search_box = sb = SearchBox(self)
         self.panel_name = panel_name
-        sb.initialize('viewer-{}-panel-expression'.format(panel_name))
+        sb.initialize(f'viewer-{panel_name}-panel-expression')
         sb.item_selected.connect(self.saved_search_selected)
         sb.history_saved.connect(self.history_saved)
+        sb.history_pruned.connect(self.history_pruned)
+        sb.history_cleared.connect(self.history_cleared)
         sb.cleared.connect(self.cleared)
-        sb.lineEdit().returnPressed.connect(self.find_next)
+        le_sb = sb.lineEdit()
+        assert le_sb is not None
+        le_sb.returnPressed.connect(self.find_next)
         h.addWidget(sb)
 
         self.next_button = nb = QToolButton(self)
         h.addWidget(nb)
         nb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        nb.setIcon(QIcon(I('arrow-down.png')))
+        nb.setIcon(QIcon.ic('arrow-down.png'))
         nb.clicked.connect(self.find_next)
         nb.setToolTip(_('Find next match'))
 
         self.prev_button = nb = QToolButton(self)
         h.addWidget(nb)
         nb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        nb.setIcon(QIcon(I('arrow-up.png')))
+        nb.setIcon(QIcon.ic('arrow-up.png'))
         nb.clicked.connect(self.find_previous)
         nb.setToolTip(_('Find previous match'))
 
@@ -336,48 +599,86 @@ class SearchInput(QWidget):  # {{{
         qt.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         qt.addItem(_('Contains'), 'normal')
         qt.addItem(_('Whole words'), 'word')
+        qt.addItem(_('Nearby words'), 'near')
         qt.addItem(_('Regex'), 'regex')
-        qt.setToolTip(('<p>' + _(
-            'Choose the type of search: <ul>'
-            '<li><b>Contains</b> will search for the entered text anywhere.'
-            '<li><b>Whole words</b> will search for whole words that equal the entered text.'
-            '<li><b>Regex</b> will interpret the text as a regular expression.'
-        )))
-        qt.setCurrentIndex(qt.findData(vprefs.get('viewer-{}-mode'.format(self.panel_name), 'normal') or 'normal'))
+        qt.setToolTip(
+            '<p>'
+            + _(
+                'Choose the type of search: <ul>'
+                '<li><b>Contains</b> will search for the entered text anywhere. It will ignore punctuation,'
+                ' spaces and accents, unless Case sensitive searching is enabled.'
+                '<li><b>Whole words</b> will search for whole words that equal the entered text. As with'
+                ' "Contains" searches punctuation and accents are ignored.'
+                '<li><b>Nearby words</b> will search for whole words that are near each other in the text.'
+                ' For example: <i>calibre cool</i> will find places in the text where the words <i>calibre</i> and <i>cool</i>'
+                ' occur within 60 characters of each other. To change the number of characters add the number to the end of'
+                ' the list of words, for example: <i>calibre cool awesome 120</i> will search for <i>calibre</i>, <i>cool</i>'
+                ' and <i>awesome</i> within 120 characters of each other.'
+                '<li><b>Regex</b> will interpret the text as a regular expression.'
+            )
+        )
+        qt.setCurrentIndex(qt.findData(vprefs.get(f'viewer-{self.panel_name}-mode', 'normal') or 'normal'))
         qt.currentIndexChanged.connect(self.save_search_type)
         h.addWidget(qt)
 
         self.case_sensitive = cs = QCheckBox(_('&Case sensitive'), self)
         cs.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        cs.setChecked(bool(vprefs.get('viewer-{}-case-sensitive'.format(self.panel_name), False)))
+        cs.setChecked(bool(vprefs.get(f'viewer-{self.panel_name}-case-sensitive', False)))
         cs.stateChanged.connect(self.save_search_type)
         h.addWidget(cs)
 
         self.return_button = rb = QToolButton(self)
-        rb.setIcon(QIcon(I('back.png')))
+        rb.setIcon(QIcon.ic('back.png'))
         rb.setToolTip(_('Go back to where you were before searching'))
         rb.clicked.connect(self.go_back)
         h.addWidget(rb)
+        rb.setVisible(show_return_button)
 
-    def history_saved(self, new_text, history):
+        self.search_scope = ss = QComboBox(self)
+        ss.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        ss.addItem(_('Entire book'), 'book')
+        ss.addItem(_('Current chapter'), 'chapter')
+        ss.setToolTip(
+            '<p>'
+            + _(
+                'Choose where to search: <ul>'
+                '<li><b>Entire book</b> will search the whole book.'
+                '<li><b>Current chapter</b> will search only the chapter you are reading, including its sub-sections, as defined'
+                ' by the top level entry in the Table of Contents that contains the current position.'
+            )
+        )
+        idx = ss.findData(vprefs.get(f'viewer-{self.panel_name}-scope', 'book') or 'book')
+        ss.setCurrentIndex(max(0, idx))
+        l.addWidget(ss)
+        ss.setVisible(show_scope)
+
+    def history_saved(self, new_text, history) -> None:
         if new_text:
-            sss = vprefs.get('saved-{}-settings'.format(self.panel_name)) or {}
+            sss = vprefs.get(f'saved-{self.panel_name}-settings') or {}
             sss[new_text] = {'case_sensitive': self.case_sensitive.isChecked(), 'mode': self.query_type.currentData()}
             history = frozenset(history)
-            sss = {k: v for k, v in iteritems(sss) if k in history}
-            vprefs['saved-{}-settings'.format(self.panel_name)] = sss
+            sss = {k: v for k, v in sss.items() if k in history}
+            vprefs[f'saved-{self.panel_name}-settings'] = sss
 
-    def save_search_type(self):
+    def history_pruned(self, history) -> None:
+        sss = vprefs.get(f'saved-{self.panel_name}-settings') or {}
+        history = frozenset(history)
+        vprefs[f'saved-{self.panel_name}-settings'] = {k: v for k, v in sss.items() if k in history}
+
+    def history_cleared(self) -> None:
+        vprefs[f'saved-{self.panel_name}-settings'] = {}
+
+    def save_search_type(self) -> None:
         text = self.search_box.currentText()
         if text and not self.ignore_search_type_changes:
-            sss = vprefs.get('saved-{}-settings'.format(self.panel_name)) or {}
+            sss = vprefs.get(f'saved-{self.panel_name}-settings') or {}
             sss[text] = {'case_sensitive': self.case_sensitive.isChecked(), 'mode': self.query_type.currentData()}
-            vprefs['saved-{}-settings'.format(self.panel_name)] = sss
+            vprefs[f'saved-{self.panel_name}-settings'] = sss
 
-    def saved_search_selected(self):
+    def saved_search_selected(self) -> None:
         text = self.search_box.currentText()
         if text:
-            s = (vprefs.get('saved-{}-settings'.format(self.panel_name)) or {}).get(text)
+            s = (vprefs.get(f'saved-{self.panel_name}-settings') or {}).get(text)
             if s:
                 self.ignore_search_type_changes = True
                 if 'case_sensitive' in s:
@@ -392,65 +693,110 @@ class SearchInput(QWidget):  # {{{
     def search_query(self, backwards=False):
         text = self.search_box.currentText()
         if text:
-            return Search(
-                text, self.query_type.currentData() or 'normal',
-                self.case_sensitive.isChecked(), backwards
-            )
+            scope = (self.search_scope.currentData() or 'book') if self.show_scope else 'book'
+            return Search(text, self.query_type.currentData() or 'normal', self.case_sensitive.isChecked(), backwards, scope)
 
-    def emit_search(self, backwards=False):
-        vprefs['viewer-{}-case-sensitive'.format(self.panel_name)] = self.case_sensitive.isChecked()
-        vprefs['viewer-{}-mode'.format(self.panel_name)] = self.query_type.currentData()
+    def emit_search(self, backwards=False) -> None:
+        boss = get_boss()
+        if boss.check_for_read_aloud(_('the location of this search result')):
+            return
+        vprefs[f'viewer-{self.panel_name}-case-sensitive'] = self.case_sensitive.isChecked()
+        vprefs[f'viewer-{self.panel_name}-mode'] = self.query_type.currentData()
+        if self.show_scope:
+            vprefs[f'viewer-{self.panel_name}-scope'] = self.search_scope.currentData()
         sq = self.search_query(backwards)
         if sq is not None:
             self.do_search.emit(sq)
 
-    def find_next(self):
+    def find_next(self) -> None:
         self.emit_search()
 
-    def find_previous(self):
+    def find_previous(self) -> None:
         self.emit_search(backwards=True)
 
-    def focus_input(self, text=None):
+    def focus_input(self, text=None, search_type=None, case_sensitive=None, no_history=False) -> None:
         if text and hasattr(text, 'rstrip'):
             self.search_box.setText(text)
+            if no_history:
+                self.search_box.suppress_history = True
+        if search_type is not None:
+            idx = self.query_type.findData(search_type)
+            if idx < 0:
+                idx = self.query_type.findData('normal')
+            self.query_type.setCurrentIndex(idx)
+        if case_sensitive is not None:
+            self.case_sensitive.setChecked(bool(case_sensitive))
         self.search_box.setFocus(Qt.FocusReason.OtherFocusReason)
         le = self.search_box.lineEdit()
+        assert le is not None
         le.end(False)
         le.selectAll()
+
+    def set_tooltips(self, key_map: dict[str, list[str]]) -> None:
+        from calibre.gui2.viewer.shortcuts import index_to_key_sequence
+
+        def as_text(prefix, action):
+            ans = prefix
+            if idx := key_map.get(action):
+                x = _(' or ').join(index_to_key_sequence(x).toString(QKeySequence.SequenceFormat.NativeText) for x in idx)
+                ans += f' [{x}]'
+            return ans
+
+        self.next_button.setToolTip(as_text(_('Find next match'), 'next_match'))
+        self.prev_button.setToolTip(as_text(_('Find previous match'), 'previous_match'))
+
+
 # }}}
 
 
 class Results(QTreeWidget):  # {{{
-
     show_search_result = pyqtSignal(object)
     current_result_changed = pyqtSignal(object)
     count_changed = pyqtSignal(object)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QTreeWidget.__init__(self, parent)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_context_menu)
         self.setHeaderHidden(True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.delegate = ResultsDelegate(self)
         self.setItemDelegate(self.delegate)
         self.itemClicked.connect(self.item_activated)
-        self.blank_icon = QIcon(I('blank.png'))
-        self.not_found_icon = QIcon(I('dialog_warning.png'))
+        self.blank_icon = QIcon.ic('blank.png')
+        self.not_found_icon = QIcon.ic('dialog_warning.png')
         self.currentItemChanged.connect(self.current_item_changed)
         self.section_font = QFont(self.font())
         self.section_font.setItalic(True)
         self.section_map = {}
         self.search_results = []
         self.item_map = {}
+        self.gesture_manager = GestureManager(self)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
 
-    def current_item_changed(self, current, previous):
+    def show_context_menu(self, point) -> bool:
+        self.context_menu = m = QMenu(self)
+        m.addAction(QIcon.ic('plus.png'), _('Expand all'), self.expandAll)
+        m.addAction(QIcon.ic('minus.png'), _('Collapse all'), self.collapseAll)
+        self.context_menu.popup(self.mapToGlobal(point))
+        return True
+
+    def viewportEvent(self, event):
+        if hasattr(self, 'gesture_manager'):
+            ret = self.gesture_manager.handle_event(event)
+            if ret is not None:
+                return ret
+        return super().viewportEvent(event)
+
+    def current_item_changed(self, current, previous) -> None:
         if current is not None:
-            r = current.data(0, Qt.ItemDataRole.UserRole)
+            r = current.data(0, SEARCH_RESULT_ROLE)
             if isinstance(r, SearchResult):
                 self.current_result_changed.emit(r)
         else:
             self.current_result_changed.emit(None)
 
-    def add_result(self, result):
+    def add_result(self, result) -> None:
         section_title = _('Unknown')
         section_id = -1
         toc_nodes = getattr(result, 'toc_nodes', ()) or ()
@@ -461,10 +807,12 @@ class Results(QTreeWidget):  # {{{
                 section_id = -1
         section_key = section_id
         section = self.section_map.get(section_key)
+        spine_idx = getattr(result, 'spine_idx', -1)
         if section is None:
             section = QTreeWidgetItem([section_title], 1)
             section.setFlags(Qt.ItemFlag.ItemIsEnabled)
             section.setFont(0, self.section_font)
+            section.setData(0, SPINE_IDX_ROLE, spine_idx)
             lines = []
             for i, node in enumerate(toc_nodes):
                 lines.append('\xa0\xa0' * i + '➤ ' + (node.get('title') or _('Unknown')))
@@ -473,57 +821,74 @@ class Results(QTreeWidget):  # {{{
                 tt += '\n' + '\n'.join(lines)
                 section.setToolTip(0, tt)
             self.section_map[section_key] = section
-            self.addTopLevelItem(section)
+            for s in range(self.topLevelItemCount()):
+                ti = self.topLevelItem(s)
+                assert ti is not None
+                if ti.data(0, SPINE_IDX_ROLE) > spine_idx:
+                    self.insertTopLevelItem(s, section)
+                    break
+            else:
+                self.addTopLevelItem(section)
             section.setExpanded(True)
         item = QTreeWidgetItem(section, [' '], 2)
         item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemNeverHasChildren)
-        item.setData(0, Qt.ItemDataRole.UserRole, result)
-        item.setData(0, Qt.ItemDataRole.UserRole + 1, len(self.search_results))
+        item.setData(0, SEARCH_RESULT_ROLE, result)
+        item.setData(0, RESULT_NUMBER_ROLE, len(self.search_results))
+        item.setData(0, SPINE_IDX_ROLE, spine_idx)
         if isinstance(result, SearchResult):
-            tt = '<p>…' + escape(result.before, False) + '<b>' + escape(
-                result.text, False) + '</b>' + escape(result.after, False) + '…'
+            tt = '<p>…' + escape(result.before, False) + '<b>' + escape(result.text, False) + '</b>' + escape(result.after, False) + '…'
             item.setData(0, Qt.ItemDataRole.ToolTipRole, tt)
         item.setIcon(0, self.blank_icon)
         self.item_map[len(self.search_results)] = item
         self.search_results.append(result)
         n = self.number_of_results
         self.count_changed.emit(n)
-        return n
 
-    def item_activated(self):
+    def item_activated(self) -> None:
+        boss = get_boss()
+        if boss.check_for_read_aloud(_('the location of this search result')):
+            return
         i = self.currentItem()
         if i:
-            sr = i.data(0, Qt.ItemDataRole.UserRole)
+            sr = i.data(0, SEARCH_RESULT_ROLE)
             if isinstance(sr, SearchResult):
                 if not sr.is_hidden:
                     self.show_search_result.emit(sr)
 
-    def find_next(self, previous):
+    def find_next(self, previous) -> None:
         if self.number_of_results < 1:
             return
         item = self.currentItem()
         if item is None:
             return
-        i = int(item.data(0, Qt.ItemDataRole.UserRole + 1))
+        i = int(item.data(0, RESULT_NUMBER_ROLE))
         i += -1 if previous else 1
         i %= self.number_of_results
         self.setCurrentItem(self.item_map[i])
         self.item_activated()
 
-    def search_result_not_found(self, sr):
+    def search_result_not_found(self, sr) -> None:
         for i in range(self.number_of_results):
             item = self.item_map[i]
-            r = item.data(0, Qt.ItemDataRole.UserRole)
+            r = item.data(0, SEARCH_RESULT_ROLE)
             if r.is_result(sr):
                 r.is_hidden = True
                 item.setIcon(0, self.not_found_icon)
                 break
 
+    def search_result_discovered(self, sr) -> None:
+        q = sr['result_num']
+        for i in range(self.number_of_results):
+            item = self.item_map[i]
+            r = item.data(0, SEARCH_RESULT_ROLE)
+            if r.result_num == q:
+                self.setCurrentItem(item)
+
     @property
-    def current_result_is_hidden(self):
+    def current_result_is_hidden(self) -> bool:
         item = self.currentItem()
         if item is not None:
-            sr = item.data(0, Qt.ItemDataRole.UserRole)
+            sr = item.data(0, SEARCH_RESULT_ROLE)
             if isinstance(sr, SearchResult) and sr.is_hidden:
                 return True
         return False
@@ -532,22 +897,28 @@ class Results(QTreeWidget):  # {{{
     def number_of_results(self):
         return len(self.search_results)
 
-    def clear_all_results(self):
+    def clear_all_results(self) -> None:
         self.section_map = {}
         self.item_map = {}
         self.search_results = []
         self.clear()
         self.count_changed.emit(-1)
 
-    def select_first_result(self):
+    def select_first_result(self) -> None:
         if self.number_of_results:
             item = self.item_map[0]
             self.setCurrentItem(item)
+
+    def ensure_current_result_visible(self) -> None:
+        item = self.currentItem()
+        if item is not None:
+            self.scrollToItem(item)
+
+
 # }}}
 
 
 class SearchPanel(QWidget):  # {{{
-
     search_requested = pyqtSignal(object)
     results_found = pyqtSignal(object)
     show_search_result = pyqtSignal(object)
@@ -555,14 +926,16 @@ class SearchPanel(QWidget):  # {{{
     hide_search_panel = pyqtSignal()
     goto_cfi = pyqtSignal(object)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QWidget.__init__(self, parent)
+        self.discovery_counter = 0
         self.last_hidden_text_warning = None
         self.current_search = None
         self.anchor_cfi = None
+        self.current_toc_leaves: tuple[int, ...] = ()
         self.l = l = QVBoxLayout(self)
         l.setContentsMargins(0, 0, 0, 0)
-        self.search_input = si = SearchInput(self)
+        self.search_input = si = SearchInput(self, show_scope=True)
         self.searcher = None
         self.search_tasks = Queue()
         self.results_found.connect(self.on_result_found, type=Qt.ConnectionType.QueuedConnection)
@@ -570,6 +943,11 @@ class SearchPanel(QWidget):  # {{{
         si.cleared.connect(self.search_cleared)
         si.go_back.connect(self.go_back)
         l.addWidget(si)
+        self.scope_label = la = QLabel(self)
+        la.setStyleSheet('QLabel { margin-left: 1ex }')
+        la.setWordWrap(True)
+        la.setVisible(False)
+        l.addWidget(la)
         self.results = r = Results(self)
         r.count_changed.connect(self.count_changed)
         r.show_search_result.connect(self.do_show_search_result, type=Qt.ConnectionType.QueuedConnection)
@@ -584,23 +962,65 @@ class SearchPanel(QWidget):  # {{{
         la.setVisible(False)
         l.addWidget(la)
 
-    def go_back(self):
+    def go_back(self) -> None:
         if self.anchor_cfi:
             self.goto_cfi.emit(self.anchor_cfi)
 
-    def update_hidden_message(self):
+    def update_hidden_message(self) -> None:
         self.hidden_message.setVisible(self.results.current_result_is_hidden)
 
-    def focus_input(self, text=None):
-        self.search_input.focus_input(text)
+    def focus_input(self, text=None, search_type=None, case_sensitive=None, no_history=False) -> None:
+        self.search_input.focus_input(text, search_type, case_sensitive, no_history=no_history)
 
-    def search_cleared(self):
+    def search_cleared(self) -> None:
         self.results.clear_all_results()
         self.current_search = None
+        self.scope_label.setVisible(False)
 
-    def start_search(self, search_query, current_name):
+    def update_current_toc_nodes(self, current_toc_leaves) -> None:
+        self.current_toc_leaves = tuple(current_toc_leaves or ())
+
+    def chapter_for_search(self, current_name) -> ChapterScope | None:
+        toc_data = get_toc_data()
+        cs = self.current_search
+        if cs is not None and cs.chapter is not None:
+            # Keep the chapter of the current search while the reader is in one
+            # of its files, which is always the case after jumping to one of its
+            # results, so that find next keeps stepping through those results.
+            # The visible ToC nodes cannot be used for this, as near the end of
+            # a chapter they are the nodes of the next chapter.
+            idx = toc_data['spine_idx_map'].get(current_name, -1)
+            if idx in cs.chapter.spine_indices:
+                return cs.chapter
+        for node_id in self.current_toc_leaves:
+            ans = chapter_scope_for_toc_node(toc_data, node_id)
+            if ans is not None:
+                return ans
+        return None
+
+    def update_scope_label(self, search_query) -> None:
+        if search_query.scope != 'chapter':
+            self.scope_label.setVisible(False)
+            return
+        if search_query.chapter is None:
+            self.scope_label.setText(_('The current position is not in a chapter of the Table of Contents, searching the entire book'))
+        else:
+            self.scope_label.setText(_('Searching in: {}').format(search_query.chapter.title))
+        self.scope_label.setVisible(True)
+
+    def start_search(self, search_query, current_name) -> None:
+        if search_query.scope == 'chapter':
+            try:
+                search_query.chapter = self.chapter_for_search(current_name)
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
+                search_query.chapter = None
         if self.current_search is not None and search_query == self.current_search:
             self.find_next_requested(search_query.backwards)
+            return
+        if not search_query.validate(self):
             return
         if self.searcher is None:
             self.searcher = Thread(name='Searcher', target=self.run_searches)
@@ -610,13 +1030,15 @@ class SearchPanel(QWidget):  # {{{
         self.hidden_message.setVisible(False)
         self.spinner.start()
         self.current_search = search_query
+        self.update_scope_label(search_query)
         self.last_hidden_text_warning = None
         self.search_tasks.put((search_query, current_name))
+        self.discovery_counter += 1
 
-    def set_anchor_cfi(self, pos_data):
+    def set_anchor_cfi(self, pos_data) -> None:
         self.anchor_cfi = pos_data['cfi']
 
-    def run_searches(self):
+    def run_searches(self) -> None:
         while True:
             x = self.search_tasks.get()
             if x is None:
@@ -629,45 +1051,66 @@ class SearchPanel(QWidget):  # {{{
                 spine_idx = idx_map.get(current_name, -1)
             except Exception:
                 import traceback
+
                 traceback.print_exc()
                 spine_idx = -1
             if spine_idx < 0:
                 self.results_found.emit(SearchFinished(search_query))
                 continue
-            for name in spine:
+            num_in_spine = len(spine)
+            chapter = search_query.chapter
+            if chapter is None:
+                spine_indices = tuple((spine_idx + n) % num_in_spine for n in range(num_in_spine))
+            else:
+                spine_indices = tuple(i for i in chapter.spine_indices if i < num_in_spine)
+            result_num = 0
+            for idx in spine_indices:
+                name = spine[idx]
                 counter = Counter()
-                spine_idx = idx_map[name]
                 try:
                     for i, result in enumerate(search_in_name(name, search_query)):
                         before, text, after, offset = result
-                        q = (before or '')[-5:] + text + (after or '')[:5]
-                        self.results_found.emit(SearchResult(search_query, before, text, after, q, name, spine_idx, counter[q], offset))
+                        q = (before or '')[-15:] + text + (after or '')[:15]
+                        # The index counts every occurrence in the file, as that is
+                        # how the JS code locates the result, so it must be computed
+                        # before results outside the chapter are discarded
+                        sr = SearchResult(search_query, before, text, after, q, name, idx, counter[q], offset, result_num + 1)
                         counter[q] += 1
+                        if chapter is not None and not chapter.contains(sr.toc_nodes):
+                            continue
+                        result_num += 1
+                        self.results_found.emit(sr)
                 except Exception:
                     import traceback
+
                     traceback.print_exc()
             self.results_found.emit(SearchFinished(search_query))
 
-    def on_result_found(self, result):
+    def on_result_found(self, result) -> None:
         if self.current_search is None or result.search_query != self.current_search:
             return
         if isinstance(result, SearchFinished):
             self.spinner.stop()
-            if not self.results.number_of_results:
+            if self.results.number_of_results:
+                self.results.ensure_current_result_visible()
+            else:
                 self.show_no_results_found()
+            self.show_search_result.emit({'on_discovery': True, 'search_finished': True, 'result_num': -1})
             return
-        if self.results.add_result(result) == 1:
-            # first result
-            self.results.select_first_result()
-            self.results.item_activated()
+        self.results.add_result(result)
+        obj = result.for_js
+        obj['on_discovery'] = self.discovery_counter
+        self.show_search_result.emit(obj)
         self.update_hidden_message()
 
-    def visibility_changed(self, visible):
+    def visibility_changed(self, visible) -> None:
         if visible:
             self.focus_input()
 
-    def clear_searches(self):
+    def clear_searches(self) -> None:
         self.current_search = None
+        self.current_toc_leaves = ()
+        self.scope_label.setVisible(False)
         self.last_hidden_text_warning = None
         searchable_text_for_name.cache_clear()
         toc_offset_map_for_name.cache_clear()
@@ -675,34 +1118,104 @@ class SearchPanel(QWidget):  # {{{
         self.spinner.stop()
         self.results.clear_all_results()
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         self.search_tasks.put(None)
         self.spinner.stop()
         self.current_search = None
         self.last_hidden_text_warning = None
         self.searcher = None
 
-    def find_next_requested(self, previous):
+    def find_next_requested(self, previous) -> None:
         self.results.find_next(previous)
 
-    def trigger(self):
+    def trigger(self) -> None:
         self.search_input.find_next()
 
-    def do_show_search_result(self, sr):
+    def do_show_search_result(self, sr) -> None:
         self.show_search_result.emit(sr.for_js)
 
-    def search_result_not_found(self, sr):
+    def search_result_not_found(self, sr) -> None:
         self.results.search_result_not_found(sr)
         self.update_hidden_message()
 
-    def show_no_results_found(self):
-        msg = _('No matches were found for:')
-        warning_dialog(self, _('No matches found'), msg + '  <b>{}</b>'.format(self.current_search.text), show=True)
+    def search_result_discovered(self, sr) -> None:
+        self.results.search_result_discovered(sr)
 
-    def keyPressEvent(self, ev):
-        if ev.key() == Qt.Key.Key_Escape:
+    def show_no_results_found(self) -> None:
+        current_search = self.current_search
+        assert current_search is not None
+        if current_search.chapter is None:
+            msg = _('No matches were found for:')
+        else:
+            msg = _('No matches were found in the chapter {} for:').format(f'<i>{escape(current_search.chapter.title)}</i>')
+        warning_dialog(self, _('No matches found'), msg + f'  <b>{current_search.text}</b>', show=True)
+
+    def keyPressEvent(self, a0):
+        if a0.key() == Qt.Key.Key_Escape:
             self.hide_search_panel.emit()
-            ev.accept()
+            a0.accept()
             return
-        return QWidget.keyPressEvent(self, ev)
+        return QWidget.keyPressEvent(self, a0)
+
+    def set_tooltips(self, key_map: dict[str, list[str]]) -> None:
+        self.search_input.set_tooltips(key_map)
+
+
 # }}}
+
+
+def find_tests():
+    import unittest
+
+    def toc_node(node_id, dest, *children, frag=None):
+        return {'id': node_id, 'title': f'node {node_id}', 'dest': dest, 'frag': frag, 'children': list(children)}
+
+    class SearchScopeTest(unittest.TestCase):
+        def test_chapter_node(self) -> None:
+            toc = toc_node(0, None, toc_node(1, 'a', toc_node(2, 'a', toc_node(3, 'b'))), toc_node(4, 'c'))
+            data = toc_data_from_manifest({'spine': ['a', 'b', 'c'], 'toc': toc})
+            cn = lambda node_id: (chapter_node_for_toc_node(data, node_id) or {}).get('id')  # ruff: ignore[lambda-assignment]
+            self.assertEqual(cn(3), 1)
+            self.assertEqual(cn(2), 1)
+            self.assertEqual(cn(1), 1)
+            self.assertEqual(cn(4), 4)
+            self.assertIsNone(cn(0))
+            self.assertIsNone(cn(99))
+            # A single top level entry wrapping the book is not a chapter
+            toc = toc_node(0, None, toc_node(1, 'a', toc_node(2, 'a', toc_node(3, 'b')), toc_node(4, 'c')))
+            data = toc_data_from_manifest({'spine': ['a', 'b', 'c'], 'toc': toc})
+            self.assertEqual(cn(3), 2)
+            self.assertEqual(cn(4), 4)
+            self.assertEqual(cn(1), 1)
+
+        def test_spine_indices_for_chapter(self) -> None:
+            # Chapter 1 spans a and b, c has no ToC entries and so belongs to
+            # chapter 1 as well, chapter 4 starts in the middle of d. f is
+            # included for chapter 4 as any text before the anchor of chapter 5
+            # belongs to chapter 4.
+            toc = toc_node(0, None, toc_node(1, 'a', toc_node(2, 'b')), toc_node(3, 'd', frag='x'), toc_node(4, 'd', frag='y'), toc_node(5, 'f', frag='z'))
+            data = toc_data_from_manifest({'spine': ['a', 'b', 'c', 'd', 'e', 'f'], 'toc': toc})
+            si = lambda node_id: spine_indices_for_chapter(data, data['id_map'][node_id])  # ruff: ignore[lambda-assignment]
+            self.assertEqual(si(1), (0, 1, 2, 3))
+            self.assertEqual(si(3), (3,))
+            self.assertEqual(si(4), (3, 4, 5))
+            self.assertEqual(si(5), (5,))
+            scope = chapter_scope_for_toc_node(data, 2)
+            assert scope is not None
+            self.assertEqual((scope.node_id, scope.spine_indices), (1, (0, 1, 2, 3)))
+            self.assertTrue(scope.contains((data['id_map'][1], data['id_map'][2])))
+            self.assertFalse(scope.contains((data['id_map'][3],)))
+            self.assertFalse(scope.contains(()))
+
+        def test_search_equality(self) -> None:
+            a, b = Search('x', 'normal', False, False, 'chapter'), Search('x', 'normal', False, True, 'chapter')
+            self.assertEqual(a, b)
+            a.chapter = ChapterScope(1, 'one', (0,))
+            self.assertNotEqual(a, b)
+            b.chapter = ChapterScope(1, 'one', (0, 1))
+            self.assertEqual(a, b)
+            b.chapter = ChapterScope(2, 'two', (0,))
+            self.assertNotEqual(a, b)
+            self.assertNotEqual(Search('x', 'normal', False, False), Search('x', 'normal', False, False, 'chapter'))
+
+    return unittest.TestLoader().loadTestsFromTestCase(SearchScopeTest)

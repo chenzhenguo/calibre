@@ -1,36 +1,34 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2009, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
 
 import errno
 import os
+from functools import lru_cache
+from typing import TYPE_CHECKING
 
-from calibre import force_unicode
-from calibre.constants import (
-    filesystem_encoding, get_windows_username, islinux, iswindows
-)
-from calibre.utils.filenames import ascii_filename
-from polyglot.functools import lru_cache
+from calibre.constants import filesystem_encoding, get_windows_username, islinux, iswindows
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 VADDRESS = None
 
 
-def eintr_retry_call(func, *args, **kwargs):
+def eintr_retry_call[**P, R](func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
     while True:
         try:
             return func(*args, **kwargs)
-        except EnvironmentError as e:
+        except OSError as e:
             if getattr(e, 'errno', None) == errno.EINTR:
                 continue
             raise
 
 
-@lru_cache()
-def socket_address(which):
+@lru_cache
+def socket_address(which: str) -> str:
+    from calibre import force_unicode
+    from calibre.utils.filenames import ascii_filename
+
     if iswindows:
         ans = r'\\.\pipe\Calibre' + which
         try:
@@ -43,19 +41,21 @@ def socket_address(which):
                 ans += '-' + user[:100] + 'x'
     else:
         user = force_unicode(os.environ.get('USER') or os.path.basename(os.path.expanduser('~')), filesystem_encoding)
-        sock_name = '{}-calibre-{}.socket'.format(ascii_filename(user).replace(' ', '_'), which)
         if islinux:
+            sock_name = '{}-calibre-{}.socket'.format(ascii_filename(user).replace(' ', '_'), which)
             ans = '\0' + sock_name
         else:
-            from tempfile import gettempdir
-            tmp = force_unicode(gettempdir(), filesystem_encoding)
-            ans = os.path.join(tmp, sock_name)
+            ans = f'/tmp/calibre-{os.getuid()}-{which}.sock'
     return ans
 
 
-def gui_socket_address():
+def gui_socket_address() -> str:
     return socket_address('GUI' if iswindows else 'gui')
 
 
-def viewer_socket_address():
+def viewer_socket_address() -> str:
     return socket_address('Viewer' if iswindows else 'viewer')
+
+
+def cyoa_socket_address() -> str:
+    return socket_address('CYOA' if iswindows else 'cyoa')

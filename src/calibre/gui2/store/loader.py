@@ -1,36 +1,35 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-import sys, time, io, re
-from zlib import decompressobj
+import io
+import re
+import sys
+import time
 from collections import OrderedDict
 from threading import Thread
+from urllib.parse import urlencode
+from zlib import decompressobj
 
 from calibre import prints
-from calibre.constants import numeric_version, DEBUG
+from calibre.constants import DEBUG, numeric_version
 from calibre.gui2.store import StorePlugin
 from calibre.utils.config import JSONConfig
-from polyglot.urllib import urlencode
-from polyglot.builtins import iteritems, itervalues, unicode_type
 
 
 class VersionMismatch(ValueError):
-
-    def __init__(self, ver):
+    def __init__(self, ver) -> None:
         ValueError.__init__(self, 'calibre too old')
         self.ver = ver
 
 
-def download_updates(ver_map={}, server='https://code.calibre-ebook.com'):
+def download_updates(ver_map=None, server='https://code.calibre-ebook.com'):
     from calibre.utils.https import get_https_resource_securely
-    data = {k:unicode_type(v) for k, v in iteritems(ver_map)}
+
+    if ver_map is None:
+        ver_map = {}
+    data = {k: str(v) for k, v in ver_map.items()}
     data['ver'] = '1'
-    url = '%s/stores?%s'%(server, urlencode(data))
+    url = f'{server}/stores?{urlencode(data)}'
     # We use a timeout here to ensure the non-daemonic update thread does not
     # cause calibre to hang indefinitely during shutdown
     raw = get_https_resource_securely(url, timeout=90.0)
@@ -40,7 +39,7 @@ def download_updates(ver_map={}, server='https://code.calibre-ebook.com'):
         name = name.decode('utf-8')
         d = decompressobj()
         src = d.decompress(raw)
-        src = src.decode('utf-8').lstrip(u'\ufeff')
+        src = src.decode('utf-8').lstrip('\ufeff')
         # Python complains if there is a coding declaration in a unicode string
         src = re.sub(r'^#.*coding\s*[:=]\s*([-\w.]+)', '#', src, flags=re.MULTILINE)
         # Translate newlines to \n
@@ -50,15 +49,14 @@ def download_updates(ver_map={}, server='https://code.calibre-ebook.com'):
 
 
 class Stores(OrderedDict):
-
     CHECK_INTERVAL = 24 * 60 * 60
 
-    def builtins_loaded(self):
+    def builtins_loaded(self) -> None:
         self.last_check_time = 0
         self.version_map = {}
         self.cached_version_map = {}
         self.name_rmap = {}
-        for key, val in iteritems(self):
+        for key, val in self.items():
             prefix, name = val.__module__.rpartition('.')[0::2]
             if prefix == 'calibre.gui2.store.stores' and name.endswith('_plugin'):
                 module = sys.modules[val.__module__]
@@ -70,11 +68,11 @@ class Stores(OrderedDict):
         self.cache_file = JSONConfig('store/plugin_cache')
         self.load_cache()
 
-    def load_cache(self):
+    def load_cache(self) -> None:
         # Load plugins from on disk cache
         remove = set()
         pat = re.compile(r'^store_version\s*=\s*(\d+)', re.M)
-        for name, src in iteritems(self.cache_file):
+        for name, src in self.cache_file.items():
             try:
                 key = self.name_rmap[name]
             except KeyError:
@@ -83,7 +81,7 @@ class Stores(OrderedDict):
                 if m is not None:
                     try:
                         self.cached_version_map[name] = int(m.group(1))
-                    except (TypeError, ValueError):
+                    except TypeError, ValueError:
                         pass
                 continue
 
@@ -92,8 +90,9 @@ class Stores(OrderedDict):
             except VersionMismatch as e:
                 self.cached_version_map[name] = e.ver
                 continue
-            except:
+            except Exception:
                 import traceback
+
                 prints('Failed to load cached store:', name)
                 traceback.print_exc()
             else:
@@ -106,7 +105,7 @@ class Stores(OrderedDict):
                 for name in remove:
                     del self.cache_file[name]
 
-    def check_for_updates(self):
+    def check_for_updates(self) -> None:
         if hasattr(self, 'update_thread') and self.update_thread.is_alive():
             return
         if time.time() - self.last_check_time < self.CHECK_INTERVAL:
@@ -114,26 +113,25 @@ class Stores(OrderedDict):
         self.last_check_time = time.time()
         try:
             self.update_thread.start()
-        except (RuntimeError, AttributeError):
+        except RuntimeError, AttributeError:
             self.update_thread = Thread(target=self.do_update)
             self.update_thread.start()
 
-    def join(self, timeout=None):
+    def join(self, timeout=None) -> None:
         hasattr(self, 'update_thread') and self.update_thread.join(timeout)
 
     def download_updates(self):
-        ver_map = {name:max(ver, self.cached_version_map.get(name, -1))
-            for name, ver in iteritems(self.version_map)}
+        ver_map = {name: max(ver, self.cached_version_map.get(name, -1)) for name, ver in self.version_map.items()}
         try:
             updates = download_updates(ver_map)
-        except:
+        except Exception:
             import traceback
+
             traceback.print_exc()
         else:
-            for name, code in updates:
-                yield name, code
+            yield from updates
 
-    def do_update(self):
+    def do_update(self) -> None:
         replacements = {}
 
         for name, src in self.download_updates():
@@ -149,8 +147,9 @@ class Stores(OrderedDict):
                 self.cached_version_map[name] = e.ver
                 replacements[name] = src
                 continue
-            except:
+            except Exception:
                 import traceback
+
                 prints('Failed to load downloaded store:', name)
                 traceback.print_exc()
             else:
@@ -159,14 +158,13 @@ class Stores(OrderedDict):
 
         if replacements:
             with self.cache_file:
-                for name, src in iteritems(replacements):
+                for name, src in replacements.items():
                     self.cache_file[name] = src
 
-    def replace_plugin(self, ver, name, obj, source):
+    def replace_plugin(self, ver, name, obj, source) -> bool:
         if ver > self.version_map[name]:
             if DEBUG:
-                prints('Loaded', source, 'store plugin for:',
-                       self.name_rmap[name], 'at version:', ver)
+                prints('Loaded', source, 'store plugin for:', self.name_rmap[name], 'at version:', ver)
             self[self.name_rmap[name]] = obj
             self.version_map[name] = ver
             return True
@@ -178,17 +176,15 @@ class Stores(OrderedDict):
         exec(src, namespace)
         ver = namespace['store_version']
         cls = None
-        for x in itervalues(namespace):
-            if (isinstance(x, type) and issubclass(x, StorePlugin) and x is not
-                StorePlugin):
+        for x in namespace.values():
+            if isinstance(x, type) and issubclass(x, StorePlugin) and x is not StorePlugin:
                 cls = x
                 break
         if cls is None:
             raise ValueError('No store plugin found')
         if cls.minimum_calibre_version > numeric_version:
             raise VersionMismatch(ver)
-        return cls(builtin.gui, builtin.name, config=builtin.config,
-                   base_plugin=builtin.base_plugin), ver
+        return cls(builtin.gui, builtin.name, config=builtin.config, base_plugin=builtin.base_plugin), ver
 
 
 if __name__ == '__main__':
@@ -198,5 +194,5 @@ if __name__ == '__main__':
         count += 1
         print(name)
         print(code.encode('utf-8'))
-        print('\n', '_'*80, '\n', sep='')
-    print('Time to download all %d plugins: %.2f seconds'%(count, time.time() - st))
+        print('\n', '_' * 80, '\n', sep='')
+    print(f'Time to download all {count} plugins: {time.time() - st:.2f} seconds')

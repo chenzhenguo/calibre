@@ -1,51 +1,42 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
 
 import importlib
 
-from PyQt5.Qt import (
-    QIcon, Qt, QStringListModel, QListView, QSizePolicy, QHBoxLayout, QSize,
-    QStackedWidget, pyqtSignal, QScrollArea)
+from qt.core import QHBoxLayout, QIcon, QListView, QScrollArea, QSize, QSizePolicy, QStackedWidget, QStringListModel, Qt, pyqtSignal
 
-from calibre.gui2.preferences import ConfigWidgetBase, test_widget, AbortCommit
+from calibre.customize.ui import input_format_plugins, output_format_plugins
 from calibre.ebooks.conversion.plumber import Plumber
-from calibre.utils.logging import Log
-from calibre.gui2.convert.look_and_feel import LookAndFeelWidget
+from calibre.gui2.convert import config_widget_for_input_plugin
 from calibre.gui2.convert.heuristics import HeuristicsWidget
-from calibre.gui2.convert.search_and_replace import SearchAndReplaceWidget
+from calibre.gui2.convert.look_and_feel import LookAndFeelWidget
 from calibre.gui2.convert.page_setup import PageSetupWidget
+from calibre.gui2.convert.search_and_replace import SearchAndReplaceWidget
 from calibre.gui2.convert.structure_detection import StructureDetectionWidget
 from calibre.gui2.convert.toc import TOCWidget
-from calibre.customize.ui import input_format_plugins, output_format_plugins
-from calibre.gui2.convert import config_widget_for_input_plugin
-from polyglot.builtins import unicode_type
+from calibre.gui2.preferences import AbortCommit, ConfigWidgetBase, test_widget
+from calibre.utils.localization import _
+from calibre.utils.logging import Log
 
 
 class Model(QStringListModel):
-
-    def __init__(self, widgets):
+    def __init__(self, widgets) -> None:
         QStringListModel.__init__(self)
         self.widgets = widgets
         self.setStringList([w.TITLE for w in widgets])
 
-    def data(self, index, role):
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.DecorationRole:
             w = self.widgets[index.row()]
             if w.ICON:
-                return (QIcon(w.ICON))
+                return QIcon.ic(w.ICON)
         return QStringListModel.data(self, index, role)
 
 
 class ListView(QListView):
-
     current_changed = pyqtSignal(object, object)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QListView.__init__(self, parent)
         self.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Expanding)
         f = self.font()
@@ -55,18 +46,18 @@ class ListView(QListView):
         self.setFlow(QListView.Flow.TopToBottom)
         self.setSpacing(10)
 
-    def currentChanged(self, cur, prev):
-        QListView.currentChanged(self, cur, prev)
-        self.current_changed.emit(cur, prev)
+    def currentChanged(self, current, previous) -> None:
+        QListView.currentChanged(self, current, previous)
+        self.current_changed.emit(current, previous)
 
 
 class Base(ConfigWidgetBase):
+    conversion_widgets: list
+    restore_defaults_desc = _('Restore settings to default values. Only settings for the currently selected section are restored.')
 
-    restore_defaults_desc = _('Restore settings to default values. '
-            'Only settings for the currently selected section '
-            'are restored.')
+    def load_conversion_widgets(self) -> None: ...
 
-    def setupUi(self, x):
+    def setupUi(self, x) -> None:
         self.resize(720, 603)
         self.l = l = QHBoxLayout(self)
         self.list = lv = ListView(self)
@@ -74,12 +65,11 @@ class Base(ConfigWidgetBase):
         self.stack = s = QStackedWidget(self)
         l.addWidget(s, stretch=10)
 
-    def genesis(self, gui):
+    def genesis(self, gui) -> None:
         log = Log()
         log.outputs = []
 
-        self.plumber = Plumber('dummy.epub', 'dummy.epub', log, dummy=True,
-                merge_plugin_recs=False)
+        self.plumber = Plumber('dummy.epub', 'dummy.epub', log, dummy=True, merge_plugin_recs=False)
 
         def widget_factory(cls):
             plugin = getattr(cls, 'conv_plugin', None)
@@ -93,7 +83,8 @@ class Base(ConfigWidgetBase):
                         if rec.option == name:
                             ans = getattr(rec, 'help', None)
                             if ans is not None:
-                                return ans.replace('%default', unicode_type(rec.recommended_value))
+                                return ans.replace('%default', str(rec.recommended_value))
+
             return cls(self, self.plumber.get_option_by_name, hfunc, None, None)
 
         self.load_conversion_widgets()
@@ -103,6 +94,7 @@ class Base(ConfigWidgetBase):
 
         for w in widgets:
             w.changed_signal.connect(self.changed_signal)
+            w.layout().setContentsMargins(6, 6, 6, 6)
             sa = QScrollArea(self)
             sa.setWidget(w)
             sa.setWidgetResizable(True)
@@ -113,36 +105,45 @@ class Base(ConfigWidgetBase):
         self.list.current_changed.connect(self.category_current_changed)
         self.list.setCurrentIndex(self.model.index(0))
 
-    def initialize(self):
+    def initialize(self) -> None:
         ConfigWidgetBase.initialize(self)
 
-    def restore_defaults(self):
+    def restore_defaults(self, *args) -> None:
         ConfigWidgetBase.restore_defaults(self)
-        self.stack.currentWidget().widget().restore_defaults(self.plumber.get_option_by_name)
+        sa = self.stack.currentWidget()
+        assert isinstance(sa, QScrollArea)
+        inner = sa.widget()
+        assert inner is not None
+        restore = getattr(inner, 'restore_defaults', None)
+        if restore is not None:
+            restore(self.plumber.get_option_by_name)
         self.changed_signal.emit()
 
-    def commit(self):
+    def commit(self, *args):
         for widget in self.model.widgets:
             if not widget.pre_commit_check():
                 raise AbortCommit('abort')
             widget.commit(save_defaults=True)
         return ConfigWidgetBase.commit(self)
 
-    def category_current_changed(self, n, p):
+    def category_current_changed(self, n, p) -> None:
         self.stack.setCurrentIndex(n.row())
 
 
 class CommonOptions(Base):
-
-    def load_conversion_widgets(self):
-        self.conversion_widgets = [LookAndFeelWidget, HeuristicsWidget,
-                PageSetupWidget,
-                StructureDetectionWidget, TOCWidget, SearchAndReplaceWidget,]
+    def load_conversion_widgets(self) -> None:
+        self.conversion_widgets = [
+            LookAndFeelWidget,
+            HeuristicsWidget,
+            PageSetupWidget,
+            StructureDetectionWidget,
+            TOCWidget,
+            SearchAndReplaceWidget,
+        ]
 
 
 class InputOptions(Base):
-
-    def load_conversion_widgets(self):
+    def load_conversion_widgets(self) -> None:
         self.conversion_widgets = []
         for plugin in input_format_plugins():
             pw = config_widget_for_input_plugin(plugin)
@@ -152,14 +153,12 @@ class InputOptions(Base):
 
 
 class OutputOptions(Base):
-
-    def load_conversion_widgets(self):
+    def load_conversion_widgets(self) -> None:
         self.conversion_widgets = []
         for plugin in output_format_plugins():
             name = plugin.name.lower().replace(' ', '_')
             try:
-                output_widget = importlib.import_module(
-                        'calibre.gui2.convert.'+name)
+                output_widget = importlib.import_module('calibre.gui2.convert.' + name)
                 pw = output_widget.PluginWidget
                 pw.conv_plugin = plugin
                 self.conversion_widgets.append(pw)
@@ -169,6 +168,7 @@ class OutputOptions(Base):
 
 if __name__ == '__main__':
     from calibre.gui2 import Application
+
     app = Application([])
     # test_widget('Conversion', 'Input Options')
     test_widget('Conversion', 'Common Options')

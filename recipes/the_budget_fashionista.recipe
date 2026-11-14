@@ -19,11 +19,9 @@ class TheBudgetFashionista(BasicNewsRecipe):
     use_embedded_content = False
     encoding = 'utf-8'
     publisher = 'TBF GROUP, LLC.'
-    category = 'news, fashion, comsetics, women'
-    lang = 'en-US'
+    category = 'news, fashion, cosmetics, women'
+    lang = 'en'
     language = 'en'
     auto_cleanup = True
 
-    feeds = [(u'Articles',
-              u'http://feeds.feedburner.com/TheBudgetFashionista')
-    ]
+    feeds = [('Articles', 'http://feeds.feedburner.com/TheBudgetFashionista')]

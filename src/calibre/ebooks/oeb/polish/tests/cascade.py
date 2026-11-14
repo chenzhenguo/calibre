@@ -1,47 +1,65 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2016, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2016, Kovid Goyal <kovid at kovidgoyal.net>
 
 from functools import partial
+from typing import TYPE_CHECKING, TypedDict
 
 from css_parser import parseStyle
 
 from calibre.constants import iswindows
-from calibre.ebooks.oeb.base import OEB_STYLES, OEB_DOCS
-from calibre.ebooks.oeb.polish.cascade import iterrules, resolve_styles, DEFAULTS
+from calibre.ebooks.oeb.base import OEB_DOCS, OEB_STYLES
+from calibre.ebooks.oeb.polish.cascade import DEFAULTS, iterrules, resolve_styles
+from calibre.ebooks.oeb.polish.container import ContainerBase, href_to_name
 from calibre.ebooks.oeb.polish.css import remove_property_value
 from calibre.ebooks.oeb.polish.embed import find_matching_font
-from calibre.ebooks.oeb.polish.container import ContainerBase, href_to_name
 from calibre.ebooks.oeb.polish.stats import StatsCollector, font_keys, normalize_font_properties, prepare_font_rule
 from calibre.ebooks.oeb.polish.tests.base import BaseTest
+from calibre.utils.icu import lower as icu_lower
 from calibre.utils.logging import Log, Stream
-from polyglot.builtins import iteritems, unicode_type
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Mapping
+
+    from css_parser.css import CSSRule, CSSStyleSheet
+    from css_selectors import Select
+    from lxml.etree import _Element
+
+    from calibre.ebooks.oeb.polish.cascade import Values
+
+FontSpec = TypedDict(
+    'FontSpec',
+    {
+        'font-weight': str,
+        'font-style': str,
+        'font-stretch': str,
+        'font-family': str | list[str],
+        'src': str,
+        'text': set[str],
+    },
+    total=False,
+)
 
 
 class VirtualContainer(ContainerBase):
-
     tweak_mode = True
 
-    def __init__(self, files):
+    def __init__(self, files: dict[str, str | bytes]) -> None:
         s = Stream()
         self.log_stream = s.stream
         log = Log()
         log.outputs = [s]
         self.opf_version_parsed = (2, 0, 0)
         ContainerBase.__init__(self, log=log)
-        self.mime_map = {k:self.guess_type(k) for k in files}
+        self.mime_map = {k: self.guess_type(k) for k in files}
         self.files = files
 
-    def has_name(self, name):
+    def has_name(self, name: str) -> bool:
         return name in self.mime_map
 
-    def href_to_name(self, href, base=None):
+    def href_to_name(self, href: str, base: str | None = None) -> str | None:
         return href_to_name(href, ('C:\\root' if iswindows else '/root'), base)
 
-    def parsed(self, name):
+    def parsed(self, name: str) -> CSSStyleSheet | _Element | str | bytes:
         if name not in self.parsed_cache:
             mt = self.mime_map[name]
             if mt in OEB_STYLES:
@@ -53,40 +71,57 @@ class VirtualContainer(ContainerBase):
         return self.parsed_cache[name]
 
     @property
-    def spine_names(self):
+    def spine_names(self) -> Iterator[tuple[str, bool]]:
         for name in sorted(self.mime_map):
             if self.mime_map[name] in OEB_DOCS:
                 yield name, True
 
 
 class CascadeTest(BaseTest):
-
-    def test_iterrules(self):
-        def get_rules(files, name='x/one.css', l=1, rule_type=None):
+    def test_iterrules(self) -> None:
+        def get_rules(
+            files: dict[str, str | bytes], name: str = 'x/one.css', l: int = 1, rule_type: str | None = None
+        ) -> tuple[tuple[tuple[CSSRule, str, int], ...], VirtualContainer]:
             c = VirtualContainer(files)
             rules = tuple(iterrules(c, name, rule_type=rule_type))
             self.assertEqual(len(rules), l)
             return rules, c
-        get_rules({'x/one.css':'@import "../two.css";', 'two.css':'body { color: red; }'})
-        get_rules({'x/one.css':'@import "../two.css" screen;', 'two.css':'body { color: red; }'})
-        get_rules({'x/one.css':'@import "../two.css" xyz;', 'two.css':'body { color: red; }'}, l=0)
-        get_rules({'x/one.css':'@import "../two.css";', 'two.css':'body { color: red; }'}, l=0, rule_type='FONT_FACE_RULE')
-        get_rules({'x/one.css':'@import "../two.css";', 'two.css':'body { color: red; }'}, rule_type='STYLE_RULE')
-        get_rules({'x/one.css':'@media screen { body { color: red; } }'})
-        get_rules({'x/one.css':'@media xyz { body { color: red; } }'}, l=0)
-        c = get_rules({'x/one.css':'@import "../two.css";', 'two.css':'@import "x/one.css"; body { color: red; }'})[1]
+
+        get_rules({'x/one.css': '@import "../two.css";', 'two.css': 'body { color: red; }'})
+        get_rules({'x/one.css': '@import "../two.css" screen;', 'two.css': 'body { color: red; }'})
+        get_rules({'x/one.css': '@import "../two.css" xyz;', 'two.css': 'body { color: red; }'}, l=0)
+        get_rules({'x/one.css': '@import "../two.css";', 'two.css': 'body { color: red; }'}, l=0, rule_type='FONT_FACE_RULE')
+        get_rules({'x/one.css': '@import "../two.css";', 'two.css': 'body { color: red; }'}, rule_type='STYLE_RULE')
+        get_rules({'x/one.css': '@media screen { body { color: red; } }'})
+        get_rules({'x/one.css': '@media xyz { body { color: red; } }'}, l=0)
+        c = get_rules({'x/one.css': '@import "../two.css";', 'two.css': '@import "x/one.css"; body { color: red; }'})[1]
         self.assertIn('Recursive import', c.log_stream.getvalue())
 
-    def test_resolve_styles(self):
+    def test_resolve_styles(self) -> None:
 
-        def test_property(select, resolve_property, selector, name, val=None):
+        def test_property(
+            select: Select,
+            resolve_property: Callable[[_Element, str], Values | None],
+            selector: str,
+            name: str,
+            val: str | tuple[str, ...] | None = None,
+        ) -> None:
             elem = next(select(selector))
             ans = resolve_property(elem, name)
+            assert ans is not None  # all properties used in this test have defaults
             if val is None:
-                val = unicode_type(DEFAULTS[name])
+                val = str(DEFAULTS[name])
             self.assertEqual(val, ans.cssText)
 
-        def test_pseudo_property(select, resolve_pseudo_property, selector, prop, name, val=None, abort_on_missing=False):
+        def test_pseudo_property(
+            select: Select,
+            resolve_pseudo_property: Callable[..., Values | None],
+            selector: str,
+            prop: str,
+            name: str,
+            val: str | None = None,
+            abort_on_missing: bool = False,
+        ) -> None:
             elem = next(select(selector))
             ans = resolve_pseudo_property(elem, prop, name, abort_on_missing=abort_on_missing)
             if abort_on_missing:
@@ -94,12 +129,16 @@ class CascadeTest(BaseTest):
                     self.assertTrue(ans is None)
                     return
             if val is None:
-                val = unicode_type(DEFAULTS[name])
+                val = str(DEFAULTS[name])
+            assert ans is not None  # only None when abort_on_missing is True, handled above
             self.assertEqual(val, ans.cssText)
 
-        def get_maps(html, styles=None, pseudo=False):
-            html = '<html><head><link href="styles.css"></head><body>{}</body></html>'.format(html)
-            c = VirtualContainer({'index.html':html, 'styles.css':styles or 'body { color: red; font-family: "Kovid Goyal", sans-serif }'})
+        def get_maps(html: str, styles: str | None = None, pseudo: bool = False) -> partial[None]:
+            html = f'<html><head><link href="styles.css"></head><body>{html}</body></html>'
+            c = VirtualContainer({
+                'index.html': html,
+                'styles.css': styles or 'body { color: red; font-family: "Kovid Goyal", sans-serif }',
+            })
             resolve_property, resolve_pseudo_property, select = resolve_styles(c, 'index.html')
             if pseudo:
                 tp = partial(test_pseudo_property, select, resolve_pseudo_property)
@@ -146,28 +185,27 @@ class CascadeTest(BaseTest):
         t('p', 'first-letter', 'content')
         t('p', 'first-letter', 'content', abort_on_missing=True)
 
-    def test_font_stats(self):
+    def test_font_stats(self) -> None:
         embeds = '@font-face { font-family: X; src: url(X.otf) }\n@font-face { font-family: X; src: url(XB.otf); font-weight: bold }'
 
-        def get_stats(html, *fonts):
-            styles = []
-            html = '<html><head><link href="styles.css"></head><body>{}</body></html>'.format(html)
-            files = {'index.html':html, 'X.otf':b'xxx', 'XB.otf': b'xbxb'}
+        def get_stats(html: str, *fonts: dict[str, str]) -> StatsCollector:
+            styles: list[str] = []
+            html = f'<html><head><link href="styles.css"></head><body>{html}</body></html>'
+            files: dict[str, str | bytes] = {'index.html': html, 'X.otf': b'xxx', 'XB.otf': b'xbxb'}
             for font in fonts:
                 styles.append('@font-face {')
-                for k, v in iteritems(font):
+                for k, v in font.items():
                     if k == 'src':
                         files[v] = b'xxx'
-                        v = 'url(%s)' % v
-                    styles.append('%s : %s;' % (k, v))
+                        v = f'url({v})'
+                    styles.append(f'{k} : {v};')
                 styles.append('}\n')
-            html = '<html><head><link href="styles.css"></head><body>{}</body></html>'.format(html)
             files['styles.css'] = embeds + '\n'.join(styles)
             c = VirtualContainer(files)
             return StatsCollector(c, do_embed=True)
 
-        def font(family, weight=None, style=None):
-            f = {}
+        def font(family: str, weight: str | None = None, style: str | None = None) -> FontSpec:
+            f: FontSpec = {}
             if weight is not None:
                 f['font-weight'] = weight
             if style is not None:
@@ -176,19 +214,19 @@ class CascadeTest(BaseTest):
             f['font-family'] = [family]
             return f
 
-        def font_rule(src, *args, **kw):
+        def font_rule(src: str, *args: str, **kw: str) -> Mapping[str, object]:
             ans = font(*args, **kw)
             ans['font-family'] = list(map(icu_lower, ans['font-family']))
             prepare_font_rule(ans)
             ans['src'] = src
             return ans
 
-        def fkey(*args, **kw):
+        def fkey(*args: str, **kw: str) -> frozenset[tuple[str, object]]:
             f = font(*args, **kw)
             f['font-family'] = icu_lower(f['font-family'][0])
-            return frozenset((k, v) for k, v in iteritems(f) if k in font_keys)
+            return frozenset((k, v) for k, v in f.items() if k in font_keys)
 
-        def fu(text, *args, **kw):
+        def fu(text: str, *args: str, **kw: str) -> tuple[frozenset[tuple[str, object]], FontSpec]:
             key = fkey(*args, **kw)
             val = font(*args, **kw)
             val['text'] = set(text)
@@ -198,26 +236,33 @@ class CascadeTest(BaseTest):
         s = get_stats('<p style="font-family: X">abc<b>d\nef</b><i>ghi</i></p><p style="font-family: U">u</p>')
         # The normal font must include ghi as it will be used to simulate
         # italic by most rendering engines when the italic font is missing
-        self.assertEqual(s.font_stats, {'XB.otf':set('def'), 'X.otf':set('abcghi')})
-        self.assertEqual(s.font_spec_map, {'index.html':set('XU')})
-        self.assertEqual(s.all_font_rules, {'X.otf':font_rule('X.otf', 'X'), 'XB.otf':font_rule('XB.otf', 'X', 'bold')})
+        self.assertEqual(s.font_stats, {'XB.otf': set('def'), 'X.otf': set('abcghi')})
+        self.assertEqual(s.font_spec_map, {'index.html': set('XU')})
+        self.assertEqual(s.all_font_rules, {'X.otf': font_rule('X.otf', 'X'), 'XB.otf': font_rule('XB.otf', 'X', 'bold')})
         self.assertEqual(set(s.font_rule_map), {'index.html'})
         self.assertEqual(s.font_rule_map['index.html'], [font_rule('X.otf', 'X'), font_rule('XB.otf', 'X', 'bold')])
         self.assertEqual(set(s.font_usage_map), {'index.html'})
-        self.assertEqual(s.font_usage_map['index.html'], dict([fu('abc', 'X'), fu('def', 'X', weight='bold'), fu('ghi', 'X', style='italic'), fu('u', 'U')]))
+        self.assertEqual(
+            s.font_usage_map['index.html'],
+            dict([fu('abc', 'X'), fu('def', 'X', weight='bold'), fu('ghi', 'X', style='italic'), fu('u', 'U')]),
+        )
 
         s = get_stats('<p style="font-family: X; text-transform:uppercase">abc</p><b style="font-family: X; font-variant: small-caps">d\nef</b>')
-        self.assertEqual(s.font_stats, {'XB.otf':set('defDEF'), 'X.otf':set('ABC')})
+        self.assertEqual(s.font_stats, {'XB.otf': set('defDEF'), 'X.otf': set('ABC')})
+        s = get_stats('<style>.fl::first-line { font-family: X }</style><p class="fl">abc<b>def</b></p>')
+        # Technically def should not be needed in X but that is hard to achieve
+        self.assertEqual(s.font_stats, {'XB.otf': set('def'), 'X.otf': set('abcdef')})
 
-    def test_remove_property_value(self):
+    def test_remove_property_value(self) -> None:
         style = parseStyle('background-image: url(b.png); background: black url(a.png) fixed')
         for prop in style.getProperties(all=True):
-            remove_property_value(prop, lambda val:'png' in val.cssText)
-        self.assertEqual('background: black fixed', style.cssText)
+            remove_property_value(prop, lambda val: 'png' in val.cssText)
+        self.assertEqual('background: black fixed', style.cssText.rstrip(';'))
 
-    def test_fallback_font_matching(self):
-        def cf(id, weight='normal', style='normal', stretch='normal'):
-            return {'id':id, 'font-weight':weight, 'font-style':style, 'font-stretch':stretch}
+    def test_fallback_font_matching(self) -> None:
+        def cf(id: int, weight: str = 'normal', style: str = 'normal', stretch: str = 'normal') -> dict[str, int | str]:
+            return {'id': id, 'font-weight': weight, 'font-style': style, 'font-stretch': stretch}
+
         fonts = [cf(1, '500', 'oblique', 'condensed'), cf(2, '300', 'italic', 'normal')]
         self.assertEqual(find_matching_font(fonts)['id'], 2)
         fonts = [cf(1, '500', 'oblique', 'normal'), cf(2, '300', 'italic', 'normal')]

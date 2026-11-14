@@ -1,38 +1,64 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
-
 
 import os
 from copy import copy
-from collections import namedtuple
-from datetime import datetime, time
-from functools import partial
-from threading import Lock
+from datetime import date, datetime, time
+from functools import lru_cache, partial
+from typing import TYPE_CHECKING, NamedTuple, TypedDict, cast
+from urllib.parse import quote
 
 from calibre.constants import config_dir
-from calibre.db.categories import Tag
+from calibre.db.categories import Tag, category_display_order
+from calibre.db.constants import DATA_FILE_PATTERN, TEMPLATE_ICON_INDICATOR
 from calibre.ebooks.metadata.sources.identify import urls_from_identifiers
-from calibre.utils.date import isoformat, UNDEFINED_DATE, local_tz
-from calibre.utils.config import tweaks
-from calibre.utils.formatter import EvalFormatter
-from calibre.utils.file_type_icons import EXT_MAP
-from calibre.utils.icu import collation_order
-from calibre.utils.localization import calibre_langcode_to_name
 from calibre.library.comments import comments_to_html, markdown
 from calibre.library.field_metadata import category_icon_map
-from polyglot.builtins import iteritems, itervalues, range, filter, unicode_type
-from polyglot.urllib import quote
+from calibre.utils.config import tweaks
+from calibre.utils.date import UNDEFINED_DATE, isoformat, local_tz
+from calibre.utils.file_type_icons import EXT_MAP
+from calibre.utils.formatter import EvalFormatter
+from calibre.utils.icu import collation_order_for_partitioning
+from calibre.utils.icu import upper as icu_upper
+from calibre.utils.localization import _, calibre_langcode_to_name
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+
+    from qt.core import QAbstractItemModel, QModelIndex
+
+    from calibre.db.cache import Cache
+    from calibre.ebooks.metadata.book.base import FieldMetadataDict
+    from calibre.library.field_metadata import FieldMetadata
+    from calibre.srv.handler import Context
+    from calibre.srv.http_response import RequestData
+    from calibre.srv.utils import MultiDict
+    from calibre.utils.config import JSONConfig
+
+    # A node in the tag browser tree. The id is the key of the corresponding
+    # entry in the item map. The root node has an id of None.
+    class TreeNode(TypedDict):
+        id: str
+        children: list[TreeNode]
+
+    class RootNode(TypedDict):
+        id: None
+        children: list[TreeNode]
+
+    # The JSON-able data for a tree node, keyed by node id
+    type ItemMap = dict[str, dict]
+    type TagMap = dict[int, tuple[str, dict]]
+    type CategoryData = Mapping[str, list[Tag]]
 
 IGNORED_FIELDS = frozenset('cover ondevice path marked au_map'.split())
 
 
-def encode_datetime(dateval):
+def encode_datetime(dateval: date | None) -> str | None:
     if dateval is None:
-        return "None"
+        return 'None'
     if not isinstance(dateval, datetime):
         dateval = datetime.combine(dateval, time())
-    if hasattr(dateval, 'tzinfo') and dateval.tzinfo is None:
+    if dateval.tzinfo is None:
         dateval = dateval.replace(tzinfo=local_tz)
     if dateval <= UNDEFINED_DATE:
         return None
@@ -43,39 +69,48 @@ empty_val = ((), '', {})
 passthrough_comment_types = {'long-text', 'short-text'}
 
 
-def add_field(field, db, book_id, ans, field_metadata):
+def add_field(field: str, db: Cache, book_id: int, ans: dict[str, object], field_metadata: FieldMetadataDict) -> None:
     datatype = field_metadata.get('datatype')
     if datatype is not None:
         val = db._field_for(field, book_id)
         if val is not None and val not in empty_val:
             if datatype == 'datetime':
-                val = encode_datetime(val)
+                val = encode_datetime(cast('date', val))
                 if val is None:
                     return
             elif datatype == 'comments' or field == 'comments':
                 ctype = field_metadata.get('display', {}).get('interpret_as', 'html')
                 if ctype == 'markdown':
                     ans[field + '#markdown#'] = val
-                    val = markdown(val)
+                    val = markdown(cast('str', val))
                 elif ctype not in passthrough_comment_types:
-                    val = comments_to_html(val)
+                    val = comments_to_html(cast('str', val))
             elif datatype == 'composite' and field_metadata['display'].get('contains_html'):
-                val = comments_to_html(val)
+                val = comments_to_html(cast('str', val))
             ans[field] = val
 
 
-def book_as_json(db, book_id):
+def encode_stat_result(s: os.stat_result) -> dict[str, int]:
+    return {
+        'size': s.st_size,
+        'mtime_ns': s.st_mtime_ns,
+    }
+
+
+def book_as_json(db: Cache, book_id: int) -> dict[str, object] | None:
     db = db.new_api
     with db.safe_read_lock:
         fmts = db._formats(book_id, verify_formats=False)
         ans = []
         fm = {}
+        mtimes = {}
         for fmt in fmts:
             m = db.format_metadata(book_id, fmt)
             if m and m.get('size', 0) > 0:
                 ans.append(fmt)
                 fm[fmt] = m['size']
-        ans = {'formats': ans, 'format_sizes': fm}
+                mtimes[fmt] = encode_datetime(m['mtime'])
+        ans = {'formats': ans, 'format_sizes': fm, 'format_mtimes': mtimes}
         if not ans['formats'] and not db.has_id(book_id):
             return None
         fm = db.field_metadata
@@ -87,19 +122,44 @@ def book_as_json(db, book_id):
             ans['urls_from_identifiers'] = urls_from_identifiers(ids)
         langs = ans.get('languages')
         if langs:
-            ans['lang_names'] = {l:calibre_langcode_to_name(l) for l in langs}
+            ans['lang_names'] = {l: calibre_langcode_to_name(l) for l in langs}
+        link_maps = db.get_all_link_maps_for_book(book_id)
+        if link_maps:
+            ans['link_maps'] = link_maps
+        x = db.items_with_notes_in_book(book_id)
+        if x:
+            ans['items_with_notes'] = {field: {v: k for k, v in items.items()} for field, items in x.items()}
+        data_files = db.list_extra_files(book_id, use_cache=True, pattern=DATA_FILE_PATTERN)
+        if data_files:
+            ans['data_files'] = {e.relpath: encode_stat_result(e.stat_result) for e in data_files}
     return ans
 
 
 _include_fields = frozenset(Tag.__slots__) - frozenset({
-    'state', 'is_editable', 'is_searchable', 'original_name', 'use_sort_as_name', 'is_hierarchical'
+    'state',
+    'is_editable',
+    'is_searchable',
+    'original_name',
+    'use_sort_as_name',
+    'is_hierarchical',
 })
 
 
-def category_as_json(items, category, display_name, count, tooltip=None, parent=None,
-        is_editable=True, is_gst=False, is_hierarchical=False, is_searchable=True,
-        is_user_category=False, is_first_letter=False):
-    ans = {'category': category, 'name': display_name, 'is_category':True, 'count':count}
+def category_as_json(
+    items: ItemMap,
+    category: str,
+    display_name: str,
+    count: int,
+    tooltip: str | None = None,
+    parent: str | None = None,
+    is_editable: bool = True,
+    is_gst: bool = False,
+    is_hierarchical: bool | int = False,
+    is_searchable: bool = True,
+    is_user_category: bool = False,
+    is_first_letter: bool = False,
+) -> str:
+    ans = {'category': category, 'name': display_name, 'is_category': True, 'count': count}
     if tooltip:
         ans['tooltip'] = tooltip
     if parent:
@@ -116,12 +176,12 @@ def category_as_json(items, category, display_name, count, tooltip=None, parent=
         ans['is_user_category'] = True
     if is_first_letter:
         ans['is_first_letter'] = True
-    item_id = 'c' + unicode_type(len(items))
+    item_id = 'c' + str(len(items))
     items[item_id] = ans
     return item_id
 
 
-def category_item_as_json(x, clear_rating=False):
+def category_item_as_json(x: Tag, clear_rating: bool = False) -> dict[str, object]:
     ans = {}
     for k in _include_fields:
         val = getattr(x, k)
@@ -141,57 +201,132 @@ def category_item_as_json(x, clear_rating=False):
     return ans
 
 
-CategoriesSettings = namedtuple(
-    'CategoriesSettings', 'dont_collapse collapse_model collapse_at sort_by'
-    ' template using_hierarchy grouped_search_terms hidden_categories hide_empty_categories')
+@lru_cache(maxsize=2)
+def get_gprefs() -> JSONConfig:
+    from calibre.utils.config import JSONConfig
+
+    return JSONConfig('gui')
 
 
-class GroupedSearchTerms(object):
+def get_gpref(name: str, defval: object = None) -> object:
+    return get_gprefs().get(name, defval)
 
-    __slots__ = ('keys', 'vals', 'hash')
 
-    def __init__(self, src):
+def web_search_link(db: Cache, book_id: int, field: str, item_val: str) -> tuple[str, str]:
+    from calibre.ebooks.metadata.book.render import render_author_link, resolve_default_author_link, web_search_link
+
+    if field == 'authors':
+        default_author_link = resolve_default_author_link(cast('str | None', get_gpref('default_author_link')))
+        author_sort = db.author_sort_from_authors((item_val,))
+        url, tooltip = render_author_link(default_author_link, item_val, db.field_for('title', book_id), author_sort)
+    else:
+        metadata = db.field_metadata.get(field)
+        if metadata is None or not (template := metadata.get('display', {}).get('web_search_template')):
+            return '', ''
+        url, tooltip = web_search_link(template, db.get_metadata(book_id), item_val)
+    if url.partition(':')[0].lower() in ('http', 'https'):
+        return url, tooltip
+    return '', ''
+
+
+def get_icon_for_node(node: dict, parent: TreeNode, node_to_tag_map: dict[str, Tag], tag_map: TagMap, eval_formatter: EvalFormatter, db: Cache) -> None:
+    category = node['category']
+    if category in ('search', 'formats') or category.startswith('@'):
+        return
+
+    def name_for_icon(node: dict) -> str:
+        return node.get('original_name', node.get('name'))
+
+    # Maps category -> item name -> (icon, for_children), stored as JSON
+    value_icons = cast('dict[str, dict[str, tuple[str, bool]]]', get_gpref('tags_browser_value_icons') or {})
+    val_icon, for_children = value_icons.get(category, {}).get(name_for_icon(node), (None, False))
+    if val_icon is None:
+        # No specific icon. Walk up the hierarchy checking parents.
+        par: TreeNode | dict = parent
+        while True:
+            pid = str(par['id'])
+            if not pid.startswith('n'):
+                # 'Real' nodes (tag nodes) start with 'n'
+                break
+            pt = node_to_tag_map[pid]
+            pd = tag_map[id(pt)][1]
+            val_icon, for_children = value_icons.get(pd['category'], {}).get(name_for_icon(pd), (None, False))
+            if val_icon is not None and for_children:
+                break
+            par = pd
+            val_icon = None
+    if val_icon is None and TEMPLATE_ICON_INDICATOR in value_icons.get(category, {}):
+        v = {
+            'category': category,
+            'value': name_for_icon(node),
+            'count': node.get('count', ''),
+            'avg_rating': node.get('avg_rating', ''),
+        }
+        t = eval_formatter.safe_format(value_icons[category][TEMPLATE_ICON_INDICATOR][0], v, 'VALUE_ICON_TEMPLATE_ERROR', {}, database=db)
+        if t:
+            # Use POSIX path separator
+            val_icon = 'template_icons/' + t
+        else:
+            val_icon = None
+    if val_icon:
+        node['value_icon'] = val_icon
+
+
+class CategoriesSettings(NamedTuple):
+    dont_collapse: frozenset[str]
+    collapse_model: str
+    collapse_at: int
+    sort_by: str
+    template: str | None
+    using_hierarchy: frozenset[str]
+    grouped_search_terms: GroupedSearchTerms | tuple
+    hidden_categories: frozenset[str]
+    hide_empty_categories: bool
+    folders_first: bool
+
+
+class GroupedSearchTerms:
+    __slots__ = ('hash', 'keys', 'vals')
+
+    def __init__(self, src: Iterable[str]) -> None:
         self.keys = frozenset(src)
         self.hash = hash(self.keys)
-        # We dont need to store values since this is used as part of a key for
+        # We don't need to store values since this is used as part of a key for
         # a cache and if the values have changed the cache will be invalidated
         # for other reasons anyway (last_modified() will have changed on the
         # db)
 
-    def __contains__(self, val):
+    def __contains__(self, val: object) -> bool:
         return val in self.keys
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return self.hash
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         try:
-            return self.keys == other.keys
+            return self.keys == other.keys  # ty: ignore[missing-attribute]
         except AttributeError:
             return False
 
 
-_icon_map = None
-_icon_map_lock = Lock()
+@lru_cache(maxsize=2)  # this is thread safe supposedly
+def icon_map() -> dict[str, str | dict[str, str]]:
+    _icon_map: dict[str, str | dict[str, str]] = {}
+    from calibre.gui2 import gprefs
+
+    _icon_map = {}
+    _icon_map.update(category_icon_map)
+    custom_icons = gprefs.get('tags_browser_category_icons', {})
+    for k, v in custom_icons.items():
+        if os.access(os.path.join(config_dir, 'tb_icons', v), os.R_OK):
+            _icon_map[k] = '_' + quote(v)
+    _icon_map['file_type_icons'] = {k: f'mimetypes/{v}.png' for k, v in EXT_MAP.items()}
+    return _icon_map
 
 
-def icon_map():
-    global _icon_map
-    with _icon_map_lock:
-        if _icon_map is None:
-            from calibre.gui2 import gprefs
-            _icon_map = category_icon_map.copy()
-            custom_icons = gprefs.get('tags_browser_category_icons', {})
-            for k, v in iteritems(custom_icons):
-                if os.access(os.path.join(config_dir, 'tb_icons', v), os.R_OK):
-                    _icon_map[k] = '_' + quote(v)
-            _icon_map['file_type_icons'] = {
-                k:'mimetypes/%s.png' % v for k, v in iteritems(EXT_MAP)
-            }
-        return _icon_map
-
-
-def categories_settings(query, db, gst_container=GroupedSearchTerms):
+def categories_settings(
+    query: MultiDict[str] | Mapping[str, str], db: Cache, gst_container: Callable[[dict[str, list[str]]], GroupedSearchTerms | tuple] = GroupedSearchTerms
+) -> CategoriesSettings:
     dont_collapse = frozenset(query.get('dont_collapse', '').split(','))
     partition_method = query.get('partition_method', 'first letter')
     if partition_method not in {'first letter', 'disable', 'partition'}:
@@ -208,25 +343,47 @@ def categories_settings(query, db, gst_container=GroupedSearchTerms):
     if collapse_model != 'disable':
         if sort_by != 'name':
             collapse_model = 'partition'
-        template = tweaks['categories_collapsed_%s_template' % sort_by]
+        template = tweaks[f'categories_collapsed_{sort_by}_template']
     using_hierarchy = frozenset(db.pref('categories_using_hierarchy', []))
     hidden_categories = frozenset(db.pref('tag_browser_hidden_categories', set()))
     return CategoriesSettings(
-        dont_collapse, collapse_model, collapse_at, sort_by, template,
-        using_hierarchy, gst_container(db.pref('grouped_search_terms', {})),
-        hidden_categories, query.get('hide_empty_categories') == 'yes')
+        dont_collapse,
+        collapse_model,
+        collapse_at,
+        sort_by,
+        template,
+        using_hierarchy,
+        gst_container(db.pref('grouped_search_terms', {})),
+        hidden_categories,
+        query.get('hide_empty_categories') == 'yes',
+        query.get('folders_first') == 'yes',
+    )
 
 
-def create_toplevel_tree(category_data, items, field_metadata, opts):
-    # Create the basic tree, containing all top level categories , user
+def create_toplevel_tree(
+    category_data: CategoryData, items: ItemMap, field_metadata: FieldMetadata, opts: CategoriesSettings, db: Cache
+) -> tuple[RootNode, dict[str, TreeNode], list[str], list[TreeNode]]:
+    # Create the basic tree, containing all top level categories, user
     # categories and grouped search terms
-    last_category_node, category_node_map, root = None, {}, {'id':None, 'children':[]}
-    node_id_map = {}
+    category_node_map: dict[str, TreeNode]
+    node: TreeNode
+    current_root: RootNode | TreeNode
+    last_category_node, category_node_map = None, {}
+    root: RootNode = {'id': None, 'children': []}
+    node_id_map: dict[str, TreeNode] = {}
+    category_nodes: list[str]
+    recount_nodes: list[TreeNode]
     category_nodes, recount_nodes = [], []
-    order = tweaks['tag_browser_category_order']
-    defvalue = order.get('*', 100)
-    categories = [category for category in field_metadata if category in category_data]
-    scats = sorted(categories, key=lambda x: order.get(x, defvalue))
+    # User categories are listed in category_display_order using their prefix.
+    # In other words, both @AAA.BB and @AAA.CC appear once as @AAA. We need to
+    # process the category list to get the "real" user categories.
+    scats_t = category_display_order(db.pref('tag_browser_category_order', ()), tuple(category_data.keys()))
+    scats = []
+    for category in scats_t:
+        if not category.startswith('@'):
+            scats.append(category)
+        else:
+            scats.extend(sorted(c for c in category_data.keys() if c == category or c.startswith(category + '.')))
 
     for category in scats:
         is_user_category = category.startswith('@')
@@ -252,14 +409,24 @@ def create_toplevel_tree(category_data, items, field_metadata, opts):
                 path += p
                 if path not in category_node_map:
                     last_category_node = category_as_json(
-                        items, path, (p[1:] if i == 0 else p), len(cdata),
-                        parent=last_category_node, tooltip=tooltip,
-                        is_gst=is_gst, is_editable=((not is_gst) and (i == (len(path_parts)-1))),
-                        is_hierarchical=False if is_gst else 5, is_user_category=True
+                        items,
+                        path,
+                        (p[1:] if i == 0 else p),
+                        len(cdata),
+                        parent=last_category_node,
+                        tooltip=tooltip,
+                        is_gst=is_gst,
+                        is_editable=((not is_gst) and (i == (len(path_parts) - 1))),
+                        is_hierarchical=False if is_gst else 5,
+                        is_user_category=True,
                     )
-                    node_id_map[last_category_node] = category_node_map[path] = node = {'id':last_category_node, 'children':[]}
+                    node_id_map[last_category_node] = category_node_map[path] = node = {
+                        'id': last_category_node,
+                        'children': [],
+                    }
                     category_nodes.append(last_category_node)
                     recount_nodes.append(node)
+                    assert current_root['children'] is not None
                     current_root['children'].append(node)
                     current_root = node
                 else:
@@ -267,11 +434,12 @@ def create_toplevel_tree(category_data, items, field_metadata, opts):
                     last_category_node = current_root['id']
                 path += '.'
         else:
-            last_category_node = category_as_json(
-                items, category, field_metadata[category]['name'], len(cdata),
-                tooltip=tooltip
-            )
-            category_node_map[category] = node_id_map[last_category_node] = node = {'id':last_category_node, 'children':[]}
+            last_category_node = category_as_json(items, category, cast('str', field_metadata[category]['name']), len(cdata), tooltip=tooltip)
+            category_node_map[category] = node_id_map[last_category_node] = node = {
+                'id': last_category_node,
+                'children': [],
+            }
+            assert root['children'] is not None
             root['children'].append(node)
             category_nodes.append(last_category_node)
             recount_nodes.append(node)
@@ -279,11 +447,11 @@ def create_toplevel_tree(category_data, items, field_metadata, opts):
     return root, node_id_map, category_nodes, recount_nodes
 
 
-def build_first_letter_list(category_items):
+def build_first_letter_list(category_items: list[Tag]) -> list[str]:
     # Build a list of 'equal' first letters by noticing changes
     # in ICU's 'ordinal' for the first letter. In this case, the
     # first letter can actually be more than one letter long.
-    cl_list = [None] * len(category_items)
+    cl_list: list[str] = [None] * len(category_items)  # ty: ignore[invalid-assignment]  every entry is set below
     last_ordnum = 0
     last_c = ' '
     for idx, tag in enumerate(category_items):
@@ -291,7 +459,7 @@ def build_first_letter_list(category_items):
             c = ' '
         else:
             c = icu_upper(tag.sort)
-        ordnum, ordlen = collation_order(c)
+        ordnum, ordlen = collation_order_for_partitioning(c)
         if last_ordnum != ordnum:
             last_c = c[0:ordlen]
             last_ordnum = ordnum
@@ -302,19 +470,32 @@ def build_first_letter_list(category_items):
 categories_with_ratings = {'authors', 'series', 'publisher', 'tags'}
 
 
-def get_name_components(name):
+def get_name_components(name: str) -> list[str]:
     components = list(filter(None, [t.strip() for t in name.split('.')]))
     if not components or '.'.join(components) != name:
         components = [name]
     return components
 
 
-def collapse_partition(collapse_nodes, items, category_node, idx, tag, opts, top_level_component,
-    cat_len, category_is_hierarchical, category_items, eval_formatter, is_gst,
-    last_idx, node_parent):
+def collapse_partition(
+    collapse_nodes: list[TreeNode],
+    items: ItemMap,
+    category_node: TreeNode,
+    idx: int,
+    tag: Tag,
+    opts: CategoriesSettings,
+    top_level_component: str,
+    cat_len: int,
+    category_is_hierarchical: bool,
+    category_items: list[Tag],
+    eval_formatter: EvalFormatter,
+    is_gst: bool,
+    last_idx: int,
+    node_parent: TreeNode,
+) -> tuple[int, TreeNode]:
     # Only partition at the top level. This means that we must not do a break
     # until the outermost component changes.
-    if idx >= last_idx + opts.collapse_at and not tag.original_name.startswith(top_level_component+'.'):
+    if idx >= last_idx + opts.collapse_at and not tag.original_name.startswith(top_level_component + '.'):
         last = idx + opts.collapse_at - 1 if cat_len > idx + opts.collapse_at else cat_len - 1
         if category_is_hierarchical:
             ct = copy(category_items[last])
@@ -325,43 +506,83 @@ def collapse_partition(collapse_nodes, items, category_node, idx, tag, opts, top
             ct2 = copy(tag)
             components = get_name_components(ct2.original_name)
             ct2.sort = ct2.name = components[0]
-            format_data = {'last': ct, 'first':ct2}
+            format_data = {'last': ct, 'first': ct2}
         else:
             format_data = {'first': tag, 'last': category_items[last]}
 
-        name = eval_formatter.safe_format(opts.template, format_data, '##TAG_VIEW##', None)
+        # template is always set when collapse_model is not disable
+        name = eval_formatter.safe_format(cast('str', opts.template), format_data, '##TAG_VIEW##', None)
         if not name.startswith('##TAG_VIEW##'):
             # Formatter succeeded
             node_id = category_as_json(
-                items, items[category_node['id']].category, name, 0,
-                parent=category_node['id'], is_editable=False, is_gst=is_gst,
-                is_hierarchical=category_is_hierarchical, is_searchable=False)
-            node_parent = {'id':node_id, 'children':[]}
+                items,
+                items[category_node['id']]['category'],
+                name,
+                0,
+                parent=category_node['id'],
+                is_editable=False,
+                is_gst=is_gst,
+                is_hierarchical=category_is_hierarchical,
+                is_searchable=False,
+            )
+            node_parent = {'id': node_id, 'children': []}
             collapse_nodes.append(node_parent)
             category_node['children'].append(node_parent)
         last_idx = idx  # remember where we last partitioned
     return last_idx, node_parent
 
 
-def collapse_first_letter(collapse_nodes, items, category_node, cl_list, idx, is_gst, category_is_hierarchical, collapse_letter, node_parent):
+def collapse_first_letter(
+    collapse_nodes: list[TreeNode],
+    items: ItemMap,
+    category_node: TreeNode,
+    cl_list: Sequence[str],
+    idx: int,
+    is_gst: bool,
+    category_is_hierarchical: bool,
+    collapse_letter: str | None,
+    node_parent: TreeNode,
+) -> tuple[str | None, TreeNode]:
     cl = cl_list[idx]
     if cl != collapse_letter:
         collapse_letter = cl
         node_id = category_as_json(
-            items, items[category_node['id']]['category'], collapse_letter, 0,
-            parent=category_node['id'], is_editable=False, is_gst=is_gst,
-            is_hierarchical=category_is_hierarchical, is_first_letter=True)
-        node_parent = {'id':node_id, 'children':[]}
+            items,
+            items[category_node['id']]['category'],
+            collapse_letter,
+            0,
+            parent=category_node['id'],
+            is_editable=False,
+            is_gst=is_gst,
+            is_hierarchical=category_is_hierarchical,
+            is_first_letter=True,
+        )
+        node_parent = {'id': node_id, 'children': []}
         category_node['children'].append(node_parent)
         collapse_nodes.append(node_parent)
     return collapse_letter, node_parent
 
 
 def process_category_node(
-        category_node, items, category_data, eval_formatter, field_metadata,
-        opts, tag_map, hierarchical_tags, node_to_tag_map, collapse_nodes,
-        intermediate_nodes, hierarchical_items):
+    category_node: TreeNode,
+    items: ItemMap,
+    category_data: CategoryData,
+    eval_formatter: EvalFormatter,
+    field_metadata: FieldMetadata,
+    opts: CategoriesSettings,
+    tag_map: TagMap,
+    hierarchical_tags: set[int],
+    node_to_tag_map: dict[str, Tag],
+    collapse_nodes: list[TreeNode],
+    intermediate_nodes: dict[tuple[str | None, str], TreeNode],
+    hierarchical_items: set[str],
+    folder_items: set[str],
+    db: Cache,
+) -> None:
     category = items[category_node['id']]['category']
+    if category not in category_data:
+        # This can happen for user categories that are hierarchical and missing their parent.
+        return
     category_items = category_data[category]
     cat_len = len(category_items)
     if cat_len <= 0:
@@ -370,46 +591,71 @@ def process_category_node(
     is_gst = items[category_node['id']].get('is_gst', False)
     collapse_model = 'disable' if category in opts.dont_collapse else opts.collapse_model
     fm = field_metadata[category]
-    category_child_map = {}
+    category_child_map: dict[tuple[str, str | None], TreeNode] = {}
     is_user_category = fm['kind'] == 'user' and not is_gst
     top_level_component = 'z' + category_items[0].original_name
     last_idx = -opts.collapse_at
     category_is_hierarchical = (
-        category in opts.using_hierarchy and opts.sort_by == 'name' and
-        category not in {'authors', 'publisher', 'news', 'formats', 'rating'}
+        category in opts.using_hierarchy and opts.sort_by == 'name' and category not in {'authors', 'publisher', 'news', 'formats', 'rating'}
     )
-    clear_rating = category not in categories_with_ratings and not fm['is_custom'] and not fm['kind'] == 'user'
+    clear_rating = category not in categories_with_ratings and not fm['is_custom'] and fm['kind'] != 'user'
     collapsible = collapse_model != 'disable' and cat_len > opts.collapse_at
     partitioned = collapse_model == 'partition'
     cl_list = build_first_letter_list(category_items) if collapsible and collapse_model == 'first letter' else ()
-    node_parent = category_node
+    node_parent: TreeNode = category_node
 
-    def create_tag_node(tag, parent):
+    def create_tag_node(tag: Tag, parent: TreeNode) -> tuple[TreeNode, dict]:
         # User categories contain references to items in other categories, so
         # reflect that in the node structure as well.
         node_data = tag_map.get(id(tag), None)
         if node_data is None:
-            node_id = 'n%d' % len(tag_map)
+            node_id = f'n{len(tag_map)}'
             node_data = items[node_id] = category_item_as_json(tag, clear_rating=clear_rating)
             tag_map[id(tag)] = (node_id, node_data)
             node_to_tag_map[node_id] = tag
         else:
             node_id, node_data = node_data
-        node = {'id':node_id, 'children':[]}
+        node: TreeNode = {'id': node_id, 'children': []}
         parent['children'].append(node)
+        try:
+            get_icon_for_node(node_data, parent, node_to_tag_map, tag_map, eval_formatter, db)
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
         return node, node_data
 
     for idx, tag in enumerate(category_items):
-
         if collapsible:
             if partitioned:
                 last_idx, node_parent = collapse_partition(
-                collapse_nodes, items, category_node, idx, tag, opts, top_level_component,
-                cat_len, category_is_hierarchical, category_items,
-                eval_formatter, is_gst, last_idx, node_parent)
+                    collapse_nodes,
+                    items,
+                    category_node,
+                    idx,
+                    tag,
+                    opts,
+                    top_level_component,
+                    cat_len,
+                    category_is_hierarchical,
+                    category_items,
+                    eval_formatter,
+                    is_gst,
+                    last_idx,
+                    node_parent,
+                )
             else:  # by 'first letter'
                 collapse_letter, node_parent = collapse_first_letter(
-                    collapse_nodes, items, category_node, cl_list, idx, is_gst, category_is_hierarchical, collapse_letter, node_parent)
+                    collapse_nodes,
+                    items,
+                    category_node,
+                    cl_list,
+                    idx,
+                    is_gst,
+                    category_is_hierarchical,
+                    collapse_letter,
+                    node_parent,
+                )
         else:
             node_parent = category_node
 
@@ -417,8 +663,7 @@ def process_category_node(
         components = get_name_components(tag.original_name) if category_is_hierarchical or tag_is_hierarchical else (tag.original_name,)
 
         if not tag_is_hierarchical and (
-                is_user_category or not category_is_hierarchical or len(components) == 1 or
-                (fm['is_custom'] and fm['display'].get('is_names', False))
+            is_user_category or not category_is_hierarchical or len(components) == 1 or (fm['is_custom'] and fm['display'].get('is_names', False))
         ):  # A non-hierarchical leaf item in a non-hierarchical category
             node, item = create_tag_node(tag, node_parent)
             category_child_map[item['name'], item['category']] = node
@@ -442,11 +687,15 @@ def process_category_node(
                     item['is_hierarchical'] = 3 if tag.category == 'search' else 5
                     if tag.id_set is not None:
                         item['id_set'] |= tag.id_set
+                    if i == len(components) - 1:
+                        # An item with books of its own was merged into an
+                        # intermediate node
+                        folder_items.discard(node_id)
                     hierarchical_items.add(node_id)
                     hierarchical_tags.add(id(node_to_tag_map[node_parent['id']]))
                 else:
                     if i < len(components) - 1:  # Non-leaf node
-                        original_name = '.'.join(components[:i+1])
+                        original_name = '.'.join(components[: i + 1])
                         inode = intermediate_nodes.get((tag.category, original_name), None)
                         if inode is None:
                             t = copy(tag)
@@ -454,11 +703,12 @@ def process_category_node(
                             t.is_editable, t.is_searchable = False, category == 'search'
                             node_parent, item = create_tag_node(t, node_parent)
                             hierarchical_tags.add(id(t))
+                            folder_items.add(node_parent['id'])
                             intermediate_nodes[tag.category, original_name] = node_parent
                         else:
                             item = items[inode['id']]
                             ch = node_parent['children']
-                            node_parent = {'id':inode['id'], 'children':[]}
+                            node_parent = {'id': inode['id'], 'children': []}
                             ch.append(node_parent)
                     else:
                         node_parent, item = create_tag_node(tag, node_parent)
@@ -473,17 +723,39 @@ def process_category_node(
             node_parent = orig_node_parent
 
 
-def iternode_descendants(node):
+def iternode_descendants(node: TreeNode) -> Iterator[TreeNode]:
     for child in node['children']:
         yield child
-        for x in iternode_descendants(child):
-            yield x
+        yield from iternode_descendants(child)
 
 
-def fillout_tree(root, items, node_id_map, category_nodes, category_data, field_metadata, opts, book_rating_map):
+def sort_folders_first(node: TreeNode, items: ItemMap, folder_items: set[str]) -> None:
+    # The sort is stable, so the chosen sort order is kept among the folders
+    # and among the other items. Category nodes such as partitions and sub
+    # user categories are not moved.
+    node['children'].sort(key=lambda c: not items[c['id']].get('is_category', False) and c['id'] not in folder_items)
+    for child in node['children']:
+        if child['children']:
+            sort_folders_first(child, items, folder_items)
+
+
+def fillout_tree(
+    root: RootNode,
+    items: ItemMap,
+    node_id_map: dict[str, TreeNode],
+    category_nodes: list[str],
+    category_data: CategoryData,
+    field_metadata: FieldMetadata,
+    opts: CategoriesSettings,
+    book_rating_map: Mapping[int, int],
+    db: Cache,
+) -> None:
     eval_formatter = EvalFormatter()
     tag_map, hierarchical_tags, node_to_tag_map = {}, set(), {}
     first, later, collapse_nodes, intermediate_nodes, hierarchical_items = [], [], [], {}, set()
+    # ids of the intermediate nodes of hierarchical items, that is, the ones
+    # that have no books of their own
+    folder_items = set()
     # User categories have to be processed after normal categories as they can
     # reference hierarchical nodes that were created only during processing of
     # normal categories
@@ -495,9 +767,25 @@ def fillout_tree(root, items, node_id_map, category_nodes, category_data, field_
     for coll in (first, later):
         for cnode in coll:
             process_category_node(
-                cnode, items, category_data, eval_formatter, field_metadata,
-                opts, tag_map, hierarchical_tags, node_to_tag_map,
-                collapse_nodes, intermediate_nodes, hierarchical_items)
+                cnode,
+                items,
+                category_data,
+                eval_formatter,
+                field_metadata,
+                opts,
+                tag_map,
+                hierarchical_tags,
+                node_to_tag_map,
+                collapse_nodes,
+                intermediate_nodes,
+                hierarchical_items,
+                folder_items,
+                db,
+            )
+
+    if opts.folders_first and folder_items:
+        for cnode in root['children']:
+            sort_folders_first(cnode, items, folder_items)
 
     # Do not store id_set in the tag items as it is a lot of data, with not
     # much use. Instead only update the ratings and counts based on id_set
@@ -507,11 +795,11 @@ def fillout_tree(root, items, node_id_map, category_nodes, category_data, field_
         for book_id in item['id_set']:
             rating = book_rating_map.get(book_id, 0)
             if rating:
-                total += rating/2.0
+                total += rating / 2.0
                 count += 1
-        item['avg_rating'] = float(total)/count if count else 0
+        item['avg_rating'] = float(total) / count if count else 0
 
-    for item_id, item in itervalues(tag_map):
+    for item_id, item in tag_map.values():
         id_len = len(item.pop('id_set', ()))
         if id_len:
             item['count'] = id_len
@@ -521,69 +809,84 @@ def fillout_tree(root, items, node_id_map, category_nodes, category_data, field_
         item['count'] = sum(1 for _ in iternode_descendants(node))
 
 
-def render_categories(opts, db, category_data):
+def render_categories(opts: CategoriesSettings, db: Cache, category_data: CategoryData) -> dict[str, object]:
     items = {}
     with db.safe_read_lock:
-        root, node_id_map, category_nodes, recount_nodes = create_toplevel_tree(category_data, items, db.field_metadata, opts)
-        fillout_tree(root, items, node_id_map, category_nodes, category_data, db.field_metadata, opts, db.fields['rating'].book_value_map)
+        root, node_id_map, category_nodes, recount_nodes = create_toplevel_tree(category_data, items, db.field_metadata, opts, db)
+        fillout_tree(
+            root,
+            items,
+            node_id_map,
+            category_nodes,
+            category_data,
+            db.field_metadata,
+            opts,
+            db.fields['rating'].book_value_map,
+            db,
+        )
     for node in recount_nodes:
         item = items[node['id']]
         item['count'] = sum(1 for x in iternode_descendants(node) if not items[x['id']].get('is_category', False))
     if opts.hidden_categories:
         # We have to remove hidden categories after all processing is done as
         # items from a hidden category could be in a user category
-        root['children'] = list(filter((lambda child:items[child['id']]['category'] not in opts.hidden_categories), root['children']))
+        root['children'] = list(filter((lambda child: items[child['id']]['category'] not in opts.hidden_categories), root['children']))
     if opts.hide_empty_categories:
-        root['children'] = list(filter((lambda child:items[child['id']]['count'] > 0), root['children']))
-    return {'root':root, 'item_map': items}
+        root['children'] = list(filter((lambda child: items[child['id']]['count'] > 0), root['children']))
+    return {'root': root, 'item_map': items}
 
 
-def categories_as_json(ctx, rd, db, opts, vl):
+def categories_as_json(ctx: Context, rd: RequestData, db: Cache, opts: CategoriesSettings, vl: str | None) -> bytes:
     return ctx.get_tag_browser(rd, db, opts, partial(render_categories, opts), vl=vl)
+
 
 # Test tag browser {{{
 
 
-def dump_categories_tree(data):
+def dump_categories_tree(data: dict) -> str:
     root, items = data['root'], data['item_map']
     ans, indent = [], '  '
 
-    def dump_node(node, level=0):
+    def dump_node(node: TreeNode, level: int = 0) -> None:
         item = items[node['id']]
         rating = item.get('avg_rating', None) or 0
         if rating:
-            rating = ',rating=%.1f' % rating
+            rating = f',rating={rating:.1f}'
         try:
-            ans.append(indent*level + item['name'] + ' [count=%s%s]' % (item['count'], rating or ''))
+            ans.append(indent * level + item['name'] + ' [count={}{}]'.format(item['count'], rating or ''))
         except KeyError:
             print(item)
             raise
         for child in node['children']:
-            dump_node(child, level+1)
+            dump_node(child, level + 1)
         if level == 0:
             ans.append('')
+
     [dump_node(c) for c in root['children']]
     return '\n'.join(ans)
 
 
-def dump_tags_model(m):
-    from PyQt5.Qt import QModelIndex, Qt
+def dump_tags_model(m: QAbstractItemModel) -> str:
+    from qt.core import QModelIndex, Qt
+
     ans, indent = [], '  '
 
-    def dump_node(index, level=-1):
+    def dump_node(index: QModelIndex, level: int = -1) -> None:
         if level > -1:
-            ans.append(indent*level + index.data(Qt.ItemDataRole.UserRole).dump_data())
+            ans.append(indent * level + index.data(Qt.ItemDataRole.UserRole).dump_data())
         for i in range(m.rowCount(index)):
             dump_node(m.index(i, 0, index), level + 1)
         if level == 0:
             ans.append('')
+
     dump_node(QModelIndex())
     return '\n'.join(ans)
 
 
-def test_tag_browser(library_path=None):
-    ' Compare output of server and GUI tag browsers '
+def test_tag_browser(library_path: str | None = None) -> None:
+    "Compare output of server and GUI tag browsers"
     from calibre.library import db
+
     olddb = db(library_path)
     db = olddb.new_api
     opts = categories_settings({}, db)
@@ -594,12 +897,14 @@ def test_tag_browser(library_path=None):
     srv_data = dump_categories_tree(data)
     from calibre.gui2 import Application, gprefs
     from calibre.gui2.tag_browser.model import TagsModel
+
     prefs = {
-        'tags_browser_category_icons':gprefs['tags_browser_category_icons'],
-        'tags_browser_collapse_at':opts.collapse_at,
+        'tags_browser_category_icons': gprefs['tags_browser_category_icons'],
+        'tags_browser_collapse_at': opts.collapse_at,
         'tags_browser_partition_method': opts.collapse_model,
         'tag_browser_dont_collapse': opts.dont_collapse,
         'tag_browser_hide_empty_categories': opts.hide_empty_categories,
+        'tag_browser_folders_first': opts.folders_first,
     }
     app = Application([])
     m = TagsModel(None, prefs)
@@ -609,8 +914,11 @@ def test_tag_browser(library_path=None):
         print('No differences found in the two Tag Browser implementations')
         raise SystemExit(0)
     from calibre.gui2.tweak_book.diff.main import Diff
+
     d = Diff(show_as_window=True)
     d.string_diff(m_data, srv_data, left_name='GUI', right_name='server')
-    d.exec_()
+    d.exec()
     del app
+
+
 # }}}

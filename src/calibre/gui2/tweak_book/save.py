@@ -1,67 +1,69 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
-
-import shutil, os, errno
+import errno
+import os
+import shutil
+import stat
+from queue import Empty, LifoQueue
 from threading import Thread
 
-from PyQt5.Qt import (QObject, pyqtSignal, QLabel, QWidget, QHBoxLayout, Qt, QSize)
+from qt.core import QHBoxLayout, QLabel, QObject, QSize, Qt, QWidget, pyqtSignal
 
 from calibre.constants import iswindows
-from calibre.ptempfile import PersistentTemporaryFile
 from calibre.gui2.progress_indicator import ProgressIndicator
+from calibre.ptempfile import PersistentTemporaryFile
 from calibre.utils import join_with_timeout
 from calibre.utils.filenames import atomic_rename, format_permissions
-from polyglot.queue import LifoQueue, Empty
+from calibre.utils.localization import _
 
 
-def save_dir_container(container, path):
+def save_dir_container(container, path) -> None:
     if not os.path.exists(path):
         os.makedirs(path)
     if not os.path.isdir(path):
-        raise ValueError('%s is not a folder, cannot save a directory based container to it' % path)
+        raise ValueError(f'{path} is not a folder, cannot save a directory based container to it')
     container.commit(path)
 
 
 def save_container(container, path):
     if container.is_dir:
         return save_dir_container(container, path)
-    temp = PersistentTemporaryFile(
-        prefix=('_' if iswindows else '.'), suffix=os.path.splitext(path)[1], dir=os.path.dirname(path))
-    if hasattr(os, 'fchmod'):
+    temp = PersistentTemporaryFile(prefix=('_' if iswindows else '.'), suffix=os.path.splitext(path)[1], dir=os.path.dirname(path))
+    if hasattr(os, 'fchown'):
         # Ensure file permissions and owner information is preserved
         fno = temp.fileno()
         st = None
         try:
             st = os.stat(path)
-        except EnvironmentError as err:
+        except OSError as err:
             if err.errno != errno.ENOENT:
                 raise
             # path may not exist if we are saving a copy, in which case we use
             # the metadata from the original book
             try:
                 st = os.stat(container.path_to_ebook)
-            except EnvironmentError as err:
+            except OSError as err:
                 if err.errno != errno.ENOENT:
                     raise
                 # Somebody deleted the original file
         if st is not None:
             try:
-                os.fchmod(fno, st.st_mode)
-            except EnvironmentError as err:
+                os.fchmod(fno, st.st_mode | stat.S_IWUSR)
+            except OSError as err:
                 if err.errno != errno.EPERM:
                     raise
-                raise EnvironmentError('Failed to change permissions of %s to %s (%s), with error: %s. Most likely the %s directory has a restrictive umask' % (
-                    temp.name, oct(st.st_mode), format_permissions(st.st_mode), errno.errorcode[err.errno], os.path.dirname(temp.name)))
+                err_code = errno.errorcode.get(err.errno, str(err.errno))
+                raise OSError(
+                    f'Failed to change permissions of {temp.name} to {oct(st.st_mode)} ({format_permissions(st.st_mode)}), '
+                    f'with error: {err_code}. Most likely the {os.path.dirname(temp.name)} directory has a restrictive umask'
+                )
             try:
                 os.fchown(fno, st.st_uid, st.st_gid)
-            except EnvironmentError as err:
+            except OSError as err:
                 if err.errno not in (errno.EPERM, errno.EACCES):
                     # ignore chown failure as user could be editing file belonging
-                    # to a different user, in which case we really cant do anything
+                    # to a different user, in which case we really can't do anything
                     # about it short of making the file update non-atomic
                     raise
 
@@ -75,10 +77,11 @@ def save_container(container, path):
             os.remove(temp)
 
 
-def send_message(msg=''):
+def send_message(msg='') -> None:
     if msg:
         from calibre.gui2.listener import send_message_in_process
-        send_message_in_process('bookedited:'+msg)
+
+        send_message_in_process('bookedited:' + msg)
 
 
 def find_first_existing_ancestor(path):
@@ -91,8 +94,7 @@ def find_first_existing_ancestor(path):
 
 
 class SaveWidget(QWidget):
-
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QWidget.__init__(self, parent)
         self.l = l = QHBoxLayout(self)
         self.setLayout(l)
@@ -104,26 +106,25 @@ class SaveWidget(QWidget):
         self.pi.setVisible(False)
         self.stop()
 
-    def start(self):
+    def start(self) -> None:
         self.pi.setDisplaySize(QSize(self.label.height(), self.label.height()))
         self.pi.setVisible(True)
         self.pi.startAnimation()
         self.label.setText(_('Saving...'))
 
-    def stop(self):
+    def stop(self) -> None:
         self.pi.setVisible(False)
         self.pi.stopAnimation()
         self.label.setText('')
 
 
 class SaveManager(QObject):
-
     start_save = pyqtSignal()
     report_error = pyqtSignal(object)
     save_done = pyqtSignal()
     check_for_completion = pyqtSignal()
 
-    def __init__(self, parent, notify=None):
+    def __init__(self, parent, notify=None) -> None:
         QObject.__init__(self, parent)
         self.count = 0
         self.last_saved = -1
@@ -140,11 +141,11 @@ class SaveManager(QObject):
         self.start_save.connect(w.start, type=Qt.ConnectionType.QueuedConnection)
         self.save_done.connect(w.stop, type=Qt.ConnectionType.QueuedConnection)
 
-    def schedule(self, tdir, container):
+    def schedule(self, tdir, container) -> None:
         self.count += 1
         self.requests.put((self.count, tdir, container))
 
-    def run(self):
+    def run(self) -> None:
         while True:
             x = self.requests.get()
             if x is None:
@@ -155,25 +156,33 @@ class SaveManager(QObject):
             try:
                 count, tdir, container = x
                 error_occurred = self.process_save(count, tdir, container)
-            except:
+            except Exception:
                 import traceback
+
                 traceback.print_exc()
             finally:
                 self.requests.task_done()
             if not error_occurred:
                 self.check_for_completion.emit()
 
-    def notify_calibre(self):
+    def notify_calibre(self) -> None:
         while True:
             if not self.notify_requests.get():
                 break
-            send_message(self.notify_data)
+            try:
+                send_message(self.notify_data)
+            except Exception:
+                # calibre may not be running, dont let that kill this thread
+                # as the user could start calibre again before the next save
+                import traceback
 
-    def clear_notify_data(self):
+                traceback.print_exc()
+
+    def clear_notify_data(self) -> None:
         self.notify_data = None
 
-    def __empty_queue(self):
-        ' Only to be used during shutdown '
+    def __empty_queue(self) -> None:
+        "Only to be used during shutdown"
         while True:
             try:
                 self.requests.get_nowait()
@@ -191,8 +200,9 @@ class SaveManager(QObject):
         error_occurred = False
         try:
             self.do_save(tdir, container)
-        except:
+        except Exception:
             import traceback
+
             self.report_error.emit(traceback.format_exc())
             error_occurred = True
         self.save_done.emit()
@@ -200,7 +210,7 @@ class SaveManager(QObject):
             self.notify_requests.put(True)
         return error_occurred
 
-    def do_save(self, tdir, container):
+    def do_save(self, tdir, container) -> None:
         try:
             save_container(container, container.path_to_ebook)
         finally:
@@ -210,7 +220,7 @@ class SaveManager(QObject):
     def has_tasks(self):
         return bool(self.requests.unfinished_tasks)
 
-    def wait(self, timeout=30):
+    def wait(self, timeout=30) -> bool:
         if timeout is None:
             self.requests.join()
         else:
@@ -220,6 +230,6 @@ class SaveManager(QObject):
                 return False
         return True
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         self.requests.put(None)
         self.notify_requests.put(None)

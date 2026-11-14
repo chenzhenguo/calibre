@@ -1,80 +1,115 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPL v3 Copyright: 2019, Kovid Goyal <kovid at kovidgoyal.net>
 
 # Imports {{{
-
-
 import copy
 import json
 import os
 import signal
 import sys
-from collections import namedtuple
-from html5_parser import parse
-from io import BytesIO
+from functools import lru_cache
 from itertools import count, repeat
-from PyQt5.Qt import (
-    QApplication, QMarginsF, QObject, QPageLayout, Qt, QTimer, QUrl, pyqtSignal
+from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, cast
+from urllib.parse import urlparse
+
+from html5_parser import parse
+from lxml import etree
+from qt.core import QApplication, QByteArray, QMarginsF, QObject, QPageLayout, Qt, QTimer, QUrl, pyqtSignal, sip
+from qt.webengine import (
+    QWebEnginePage,
+    QWebEngineProfile,
+    QWebEngineSettings,
+    QWebEngineUrlRequestInfo,
+    QWebEngineUrlRequestInterceptor,
+    QWebEngineUrlRequestJob,
+    QWebEngineUrlSchemeHandler,
 )
-from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
-from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineProfile
 
 from calibre import detect_ncpus, human_readable, prepare_string_for_xml
-from calibre.constants import __version__, iswindows
+from calibre.constants import FAKE_HOST, FAKE_PROTOCOL, __appname__, __version__, ismacos, iswindows
 from calibre.ebooks.metadata.xmp import metadata_to_xmp_packet
-from calibre.ebooks.oeb.base import XHTML, XPath
+from calibre.ebooks.oeb.base import XHTML, XPath, rewrite_idrefs
 from calibre.ebooks.oeb.polish.container import Container as ContainerBase
 from calibre.ebooks.oeb.polish.toc import get_toc
-from calibre.ebooks.pdf.image_writer import (
-    Image, PDFMetadata, draw_image_page, get_page_layout
-)
-from calibre.ebooks.pdf.render.serialize import PDFStream
-from calibre.gui2 import setup_unix_signals
-from calibre.gui2.webengine import secure_webengine
+from calibre.ebooks.oeb.polish.utils import guess_type
+from calibre.ebooks.pdf.image_writer import PDFMetadata, get_page_layout
+from calibre.gui2 import qapplication_or_fail, setup_unix_signals
 from calibre.srv.render_book import check_for_maths
 from calibre.utils.fonts.sfnt.container import Sfnt, UnsupportedFont
 from calibre.utils.fonts.sfnt.errors import NoGlyphs
 from calibre.utils.fonts.sfnt.merge import merge_truetype_fonts_for_pdf
 from calibre.utils.fonts.sfnt.subset import pdf_subset
-from calibre.utils.logging import default_log
+from calibre.utils.localization import _
+from calibre.utils.logging import Log, default_log
 from calibre.utils.monotonic import monotonic
-from calibre.utils.podofo import (
-    dedup_type3_fonts, get_podofo, remove_unused_fonts, set_metadata_implementation
-)
+from calibre.utils.podofo import add_image_page, dedup_type3_fonts, get_podofo, remove_unused_fonts, set_metadata_implementation
+from calibre.utils.resources import get_path as P
 from calibre.utils.short_uuid import uuid4
-from polyglot.builtins import filter, iteritems, map, range, unicode_type
-from polyglot.urllib import urlparse
+from calibre.utils.webengine import secure_webengine, send_reply, setup_profile
+from polyglot.builtins import as_bytes
 
-OK, KILL_SIGNAL = range(0, 2)
-HANG_TIME = 60  # seconds
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from optparse import Values
+
+    from lxml.etree import _Element
+
+    from calibre.ebooks.metadata.book.base import Metadata
+    from calibre.ebooks.oeb.polish.toc import TOC
+    from calibre_extensions.podofo import PDFDoc, PDFOutlineItem
+
+    type Job = tuple[str, QPageLayout, str]
+    type ProgressReporter = Callable[[float, str], object]
+    type WArray = list[int | float | list[int | float]]
+
 # }}}
+
+OK, KILL_SIGNAL = range(2)
+HANG_TIME = 60  # seconds
+PRINT_HANG_TIME = 600  # seconds
 
 
 # Utils {{{
-def data_as_pdf_doc(data):
+def data_as_pdf_doc(data: bytes) -> PDFDoc:
     podofo = get_podofo()
     ans = podofo.PDFDoc()
     ans.load(data)
     return ans
 
 
-def preprint_js():
-    ans = getattr(preprint_js, 'ans', None)
-    if ans is None:
-        ans = preprint_js.ans = P('pdf-preprint.js', data=True).decode('utf-8')
+_preprint_js_cache: str | None = None
+
+
+def preprint_js() -> str:
+    global _preprint_js_cache
+    if _preprint_js_cache is None:
+        _preprint_js_cache = P('pdf-preprint.js', data=True).decode('utf-8').replace('HYPHEN_CHAR', 'true' if ismacos else 'false', 1)
+    return _preprint_js_cache
+
+
+def parsed_html(container: ContainerBase, name: str) -> _Element:
+    ans = container.parsed(name)
+    assert isinstance(ans, etree._Element)  # only called for spine items and the skeleton, which are (X)HTML
     return ans
 
 
-def last_tag(root):
+def last_tag(root: _Element) -> _Element:
     return tuple(root.iterchildren('*'))[-1]
 
 
-def create_skeleton(container):
+def create_skeleton(container: ContainerBase) -> str:
     spine_name = tuple(container.spine_names)[-1][0]
-    root = container.parsed(spine_name)
+    root = parsed_html(container, spine_name)
     root = copy.deepcopy(root)
-    body = last_tag(root)
+    body = None
+    for child in tuple(root.iterchildren('*')):
+        if body is None:
+            if child.tag == XHTML('body') or child.tag == 'body':
+                body = child
+        else:
+            root.remove(child)
+    if body is None:
+        body = last_tag(root)
     body.text = body.tail = None
     del body[:]
     name = container.add_file(spine_name, b'', modify_name_if_needed=True)
@@ -82,13 +117,13 @@ def create_skeleton(container):
     return name
 
 
-def local_name(x):
+def local_name(x: str) -> str:
     return x.split('}', 1)[-1].lower()
 
 
-def fix_fullscreen_images(container):
+def fix_fullscreen_images(container: ContainerBase) -> None:
 
-    def is_svg_fs_markup(names, svg):
+    def is_svg_fs_markup(names: list[str], svg: _Element | None) -> bool:
         if svg is not None:
             if len(names) == 2 or len(names) == 3:
                 if names[-1] == 'image' and names[-2] == 'svg':
@@ -98,14 +133,16 @@ def fix_fullscreen_images(container):
         return False
 
     for file_name, is_linear in container.spine_names:
-        root = container.parsed(file_name)
+        root = parsed_html(container, file_name)
         root_kids = tuple(root.iterchildren('*'))
         if not root_kids:
             continue
         body = root_kids[-1]
         child_tags = []
         for child in body.iterchildren('*'):
-            tag = local_name(child.tag)
+            ctag = child.tag
+            assert isinstance(ctag, str)  # iterchildren('*') yields only elements
+            tag = local_name(ctag)
             if tag in ('script', 'style'):
                 continue
             child_tags.append(tag)
@@ -115,208 +152,336 @@ def fix_fullscreen_images(container):
             names = []
             svg = None
             for elem in body.iterdescendants('*'):
-                name = local_name(elem.tag)
-                if name != 'style' and name != 'script':
+                etag = elem.tag
+                assert isinstance(etag, str)  # iterdescendants('*') yields only elements
+                name = local_name(etag)
+                if name not in {'style', 'script'}:
                     names.append(name)
                     if name == 'svg':
                         svg = elem
             if is_svg_fs_markup(names, svg):
+                assert svg is not None
                 svg.set('width', '100vw')
                 svg.set('height', '100vh')
                 container.dirty(file_name)
+
+
 # }}}
 
 
 # Renderer {{{
 class Container(ContainerBase):
-
     tweak_mode = True
     is_dir = True
 
-    def __init__(self, opf_path, log, root_dir=None):
+    def __init__(self, opf_path: str, log: Log, root_dir: str | None = None) -> None:
         ContainerBase.__init__(self, root_dir or os.path.dirname(opf_path), opf_path, log)
 
 
+class UrlSchemeHandler(QWebEngineUrlSchemeHandler):
+    def __init__(self, container: ContainerBase, parent: QObject | None = None) -> None:
+        QWebEngineUrlSchemeHandler.__init__(self, parent)
+        self.allowed_hosts = (FAKE_HOST,)
+        self.container = container
+
+    def requestStarted(self, a0: QWebEngineUrlRequestJob | None) -> None:
+        assert a0 is not None  # Qt always passes a job
+        if bytes(a0.requestMethod()) != b'GET':
+            return self.fail_request(a0, QWebEngineUrlRequestJob.Error.RequestDenied)
+        url = a0.requestUrl()
+        host = url.host()
+        if host not in self.allowed_hosts or url.scheme() != FAKE_PROTOCOL:
+            return self.fail_request(a0)
+        path = url.path()
+        if path.startswith('/book/'):
+            name = path[len('/book/') :]
+            try:
+                mime_type = self.container.mime_map.get(name) or guess_type(name)
+                try:
+                    with self.container.open(name) as f:
+                        q = os.path.abspath(f.name)
+                        if not q.startswith(self.container.root):
+                            raise FileNotFoundError('Attempt to leave sandbox')
+                        data = f.read()
+                except FileNotFoundError:
+                    print(f'Could not find file {name} in book', file=sys.stderr)
+                    a0.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+                    return
+                data = as_bytes(data)
+                mime_type = {
+                    # Prevent warning in console about mimetype of fonts
+                    'application/vnd.ms-opentype': 'application/x-font-ttf',
+                    'application/x-font-truetype': 'application/x-font-ttf',
+                    'application/font-sfnt': 'application/x-font-ttf',
+                }.get(mime_type, mime_type)
+                send_reply(a0, mime_type, data)
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
+                return self.fail_request(a0, QWebEngineUrlRequestJob.Error.RequestFailed)
+        elif path.startswith('/mathjax/'):
+            try:
+                _ign, _ign, base, rest = path.split('/', 3)
+            except ValueError:
+                print(f'Could not find file {path} in mathjax', file=sys.stderr)
+                a0.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+                return
+            try:
+                mime_type = guess_type(rest)
+                if base == 'loader' and '/' not in rest and '\\' not in rest:
+                    data = P(rest, allow_user_override=False, data=True)
+                elif base == 'data':
+                    q = os.path.abspath(os.path.join(mathjax_dir(), rest))
+                    if not q.startswith(mathjax_dir()):
+                        raise FileNotFoundError('')
+                    with open(q, 'rb') as f:
+                        data = f.read()
+                else:
+                    raise FileNotFoundError('')
+                send_reply(a0, mime_type, data)
+            except FileNotFoundError:
+                print(f'Could not find file {path} in mathjax', file=sys.stderr)
+                a0.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+                return
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
+                return self.fail_request(a0, QWebEngineUrlRequestJob.Error.RequestFailed)
+        else:
+            return self.fail_request(a0)
+
+    def fail_request(self, rq: QWebEngineUrlRequestJob, fail_code: QWebEngineUrlRequestJob.Error | None = None) -> None:
+        if fail_code is None:
+            fail_code = QWebEngineUrlRequestJob.Error.UrlNotFound
+        rq.fail(fail_code)
+        print(f'Blocking FAKE_PROTOCOL request: {rq.requestUrl().toString()} with code: {fail_code}', file=sys.stderr)
+
+
+# }}}
+
+
 class Renderer(QWebEnginePage):
-
     work_done = pyqtSignal(object, object)
+    result_key: str  # set by RenderManager.assign_work()
 
-    def __init__(self, opts, parent, log):
+    def __init__(self, opts: Values, parent: RenderManager, log: Log) -> None:
         QWebEnginePage.__init__(self, parent.profile, parent)
         secure_webengine(self)
         self.working = False
         self.log = log
         self.load_complete = False
         self.settle_time = 0
-        self.wait_for_title = None
+        self.wait_for_title: str | None = None
         s = self.settings()
-        s.setAttribute(s.JavascriptEnabled, True)
-        s.setFontSize(s.DefaultFontSize, opts.pdf_default_font_size)
-        s.setFontSize(s.DefaultFixedFontSize, opts.pdf_mono_font_size)
-        s.setFontSize(s.MinimumLogicalFontSize, 8)
-        s.setFontSize(s.MinimumFontSize, 8)
-        std = {
-            'serif': opts.pdf_serif_family,
-            'sans' : opts.pdf_sans_family,
-            'mono' : opts.pdf_mono_family
-        }.get(opts.pdf_standard_font, opts.pdf_serif_family)
+        assert s is not None
+        s.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+        s.setFontSize(QWebEngineSettings.FontSize.DefaultFontSize, int(opts.pdf_default_font_size))
+        s.setFontSize(QWebEngineSettings.FontSize.DefaultFixedFontSize, int(opts.pdf_mono_font_size))
+        s.setFontSize(QWebEngineSettings.FontSize.MinimumLogicalFontSize, 8)
+        s.setFontSize(QWebEngineSettings.FontSize.MinimumFontSize, 8)
+        std = {'serif': opts.pdf_serif_family, 'sans': opts.pdf_sans_family, 'mono': opts.pdf_mono_family}.get(opts.pdf_standard_font, opts.pdf_serif_family)
         if std:
-            s.setFontFamily(s.StandardFont, std)
+            s.setFontFamily(QWebEngineSettings.FontFamily.StandardFont, std)
         if opts.pdf_serif_family:
-            s.setFontFamily(s.SerifFont, opts.pdf_serif_family)
+            s.setFontFamily(QWebEngineSettings.FontFamily.SerifFont, opts.pdf_serif_family)
         if opts.pdf_sans_family:
-            s.setFontFamily(s.SansSerifFont, opts.pdf_sans_family)
+            s.setFontFamily(QWebEngineSettings.FontFamily.SansSerifFont, opts.pdf_sans_family)
         if opts.pdf_mono_family:
-            s.setFontFamily(s.FixedFont, opts.pdf_mono_family)
+            s.setFontFamily(QWebEngineSettings.FontFamily.FixedFont, opts.pdf_mono_family)
 
         self.titleChanged.connect(self.title_changed)
         self.loadStarted.connect(self.load_started)
         self.loadProgress.connect(self.load_progress)
         self.loadFinished.connect(self.load_finished)
         self.load_hang_check_timer = t = QTimer(self)
-        self.load_started_at = 0
+        self.load_started_at = 0.0
         t.setTimerType(Qt.TimerType.VeryCoarseTimer)
         t.setInterval(HANG_TIME * 1000)
         t.setSingleShot(True)
         t.timeout.connect(self.on_load_hang)
+        self.print_hang_check_timer = t = QTimer(self)
+        t.setTimerType(Qt.TimerType.VeryCoarseTimer)
+        t.setInterval(PRINT_HANG_TIME * 1000)
+        t.setSingleShot(True)
+        t.timeout.connect(self.on_print_hang)
+        self.renderProcessTerminated.connect(self.render_process_terminated)
 
-    def load_started(self):
+    def fail(self, msg: str) -> None:
+        self.load_hang_check_timer.stop()
+        self.print_hang_check_timer.stop()
+        if self.working:
+            self.working = False
+            self.work_done.emit(self, msg)
+
+    def render_process_terminated(self, status: QWebEnginePage.RenderProcessTerminationStatus, exit_code: int) -> None:
+        if self.working:
+            self.fail(
+                f'Rendering of {self.url().toString()} failed as the render process terminated abnormally'
+                f' with status: {status.name} and exit code: {exit_code}.'
+                ' This can be caused by bugs in the rendering engine triggered by some fonts, for example color emoji fonts.'
+            )
+
+    def on_print_hang(self) -> None:
+        self.fail(
+            f'Rendering of {self.url().toString()} not complete after {int(monotonic() - self.job_started_at)} seconds, aborting.'
+            ' This can be caused by bugs in the rendering engine triggered by some fonts, for example color emoji fonts.'
+        )
+
+    def load_started(self) -> None:
         self.load_started_at = monotonic()
         self.load_complete = False
         self.load_hang_check_timer.start()
 
-    def load_progress(self, amt):
+    def load_progress(self, amt: int) -> None:
         self.load_hang_check_timer.start()
 
-    def on_load_hang(self):
-        self.log(self.log_prefix, 'Loading not complete after {} seconds, aborting.'.format(int(monotonic() - self.load_started_at)))
+    def on_load_hang(self) -> None:
+        self.log(self.log_prefix, f'Loading not complete after {int(monotonic() - self.load_started_at)} seconds, aborting.')
         self.load_finished(False)
 
-    def title_changed(self, title):
+    def title_changed(self, title: str) -> None:
         if self.wait_for_title and title == self.wait_for_title and self.load_complete:
             QTimer.singleShot(self.settle_time, self.print_to_pdf)
 
     @property
-    def log_prefix(self):
+    def log_prefix(self) -> str:
         return os.path.basename(self.url().toLocalFile()) + ':'
 
-    def load_finished(self, ok):
+    def load_finished(self, ok: bool) -> None:
         self.load_complete = True
         self.load_hang_check_timer.stop()
-        if not ok:
-            self.working = False
-            self.work_done.emit(self, 'Load of {} failed'.format(self.url().toString()))
+        if not self.working:
             return
+        if not ok:
+            self.fail(f'Load of {self.url().toString()} failed')
+            return
+        self.print_hang_check_timer.start()
         if self.wait_for_title and self.title() != self.wait_for_title:
             self.log(self.log_prefix, 'Load finished, waiting for title to change to:', self.wait_for_title)
             return
         QTimer.singleShot(int(1000 * self.settle_time), self.print_to_pdf)
 
-    def javaScriptConsoleMessage(self, level, message, linenum, source_id):
+    def javaScriptConsoleMessage(self, level: QWebEnginePage.JavaScriptConsoleMessageLevel, message: str | None, lineNumber: int, sourceID: str | None) -> None:
         try:
-            self.log('{}:{}:{}'.format(source_id, linenum, message))
+            self.log(f'{sourceID}:{lineNumber}:{message}')
         except Exception:
             pass
 
-    def print_to_pdf(self):
+    def print_to_pdf(self) -> None:
         self.runJavaScript(preprint_js(), self.start_print)
 
-    def start_print(self, *a):
+    def start_print(self, *a: object) -> None:
         self.printToPdf(self.printing_done, self.page_layout)
 
-    def printing_done(self, pdf_data):
+    def printing_done(self, pdf_data: QByteArray | bytes | bytearray | memoryview) -> None:
+        if sip.isdeleted(self):
+            return
+        self.print_hang_check_timer.stop()
+        if not self.working:
+            return  # job already failed because of a timeout or render process crash
+        data = bytes(pdf_data)
+        if not data:
+            self.fail(f'Rendering of {self.url().toString()} failed, no PDF data was produced')
+            return
         self.working = False
-        self.work_done.emit(self, bytes(pdf_data))
+        self.work_done.emit(self, data)
 
-    def convert_html_file(self, path, page_layout, settle_time=0, wait_for_title=None):
+    def convert_html_file(self, path: str, page_layout: QPageLayout, settle_time: int = 0, wait_for_title: str | None = None) -> None:
         self.working = True
         self.load_complete = False
         self.wait_for_title = wait_for_title
 
         self.settle_time = settle_time
         self.page_layout = page_layout
-        self.setUrl(QUrl.fromLocalFile(path))
+        url = QUrl(f'{FAKE_PROTOCOL}://{FAKE_HOST}/')
+        url.setPath(path)
+        self.setUrl(url)
+        self.job_started_at = monotonic()
 
 
 class RequestInterceptor(QWebEngineUrlRequestInterceptor):
+    log: Log
 
-    def interceptRequest(self, request_info):
-        method = bytes(request_info.requestMethod())
+    def interceptRequest(self, info: QWebEngineUrlRequestInfo) -> None:
+        method = bytes(info.requestMethod())
         if method not in (b'GET', b'HEAD'):
-            self.log.warn('Blocking URL request with method: {}'.format(method))
-            request_info.block(True)
+            self.log.warn(f'Blocking URL request with method: {method}')
+            info.block(True)
             return
-        qurl = request_info.requestUrl()
-        if qurl.scheme() != 'file':
-            self.log.warn('Blocking URL request with scheme: {}'.format(qurl.scheme()))
-            request_info.block(True)
-            return
-        path = qurl.toLocalFile()
-        path = os.path.normcase(os.path.abspath(path))
-        if not path.startswith(self.container_root) and not path.startswith(self.resources_root):
-            self.log.warn('Blocking request with path: {}'.format(path))
-            request_info.block(True)
+        qurl = info.requestUrl()
+        if qurl.scheme() != FAKE_PROTOCOL:
+            self.log.warn(f'Blocking URL request {qurl.toString()} as it is not for a resource in the book')
+            info.block(True)
             return
 
 
 class RenderManager(QObject):
-
-    def __init__(self, opts, log, container_root):
+    def __init__(self, opts: Values, log: Log, container: ContainerBase) -> None:
         QObject.__init__(self)
         self.interceptor = RequestInterceptor(self)
-        self.has_maths = {}
+        self.has_maths: dict[str, bool] = {}
         self.interceptor.log = self.log = log
-        self.interceptor.container_root = os.path.normcase(os.path.abspath(container_root))
-        self.interceptor.resources_root = os.path.normcase(os.path.abspath(os.path.dirname(mathjax_dir())))
         ans = QWebEngineProfile(QApplication.instance())
+        setup_profile(ans)
+        self.url_handler = UrlSchemeHandler(container, parent=ans)
+        ans.installUrlSchemeHandler(QByteArray(FAKE_PROTOCOL.encode('ascii')), self.url_handler)
         ua = 'calibre-pdf-output ' + __version__
         ans.setHttpUserAgent(ua)
         s = ans.settings()
+        assert s is not None
         s.setDefaultTextEncoding('utf-8')
         ans.setUrlRequestInterceptor(self.interceptor)
         self.profile = ans
 
         self.opts = opts
-        self.workers = []
+        self.workers: list[Renderer] = []
         self.max_workers = detect_ncpus()
         if iswindows:
             self.original_signal_handlers = {}
         else:
             self.original_signal_handlers = setup_unix_signals(self)
 
-    def create_worker(self):
+    def create_worker(self) -> None:
         worker = Renderer(self.opts, self, self.log)
         worker.work_done.connect(self.work_done)
         self.workers.append(worker)
 
-    def signal_received(self, read_fd):
+    def signal_received(self, read_fd: int) -> None:
         try:
             os.read(read_fd, 1024)
-        except EnvironmentError:
+        except OSError:
             return
-        QApplication.instance().exit(KILL_SIGNAL)
+        qapplication_or_fail().exit(KILL_SIGNAL)
 
-    def block_signal_handlers(self):
+    def block_signal_handlers(self) -> None:
         for sig in self.original_signal_handlers:
             signal.signal(sig, lambda x, y: None)
 
-    def restore_signal_handlers(self):
+    def restore_signal_handlers(self) -> None:
         for sig, handler in self.original_signal_handlers.items():
             signal.signal(sig, handler)
 
-    def run_loop(self):
+    def run_loop(self) -> int:
         self.block_signal_handlers()
         try:
-            return QApplication.exec_()
+            return QApplication.exec()
         finally:
             self.restore_signal_handlers()
 
-    def convert_html_files(self, jobs, settle_time=0, wait_for_title=None, has_maths=None):
+    def convert_html_files(
+        self, jobs: Sequence[Job], settle_time: int = 0, wait_for_title: str | None = None, has_maths: dict[str, bool] | None = None
+    ) -> dict[str, bytes | str]:
         self.has_maths = has_maths or {}
+        self.render_count = 0
+        self.total_count = len(jobs)
         while len(self.workers) < min(len(jobs), self.max_workers):
             self.create_worker()
         self.pending = list(jobs)
-        self.results = {}
+        self.log(f'Rendering {len(self.pending)} HTML files')
+        self.results: dict[str, bytes | str] = {}
+        self.failure: str | None = None
         self.settle_time = settle_time
         self.wait_for_title = wait_for_title
         QTimer.singleShot(0, self.assign_work)
@@ -326,22 +491,24 @@ class RenderManager(QObject):
             raise SystemExit('Kill signal received')
         if ret != OK:
             raise SystemExit('Unknown error occurred')
+        if self.failure is not None:
+            raise SystemExit(self.failure)
         return self.results
 
-    def evaljs(self, js):
+    def evaljs(self, js: str) -> object:
         if not self.workers:
             self.create_worker()
         w = self.workers[0]
-        self.evaljs_result = None
+        self.evaljs_result: object = None
         w.runJavaScript(js, self.evaljs_callback)
-        QApplication.exec_()
+        QApplication.exec()
         return self.evaljs_result
 
-    def evaljs_callback(self, result):
+    def evaljs_callback(self, result: object) -> None:
         self.evaljs_result = result
-        QApplication.instance().exit(0)
+        qapplication_or_fail().exit(0)
 
-    def assign_work(self):
+    def assign_work(self) -> None:
         free_workers = [w for w in self.workers if not w.working]
         while free_workers and self.pending:
             html_file, page_layout, result_key = self.pending.pop()
@@ -354,97 +521,150 @@ class RenderManager(QObject):
                 settle_time *= 2
             w.convert_html_file(html_file, page_layout, settle_time=settle_time, wait_for_title=wait_for_title)
 
-    def work_done(self, worker, result):
+    def work_done(self, worker: Renderer, result: bytes | str) -> None:
         self.results[worker.result_key] = result
+        if isinstance(result, str):
+            # No point rendering the remaining files as the conversion has failed
+            self.failure = result
+            self.pending = []
+            qapplication_or_fail().exit(OK)
+            return
+        for w in self.workers:
+            if not w.working and w.job_started_at > 0:
+                time_taken = monotonic() - w.job_started_at
+                self.render_count += 1
+                self.log.debug(f'Rendered: {worker.result_key} in {time_taken:.1f} seconds ({self.render_count}/{self.total_count})')
+                w.job_started_at = 0
         if self.pending:
             self.assign_work()
         else:
             for w in self.workers:
                 if w.working:
                     return
-            QApplication.instance().exit(OK)
+            qapplication_or_fail().exit(OK)
 
 
-def resolve_margins(margins, page_layout):
+def resolve_margins(margins: Margins | None, page_layout: QPageLayout) -> ResolvedMargins:
     old_margins = page_layout.marginsPoints()
 
-    def m(which):
+    def m(which: str) -> float:
         ans = getattr(margins, which, None)
         if ans is None:
             ans = getattr(old_margins, which)()
         return ans
-    return Margins(*map(m, 'left top right bottom'.split()))
+
+    return ResolvedMargins(*map(m, 'left top right bottom'.split()))
 
 
-def job_for_name(container, name, margins, page_layout):
-    index_file = container.name_to_abspath(name)
+def job_for_name(container: ContainerBase, name: str, margins: Margins | None, page_layout: QPageLayout) -> Job:
+    index_file = '/book/' + name
     if margins:
         page_layout = QPageLayout(page_layout)
         page_layout.setUnits(QPageLayout.Unit.Point)
         new_margins = QMarginsF(*resolve_margins(margins, page_layout))
         page_layout.setMargins(new_margins)
     return index_file, page_layout, name
+
+
 # }}}
 
 
 # Metadata {{{
-def update_metadata(pdf_doc, pdf_metadata):
+def update_metadata(pdf_doc: PDFDoc, pdf_metadata: PDFMetadata) -> None:
     if pdf_metadata.mi:
         xmp_packet = metadata_to_xmp_packet(pdf_metadata.mi)
         set_metadata_implementation(
-            pdf_doc, pdf_metadata.title, pdf_metadata.mi.authors,
-            pdf_metadata.mi.book_producer, pdf_metadata.mi.tags, xmp_packet)
+            pdf_doc,
+            pdf_metadata.title,
+            pdf_metadata.mi.authors,
+            pdf_metadata.mi.book_producer,
+            pdf_metadata.mi.tags,
+            xmp_packet,
+        )
 
 
-def add_cover(pdf_doc, cover_data, page_layout, opts):
-    buf = BytesIO()
-    page_size = page_layout.fullRectPoints().size()
-    img = Image(cover_data)
-    writer = PDFStream(buf, (page_size.width(), page_size.height()), compress=True)
-    writer.apply_fill(color=(1, 1, 1))
-    draw_image_page(writer, img, preserve_aspect_ratio=opts.preserve_cover_aspect_ratio)
-    writer.end()
-    cover_pdf_doc = data_as_pdf_doc(buf.getvalue())
-    pdf_doc.insert_existing_page(cover_pdf_doc)
+def add_cover(pdf_doc: PDFDoc, cover_data: bytes, page_layout: QPageLayout, opts: Values) -> None:
+    r = page_layout.fullRect(QPageLayout.Unit.Point)
+    add_image_page(
+        pdf_doc,
+        cover_data,
+        page_size=(r.left(), r.top(), r.width(), r.height()),
+        preserve_aspect_ratio=opts.preserve_cover_aspect_ratio,
+    )
+
+
 # }}}
-
 
 # Margin groups {{{
 
-Margins = namedtuple('Margins', 'left top right bottom')
-MarginFile = namedtuple('MarginFile', 'name margins')
+
+class Margins(NamedTuple):
+    left: float | None
+    top: float | None
+    right: float | None
+    bottom: float | None
 
 
-def dict_to_margins(val, d=None):
+class ResolvedMargins(NamedTuple):
+    left: float
+    top: float
+    right: float
+    bottom: float
+
+
+class MarginFile(NamedTuple):
+    name: str
+    margins: Margins | None
+
+
+def dict_to_margins(val: Mapping[str, float], d: float | None = None) -> Margins:
     return Margins(val.get('left', d), val.get('top', d), val.get('right', d), val.get('bottom', d))
 
 
-def create_margin_files(container):
+def create_margin_files(container: ContainerBase) -> Iterator[MarginFile]:
     for name, is_linear in container.spine_names:
-        root = container.parsed(name)
-        margins = root.get('data-calibre-pdf-output-page-margins')
-        if margins:
-            margins = dict_to_margins(json.loads(margins))
+        root = parsed_html(container, name)
+        raw_margins = root.get('data-calibre-pdf-output-page-margins')
+        margins = dict_to_margins(json.loads(raw_margins)) if raw_margins else None
         yield MarginFile(name, margins)
+
+
 # }}}
 
 
-# Link handling  {{{
-def add_anchors_markup(root, uuid, anchors):
+# Link handling {{{
+def add_anchors_markup(root: _Element, uuid: str, anchors: Iterable[str]) -> None:
     body = last_tag(root)
+    # A separate column spanning element is used to force the page break, as
+    # when body is multi-column a page break on a non-spanning element only
+    # causes a column break, so the anchors end up in a column alongside
+    # content, which is then lost when the anchors page is deleted.
+    # See https://bugs.launchpad.net/calibre/+bug/2142731
+    # The anchors themselves must not be inside the spanner as some versions
+    # of Chromium report the location of the spanner and its descendants as
+    # being on the first page, causing the anchors page to not be deleted.
+    # See https://bugs.launchpad.net/calibre/+bug/2170285
+    breaker = body.makeelement(
+        XHTML('div'),
+        style='display:block !important; page-break-before: always !important; break-before: always !important; column-span: all !important;'
+        ' height: 0 !important; margin: 0 !important; padding: 0 !important; border-width: 0 !important',
+    )
+    body.append(breaker)
     div = body.makeelement(
-        XHTML('div'), id=uuid,
-        style='display:block !important; page-break-before: always !important; break-before: always !important; white-space: pre-wrap !important'
+        XHTML('div'),
+        id=uuid,
+        style='display:block !important; white-space: pre-wrap !important',
     )
     div.text = '\n\n'
     body.append(div)
     c = count()
 
-    def a(anchor):
+    def a(anchor: str) -> None:
         num = next(c)
         a = div.makeelement(
-            XHTML('a'), href='#' + anchor,
-            style='min-width: 10px !important; min-height: 10px !important; border: solid 1px !important;'
+            XHTML('a'),
+            href='#' + anchor,
+            style='min-width: 10px !important; min-height: 10px !important; border: solid 1px rgba(0, 0, 0, 0) !important; text-decoration: none !important',
         )
         a.text = a.tail = ' '
         if num % 8 == 0:
@@ -452,123 +672,141 @@ def add_anchors_markup(root, uuid, anchors):
             # rescale the viewport
             a.tail = '\n'
         div.append(a)
-    a.count = 0
-    tuple(map(a, anchors))
+
+    for anchor in anchors:
+        a(anchor)
     a(uuid)
 
 
-def add_all_links(container, margin_files):
+def add_all_links(container: ContainerBase, margin_files: Iterable[MarginFile]) -> str:
     uuid = uuid4()
-    name_anchor_map = {}
+    name_anchor_map: dict[str, frozenset[str]] = {}
     for name, is_linear in container.spine_names:
-        root = container.parsed(name)
+        root = parsed_html(container, name)
         name_anchor_map[name] = frozenset(root.xpath('//*/@id'))
     for margin_file in margin_files:
         name = margin_file.name
         anchors = name_anchor_map.get(name, set())
-        add_anchors_markup(container.parsed(name), uuid, anchors)
+        add_anchors_markup(parsed_html(container, name), uuid, anchors)
         container.dirty(name)
     return uuid
 
 
-def make_anchors_unique(container, log):
-    mapping = {}
-    count = 0
-    base = None
-    spine_names = set()
+class _AnchorReplacer:
+    file_type: str
+    replaced: bool
 
-    def replacer(url):
-        if replacer.file_type not in ('text', 'ncx'):
+    def __init__(self, container: ContainerBase, mapping: dict[tuple[str, str], str], spine_names: set[str], log: Log) -> None:
+        self.container = container
+        self.mapping = mapping
+        self.spine_names = spine_names
+        self.log = log
+        self.file_type = ''
+        self.replaced = False
+        self.base = ''
+
+    def __call__(self, url: str) -> str:
+        if self.file_type not in ('text', 'ncx'):
             return url
         if not url:
             return url
         if '#' not in url:
             url += '#'
         if url.startswith('#'):
-            href, frag = base, url[1:]
-            name = base
+            href, frag = self.base, url[1:]
+            name: str | None = self.base
         else:
             href, frag = url.partition('#')[::2]
-            name = container.href_to_name(href, base)
+            name = self.container.href_to_name(href, self.base)
         if not name:
             return url.rstrip('#')
-        if not frag and name in spine_names:
-            replacer.replaced = True
+        if not frag and name in self.spine_names:
+            self.replaced = True
             return 'https://calibre-pdf-anchor.n#' + name
         key = name, frag
-        new_frag = mapping.get(key)
+        new_frag = self.mapping.get(key)
         if new_frag is None:
-            if name in spine_names:
-                log.warn('Link anchor: {}#{} not found, linking to top of file instead'.format(name, frag))
-                replacer.replaced = True
+            if name in self.spine_names:
+                self.log.warn(f'Link anchor: {name}#{frag} not found, linking to top of file instead')
+                self.replaced = True
                 return 'https://calibre-pdf-anchor.n#' + name
             return url.rstrip('#')
-        replacer.replaced = True
+        self.replaced = True
         return 'https://calibre-pdf-anchor.a#' + new_frag
-        if url.startswith('#'):
-            return '#' + new_frag
-        return href + '#' + new_frag
 
-    name_anchor_map = {}
+
+def make_anchors_unique(container: ContainerBase, log: Log) -> dict[str, str]:
+    mapping: dict[tuple[str, str], str] = {}
+    count = 0
+    spine_names: set[str] = set()
+    replacer = _AnchorReplacer(container, mapping, spine_names, log)
+
+    name_anchor_map: dict[str, str] = {}
     for spine_name, is_linear in container.spine_names:
         spine_names.add(spine_name)
-        root = container.parsed(spine_name)
+        root = parsed_html(container, spine_name)
         for elem in root.xpath('//*[@id]'):
             count += 1
             key = spine_name, elem.get('id')
             if key not in mapping:
-                new_id = mapping[key] = 'a{}'.format(count)
+                new_id = mapping[key] = f'a{count}'
                 elem.set('id', new_id)
+        rewrite_idrefs(root, lambda eid: mapping.get((spine_name, eid), eid))  # ruff: ignore[function-uses-loop-variable]
         body = last_tag(root)
-        if not body.get('id'):
+        body_id = body.get('id')
+        if not body_id:
             count += 1
-            body.set('id', 'a{}'.format(count))
-        name_anchor_map[spine_name] = body.get('id')
+            body_id = f'a{count}'
+            body.set('id', body_id)
+        name_anchor_map[spine_name] = body_id
 
     for name in container.mime_map:
-        base = name
+        replacer.base = name
         replacer.replaced = False
         container.replace_links(name, replacer)
     return name_anchor_map
 
 
-class AnchorLocation(object):
+class AnchorLocation:
+    __slots__ = ('left', 'pagenum', 'top', 'zoom')
 
-    __slots__ = ('pagenum', 'left', 'top', 'zoom')
-
-    def __init__(self, pagenum=1, left=0, top=0, zoom=0):
+    def __init__(self, pagenum: int = 1, left: float = 0, top: float = 0, zoom: float = 0) -> None:
         self.pagenum, self.left, self.top, self.zoom = pagenum, left, top, zoom
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return 'AnchorLocation(pagenum={}, left={}, top={}, zoom={})'.format(*self.as_tuple)
 
     @property
-    def as_tuple(self):
+    def as_tuple(self) -> tuple[int, float, float, float]:
         return self.pagenum, self.left, self.top, self.zoom
 
 
-def get_anchor_locations(name, pdf_doc, first_page_num, toc_uuid, log):
-    ans = {}
+def get_anchor_locations(name: str, pdf_doc: PDFDoc, first_page_num: int, toc_uuid: str, log: Log, top_margin: float = 0) -> dict[str, AnchorLocation]:
+    ans: dict[str, AnchorLocation] = {}
     anchors = pdf_doc.extract_anchors()
     try:
         toc_pagenum = anchors.pop(toc_uuid)[0]
     except KeyError:
         toc_pagenum = None
     if toc_pagenum is None:
-        log.warn('Failed to find ToC anchor in {}'.format(name))
+        log.warn(f'Failed to find ToC anchor in {name}')
         toc_pagenum = 0
     if toc_pagenum > 1:
         pdf_doc.delete_pages(toc_pagenum, pdf_doc.page_count() - toc_pagenum + 1)
-    for anchor, loc in iteritems(anchors):
-        loc = list(loc)
-        loc[0] += first_page_num - 1
-        ans[anchor] = AnchorLocation(*loc)
+    for anchor, (pagenum, left, top, zoom) in anchors.items():
+        pagenum += first_page_num - 1
+        # Chromium generates XYZ destination coordinates relative to the content
+        # area (ignoring top margin), so the top value is top_margin pts too large.
+        if top_margin:
+            top -= top_margin
+        ans[anchor] = AnchorLocation(pagenum, left, top, zoom)
     return ans
 
 
-def fix_links(pdf_doc, anchor_locations, name_anchor_map, mark_links, log):
+def fix_links(pdf_doc: PDFDoc, anchor_locations: dict[str, AnchorLocation], name_anchor_map: dict[str, str], mark_links: bool, log: Log) -> None:
+    pc = pdf_doc.page_count()
 
-    def replace_link(url):
+    def replace_link(url: str) -> tuple[int, float, float, float] | None:
         purl = urlparse(url)
         if purl.scheme != 'https' or purl.netloc not in ('calibre-pdf-anchor.a', 'calibre-pdf-anchor.n'):
             return
@@ -576,25 +814,31 @@ def fix_links(pdf_doc, anchor_locations, name_anchor_map, mark_links, log):
         if purl.netloc == 'calibre-pdf-anchor.a':
             loc = anchor_locations.get(purl.fragment)
             if loc is None:
-                log.warn('Anchor location for link to {} not found'.format(purl.fragment))
+                log.warn(f'Anchor location for link to {purl.fragment} not found')
         else:
             loc = anchor_locations.get(name_anchor_map.get(purl.fragment))
             if loc is None:
-                log.warn('Anchor location for link to {} not found'.format(purl.fragment))
-        return None if loc is None else loc.as_tuple
+                log.warn(f'Anchor location for link to {purl.fragment} not found')
+        if loc is None:
+            return None
+        if loc.pagenum > pc:
+            log.warn(f'Anchor location for link to {purl.fragment} is past the end of the document, moving it to last page')
+            loc.pagenum = pc
+        return loc.as_tuple
 
     pdf_doc.alter_links(replace_link, mark_links)
+
+
 # }}}
 
 
 # Outline creation {{{
-class PDFOutlineRoot(object):
-
-    def __init__(self, pdf_doc):
+class PDFOutlineRoot:
+    def __init__(self, pdf_doc: PDFDoc) -> None:
         self.pdf_doc = pdf_doc
-        self.root_item = None
+        self.root_item: PDFOutlineItem | None = None
 
-    def create(self, title, pagenum, as_child, left, top, zoom):
+    def create(self, title: str, pagenum: int, as_child: bool, left: float, top: float, zoom: float) -> PDFOutlineItem:
         if self.root_item is None:
             self.root_item = self.pdf_doc.create_outline(title, pagenum, left, top, zoom)
         else:
@@ -602,58 +846,70 @@ class PDFOutlineRoot(object):
         return self.root_item
 
 
-def annotate_toc(toc, anchor_locations, name_anchor_map, log):
+def annotate_toc(toc: TOC, anchor_locations: dict[str, AnchorLocation], name_anchor_map: dict[str, str], log: Log) -> None:
     for child in toc.iterdescendants():
         frag = child.frag
         try:
+            if frag is None:
+                raise KeyError(frag)
             if '.' in frag:
                 loc = anchor_locations[name_anchor_map[frag]]
             else:
                 loc = anchor_locations[frag]
         except Exception:
-            log.warn('Could not find anchor location for ToC entry: {} with href: {}'.format(child.title, frag))
+            log.warn(f'Could not find anchor location for ToC entry: {child.title} with href: {frag}')
             loc = AnchorLocation(1, 0, 0, 0)
-        child.pdf_loc = loc
+        # pdf_loc is a dynamic attribute used only by PDF output
+        child.pdf_loc = loc  # ty: ignore[missing-attribute]
 
 
-def add_toc(pdf_parent, toc_parent):
+def add_toc(pdf_parent: PDFOutlineRoot | PDFOutlineItem, toc_parent: TOC, log: Log, pdf_doc: PDFDoc) -> None:
     for child in toc_parent:
-        title, loc = child.title, child.pdf_loc
-        pdf_child = pdf_parent.create(title, loc.pagenum, True, loc.left, loc.top, loc.zoom)
+        title, loc = child.title or '', child.pdf_loc  # ty: ignore[missing-attribute] set in annotate_toc()
+        try:
+            pdf_child = pdf_parent.create(title, loc.pagenum, True, loc.left, loc.top, loc.zoom)
+        except ValueError:
+            if loc.pagenum > 1:
+                log.warn(f'TOC node: {title} at page: {loc.pagenum} is beyond end of file, moving it to last page')
+                pdf_child = pdf_parent.create(title, pdf_doc.page_count(), True, loc.left, loc.top, loc.zoom)
+            else:
+                log.warn(f'Ignoring TOC node: {title} at page: {loc.pagenum}')
+                continue
         if len(child):
-            add_toc(pdf_child, child)
+            add_toc(pdf_child, child, log, pdf_doc)
 
 
-def get_page_number_display_map(render_manager, opts, num_pages, log):
+def get_page_number_display_map(render_manager: RenderManager, opts: Values, num_pages: int, log: Log) -> dict[int, int]:
     num_pages *= 2
-    default_map = {n:n for n in range(1, num_pages + 1)}
+    default_map = {n: n for n in range(1, num_pages + 1)}
     if opts.pdf_page_number_map:
         js = '''
         function map_num(n) { return eval(MAP_EXPRESSION); }
         var ans = {};
         for (var i=1; i <= NUM_PAGES; i++) ans[i] = map_num(i);
         JSON.stringify(ans);
-        '''.replace('MAP_EXPRESSION', json.dumps(opts.pdf_page_number_map), 1).replace(
-                'NUM_PAGES', unicode_type(num_pages), 1)
+        '''.replace('MAP_EXPRESSION', json.dumps(opts.pdf_page_number_map), 1).replace('NUM_PAGES', str(num_pages), 1)
         result = render_manager.evaljs(js)
         try:
-            result = json.loads(result)
+            # JSON.stringify() returns a str, anything else causes json.loads() to raise, handled below
+            result = json.loads(cast('str', result))
             if not isinstance(result, dict):
-                raise ValueError('Not a dict')
+                raise TypeError('Not a dict')
         except Exception:
-            log.warn('Could not do page number mapping, got unexpected result: {}'.format(repr(result)))
+            log.warn(f'Could not do page number mapping, got unexpected result: {result!r}')
         else:
-            default_map = {int(k): int(v) for k, v in iteritems(result)}
+            default_map = {int(k): int(v) for k, v in result.items()}
     return default_map
 
 
-def add_pagenum_toc(root, toc, opts, page_number_display_map):
+def add_pagenum_toc(root: _Element, toc: TOC, opts: Values, page_number_display_map: dict[int, int]) -> None:
     body = last_tag(root)
-    indents = []
+    indents: list[float] = []
     for i in range(1, 7):
-        indents.extend((i, 1.4*i))
+        indents.extend((i, 1.4 * i))
 
-    css = '''
+    css = (
+        '''
     .calibre-pdf-toc table { width: 100%% }
 
     .calibre-pdf-toc table tr td:last-of-type { text-align: right }
@@ -668,14 +924,17 @@ def add_pagenum_toc(root, toc, opts, page_number_display_map):
     .calibre-pdf-toc .level-%d td:first-of-type { padding-left: %.1gem }
     .calibre-pdf-toc .level-%d td:first-of-type { padding-left: %.1gem }
     .calibre-pdf-toc .level-%d td:first-of-type { padding-left: %.1gem }
-    ''' % tuple(indents) + (opts.extra_css or '')
+    '''  # ruff: ignore[printf-string-formatting]
+        % tuple(indents)
+        + (opts.extra_css or '')
+    )
     style = body.makeelement(XHTML('style'), type='text/css')
     style.text = css
     body.append(style)
     body.set('class', 'calibre-pdf-toc')
 
-    def E(tag, cls=None, text=None, tail=None, parent=None, **attrs):
-        ans = body.makeelement(XHTML(tag), **attrs)
+    def E(tag: str, cls: str | None = None, text: str | None = None, tail: str | None = None, parent: _Element | None = None, **attrs: str) -> _Element:
+        ans = body.makeelement(XHTML(tag), attrib=attrs)
         ans.text, ans.tail = text, tail
         if cls is not None:
             ans.set('class', cls)
@@ -686,35 +945,51 @@ def add_pagenum_toc(root, toc, opts, page_number_display_map):
     E('h2', text=(opts.toc_title or _('Table of Contents')), parent=body)
     table = E('table', parent=body)
     for level, node in toc.iterdescendants(level=0):
-        tr = E('tr', cls='level-%d' % level, parent=table)
+        tr = E('tr', cls=f'level-{level}', parent=table)
         E('td', text=node.title or _('Unknown'), parent=tr)
-        num = node.pdf_loc.pagenum
+        num = node.pdf_loc.pagenum  # ty: ignore[missing-attribute] set in annotate_toc()
         num = page_number_display_map.get(num, num)
-        E('td', text='{}'.format(num), parent=tr)
+        E('td', text=f'{num}', parent=tr)
+
 
 # }}}
-
 
 # Fonts {{{
 
 
-def all_glyph_ids_in_w_arrays(arrays, as_set=False):
-    ans = set()
+class PDFFont(TypedDict):
+    # The dicts returned by PDFDoc.list_fonts(), see podofo/fonts.cpp
+    BaseFont: str
+    Subtype: str
+    Reference: tuple[int, int]
+    Data: bytes | None
+    DescendantFont: tuple[int, int] | None
+    StreamRef: tuple[int, int] | None
+    Encoding: str | None
+    ToUnicode: bytes | None
+    W: WArray | None
+    W2: WArray | None
+    CIDToGIDMap: bytes | None
+    sfnt: NotRequired[Sfnt]  # added by merge_fonts()
+
+
+def all_glyph_ids_in_w_arrays(arrays: Iterable[WArray], as_set: bool = False) -> set[int] | list[int]:
+    ans: set[int] = set()
     for w in arrays:
         i = 0
         while i + 1 < len(w):
-            elem = w[i]
-            next_elem = w[i+1]
+            elem = cast('int', w[i])  # CIDs in W arrays are integers
+            next_elem = w[i + 1]
             if isinstance(next_elem, list):
                 ans |= set(range(elem, elem + len(next_elem)))
                 i += 2
             else:
-                ans |= set(range(elem, next_elem + 1))
+                ans |= set(range(elem, cast('int', next_elem) + 1))
                 i += 3
     return ans if as_set else sorted(ans)
 
 
-def fonts_are_identical(fonts):
+def fonts_are_identical(fonts: Iterable[PDFFont]) -> bool:
     sentinel = object()
     for key in ('ToUnicode', 'Data', 'W', 'W2'):
         prev_val = sentinel
@@ -726,9 +1001,9 @@ def fonts_are_identical(fonts):
     return True
 
 
-def merge_font_files(fonts, log):
+def merge_font_files(fonts: list[PDFFont], log: Log) -> tuple[bytes, tuple[tuple[int, int], ...]]:
     # As of Qt 5.15.1 Chromium has switched to harfbuzz and dropped sfntly. It
-    # now produces font descriptors whose W arrays dont match the glyph width
+    # now produces font descriptors whose W arrays don't match the glyph width
     # information from the hhea table, in contravention of the PDF spec. So
     # we can no longer merge font descriptors, all we can do is merge the
     # actual sfnt data streams into a single stream and subset it to contain
@@ -737,26 +1012,31 @@ def merge_font_files(fonts, log):
 
     fonts.sort(key=lambda f: len(f['Data'] or b''), reverse=True)
     descendant_fonts = [f for f in fonts if f['Subtype'] != 'Type0']
-    total_size = sum(len(f['Data']) for f in descendant_fonts)
+    total_size = sum(len(f['Data'] or b'') for f in descendant_fonts)  # mergeable() ensures Data is not empty
     merged_sfnt = merge_truetype_fonts_for_pdf(tuple(f['sfnt'] for f in descendant_fonts), log)
-    w_arrays = tuple(filter(None, (f['W'] for f in descendant_fonts)))
-    glyph_ids = all_glyph_ids_in_w_arrays(w_arrays, as_set=True)
-    h_arrays = tuple(filter(None, (f['W2'] for f in descendant_fonts)))
-    glyph_ids |= all_glyph_ids_in_w_arrays(h_arrays, as_set=True)
-    try:
-        pdf_subset(merged_sfnt, glyph_ids)
-    except NoGlyphs:
-        log.warn(f'Subsetting of {fonts[0]["BaseFont"]} failed with no glyphs found, ignoring')
+    if False:
+        # As of Qt 6.7.2 webengine produces W arrays that do not contain all
+        # used glyph ids, so we cannot subset. Can be tested by
+        # echo 'this is a test boulder sentence' > test.txt; ebook-convert test.txt .pdf
+        w_arrays = tuple(filter(None, (f['W'] for f in descendant_fonts)))
+        glyph_ids = all_glyph_ids_in_w_arrays(w_arrays, as_set=True)
+        h_arrays = tuple(filter(None, (f['W2'] for f in descendant_fonts)))
+        glyph_ids |= all_glyph_ids_in_w_arrays(h_arrays, as_set=True)
+        try:
+            pdf_subset(merged_sfnt, glyph_ids)
+        except NoGlyphs:
+            log.warn(f'Subsetting of {fonts[0]["BaseFont"]} failed with no glyphs found, ignoring')
     font_data = merged_sfnt()[0]
     log(f'Merged {len(fonts)} instances of {fonts[0]["BaseFont"]} reducing size from {human_readable(total_size)} to {human_readable(len(font_data))}')
     return font_data, tuple(f['Reference'] for f in descendant_fonts)
 
 
-def merge_fonts(pdf_doc, log):
-    all_fonts = pdf_doc.list_fonts(True)
-    base_font_map = {}
+def merge_fonts(pdf_doc: PDFDoc, log: Log) -> None:
+    # the stub for list_fonts() is imprecise, see list_fonts() in podofo/fonts.cpp
+    all_fonts = cast('list[PDFFont]', pdf_doc.list_fonts(True))
+    base_font_map: dict[str, list[PDFFont]] = {}
 
-    def mergeable(fonts):
+    def mergeable(fonts: list[PDFFont]) -> bool:
         has_type0 = False
         for font in fonts:
             if font['Subtype'] == 'Type0':
@@ -777,31 +1057,45 @@ def merge_fonts(pdf_doc, log):
 
     for f in all_fonts:
         base_font_map.setdefault(f['BaseFont'], []).append(f)
-    for name, fonts in iteritems(base_font_map):
+    for name, fonts in base_font_map.items():
         if mergeable(fonts):
             font_data, references = merge_font_files(fonts, log)
             pdf_doc.merge_fonts(font_data, references)
 
 
-def test_merge_fonts():
+def test_merge_fonts() -> None:
     path = sys.argv[-1]
     podofo = get_podofo()
     pdf_doc = podofo.PDFDoc()
     pdf_doc.open(path)
     from calibre.utils.logging import default_log
+
     merge_fonts(pdf_doc, default_log)
     out = path.rpartition('.')[0] + '-merged.pdf'
     pdf_doc.save(out)
     print('Merged PDF written to', out)
-# }}}
 
+
+# }}}
 
 # Header/footer {{{
 
 PAGE_NUMBER_TEMPLATE = '<footer><div style="margin: auto">_PAGENUM_</div></footer>'
 
 
-def add_header_footer(manager, opts, pdf_doc, container, page_number_display_map, page_layout, page_margins_map, pdf_metadata, report_progress, toc=None):
+def add_header_footer(
+    manager: RenderManager,
+    opts: Values,
+    pdf_doc: PDFDoc,
+    container: ContainerBase,
+    page_number_display_map: dict[int, int],
+    page_layout: QPageLayout,
+    page_margins_map: Sequence[ResolvedMargins],
+    pdf_metadata: PDFMetadata,
+    report_progress: ProgressReporter,
+    toc: TOC | None,
+    log: Log,
+) -> None:
     header_template, footer_template = opts.pdf_header_template, opts.pdf_footer_template
     if not footer_template and opts.pdf_page_numbers:
         footer_template = PAGE_NUMBER_TEMPLATE
@@ -809,37 +1103,38 @@ def add_header_footer(manager, opts, pdf_doc, container, page_number_display_map
         return
     report_progress(0.8, _('Adding headers and footers'))
     name = create_skeleton(container)
-    root = container.parsed(name)
-    reset_css = 'margin: 0; padding: 0; border-width: 0; background-color: unset;'
+    root = parsed_html(container, name)
+    reset_css = 'margin: 0; padding: 0; border-width: 0; background-color: unset; column-count: unset; column-width: unset;'
     root.set('style', reset_css)
     body = last_tag(root)
     body.attrib.pop('id', None)
     body.set('style', reset_css)
     job = job_for_name(container, name, Margins(0, 0, 0, 0), page_layout)
+    page_layout = job[1]
 
-    def m(tag_name, text=None, style=None, **attrs):
-        ans = root.makeelement(XHTML(tag_name), **attrs)
+    def m(tag_name: str, text: str | None = None, style: dict[str, str] | None = None, **attrs: str) -> _Element:
+        ans = root.makeelement(XHTML(tag_name), attrib=attrs)
         if text is not None:
             ans.text = text
         if style is not None:
-            style = '; '.join('{}: {}'.format(k, v) for k, v in iteritems(style))
-            ans.set('style', style)
+            style_str = '; '.join(f'{k}: {v}' for k, v in style.items())
+            ans.set('style', style_str)
         return ans
 
     justify = 'flex-end'
     if header_template:
         justify = 'space-between' if footer_template else 'flex-start'
 
-    def create_toc_stack(iterator):
-        ans = []
+    def create_toc_stack(iterator: Iterable[tuple[int, TOC]]) -> list[tuple[int, int, str | None]]:
+        ans: list[tuple[int, int, str | None]] = []
         for level, child in iterator:
             pdf_loc = getattr(child, 'pdf_loc', None)
             if pdf_loc is not None and pdf_loc.pagenum > 0:
                 ans.append((level, pdf_loc.pagenum, child.title))
         return ans
 
-    def stack_to_map(stack):
-        ans = []
+    def stack_to_map(stack: Sequence[tuple[int, int, str | None]]) -> list[str | None]:
+        ans: list[str | None] = []
         stack_pos = 0
         current, page_for_current, level_for_current = '', -1, -1
         stack_len = len(stack)
@@ -856,18 +1151,18 @@ def add_header_footer(manager, opts, pdf_doc, container, page_number_display_map
             ans.append(current)
         return ans
 
-    def page_counts_map(iterator):
-        pagenums = []
+    def page_counts_map(iterator: Iterable[tuple[int, TOC]]) -> tuple[list[int], list[int]]:
+        pagenums: list[int] = []
         for level, child in iterator:
             pdf_loc = getattr(child, 'pdf_loc', None)
             if pdf_loc is not None and pdf_loc.pagenum > 0:
                 pagenums.append(pdf_loc.pagenum)
-        stack = []
+        stack: list[tuple[int, int]] = []
         for i, pagenum in enumerate(pagenums):
             next_page_num = pagenums[i + 1] if i + 1 < len(pagenums) else (pdf_doc.page_count() + 1)
             stack.append((pagenum, next_page_num - pagenum))
-        totals = []
-        section_nums = []
+        totals: list[int] = []
+        section_nums: list[int] = []
         stack_len = len(stack)
         stack_pos = 0
         current, page_for_current, counter = 0, -1, 0
@@ -893,14 +1188,19 @@ def add_header_footer(manager, opts, pdf_doc, container, page_number_display_map
     else:
         page_toc_map = stack_to_map(create_toc_stack(toc.iterdescendants(level=0)))
 
-        def tc():
+        def tc() -> Iterator[tuple[int, TOC]]:
             for x in toc:
                 yield 0, x
 
         toplevel_toc_map = stack_to_map(create_toc_stack(tc()))
         toplevel_pagenum_map, toplevel_pages_map = page_counts_map(tc())
 
-    def create_container(page_num, margins):
+    dpi = 96  # don't know how to query Qt for this, seems to be the same on all platforms
+
+    def pt_to_px(pt: float) -> int:
+        return int(pt * dpi / 72)
+
+    def create_container(page_num: int, margins: ResolvedMargins) -> _Element:
         style = {
             'page-break-inside': 'avoid',
             'page-break-after': 'always',
@@ -908,8 +1208,8 @@ def add_header_footer(manager, opts, pdf_doc, container, page_number_display_map
             'flex-direction': 'column',
             'height': '100vh',
             'justify-content': justify,
-            'margin-left': '{}pt'.format(margins.left),
-            'margin-right': '{}pt'.format(margins.right),
+            'margin-left': f'{margins.left}pt',
+            'margin-right': f'{margins.right}pt',
             'margin-top': '0',
             'margin-bottom': '0',
             'padding': '0',
@@ -917,25 +1217,27 @@ def add_header_footer(manager, opts, pdf_doc, container, page_number_display_map
             'overflow': 'hidden',
             'background-color': 'unset',
         }
-
-        ans = m('div', style=style, id='p{}'.format(page_num))
+        ans = m('div', style=style, id=f'p{page_num}')
         return ans
 
-    def format_template(template, page_num, height):
-        template = template.replace('_TOP_LEVEL_SECTION_PAGES_', unicode_type(toplevel_pagenum_map[page_num - 1]))
-        template = template.replace('_TOP_LEVEL_SECTION_PAGENUM_', unicode_type(toplevel_pages_map[page_num - 1]))
-        template = template.replace('_TOTAL_PAGES_', unicode_type(pages_in_doc))
-        template = template.replace('_PAGENUM_', unicode_type(page_number_display_map[page_num]))
+    def format_template(template: str, page_num: int, height: float, margins: ResolvedMargins) -> _Element:
+        div_width_px = pt_to_px(page_layout.paintRectPoints().width() - margins.left - margins.right)
+        template = template.replace('_TOP_LEVEL_SECTION_PAGES_', str(toplevel_pagenum_map[page_num - 1]))
+        template = template.replace('_TOP_LEVEL_SECTION_PAGENUM_', str(toplevel_pages_map[page_num - 1]))
+        template = template.replace('_TOTAL_PAGES_', str(pages_in_doc))
+        template = template.replace('_PAGENUM_', str(page_number_display_map[page_num]))
         template = template.replace('_TITLE_', prepare_string_for_xml(pdf_metadata.title, True))
         template = template.replace('_AUTHOR_', prepare_string_for_xml(pdf_metadata.author, True))
-        template = template.replace('_TOP_LEVEL_SECTION_', prepare_string_for_xml(toplevel_toc_map[page_num - 1]))
-        template = template.replace('_SECTION_', prepare_string_for_xml(page_toc_map[page_num - 1]))
+        template = template.replace('_TOP_LEVEL_SECTION_', prepare_string_for_xml(cast('str', toplevel_toc_map[page_num - 1])))
+        template = template.replace('_SECTION_', prepare_string_for_xml(cast('str', page_toc_map[page_num - 1])))
+        template = template.replace('_WIDTH_PIXELS_', str(div_width_px))
+        template = template.replace('_HEIGHT_PIXELS_', str(pt_to_px(height)))
         troot = parse(template, namespace_elements=True)
         ans = last_tag(troot)[0]
         style = ans.get('style') or ''
         style = (
-            'margin: 0; padding: 0; height: {height}pt; border-width: 0;'
-            'display: flex; align-items: center; overflow: hidden; background-color: unset;').format(height=height) + style
+            f'margin: 0; padding: 0; height: {height}pt; border-width: 0;display: flex; align-items: center; overflow: hidden; background-color: unset;'
+        ) + style
         ans.set('style', style)
         for child in ans.xpath('descendant-or-self::*[@class]'):
             cls = frozenset(child.get('class').split())
@@ -952,12 +1254,12 @@ def add_header_footer(manager, opts, pdf_doc, container, page_number_display_map
         div = create_container(page_num, margins)
         body.append(div)
         if header_template:
-            div.append(format_template(header_template, page_num, margins.top))
+            div.append(format_template(header_template, page_num, margins.top, margins))
         if footer_template:
-            div.append(format_template(footer_template, page_num, margins.bottom))
+            div.append(format_template(footer_template, page_num, margins.bottom, margins))
 
     container.commit()
-    # print(open(job[0]).read())
+    # print(container.raw_data(name))
     results = manager.convert_html_files([job], settle_time=1)
     data = results[name]
     if not isinstance(data, bytes):
@@ -967,57 +1269,68 @@ def add_header_footer(manager, opts, pdf_doc, container, page_number_display_map
     first_page_num = pdf_doc.page_count()
     num_pages = doc.page_count()
     if first_page_num != num_pages:
-        raise ValueError('The number of header/footers pages ({}) != number of document pages ({})'.format(
-            num_pages, first_page_num))
+        raise ValueError(f'The number of header/footers pages ({num_pages}) < number of document pages ({first_page_num})')
     pdf_doc.append(doc)
     pdf_doc.impose(1, first_page_num + 1, num_pages)
     report_progress(0.9, _('Headers and footers added'))
 
-# }}}
 
+# }}}
 
 # Maths {{{
 
-def mathjax_dir():
+
+@lru_cache(maxsize=2)
+def mathjax_dir() -> str:
     return P('mathjax', allow_user_override=False)
 
 
-def path_to_url(path):
-    return QUrl.fromLocalFile(path).toString()
-
-
-def add_maths_script(container):
-    has_maths = {}
+def add_maths_script(container: ContainerBase) -> dict[str, bool]:
+    has_maths: dict[str, bool] = {}
     for name, is_linear in container.spine_names:
-        root = container.parsed(name)
+        root = parsed_html(container, name)
         has_maths[name] = hm = check_for_maths(root)
         if not hm:
             continue
-        script = root.makeelement(XHTML('script'), type="text/javascript", src=path_to_url(
-            P('pdf-mathjax-loader.js', allow_user_override=False)))
+        script = root.makeelement(
+            XHTML('script'),
+            type='text/javascript',
+            src=f'{FAKE_PROTOCOL}://{FAKE_HOST}/mathjax/loader/pdf-mathjax-loader.js',
+        )
         script.set('async', 'async')
-        script.set('data-mathjax-path', path_to_url(mathjax_dir()))
+        script.set('data-mathjax-path', f'{FAKE_PROTOCOL}://{FAKE_HOST}/mathjax/data/')
         last_tag(root).append(script)
     return has_maths
+
+
 # }}}
 
 
-def fix_markup(container):
+def fix_markup(container: ContainerBase) -> None:
     xp = XPath('//h:canvas')
     for file_name, is_linear in container.spine_names:
-        root = container.parsed(file_name)
+        root = parsed_html(container, file_name)
         for canvas in xp(root):
             # Canvas causes rendering issues, see https://bugs.launchpad.net/bugs/1859040
             # for an example.
             canvas.tag = XHTML('div')
 
 
-def convert(opf_path, opts, metadata=None, output_path=None, log=default_log, cover_data=None, report_progress=lambda x, y: None):
+def convert(
+    opf_path: str,
+    opts: Values,
+    metadata: Metadata | None = None,
+    output_path: str | None = None,
+    log: Log = default_log,
+    cover_data: bytes | None = None,
+    report_progress: ProgressReporter = lambda x, y: None,
+) -> bytes | None:
     container = Container(opf_path, log)
     fix_markup(container)
     report_progress(0.05, _('Parsed all content for markup transformation'))
     if opts.pdf_hyphenate:
         from calibre.ebooks.oeb.polish.hyphenation import add_soft_hyphens
+
         add_soft_hyphens(container)
     has_maths = add_maths_script(container)
     fix_fullscreen_images(container)
@@ -1030,31 +1343,32 @@ def convert(opf_path, opts, metadata=None, output_path=None, log=default_log, co
     container.commit()
     report_progress(0.1, _('Completed markup transformation'))
 
-    manager = RenderManager(opts, log, container.root)
+    manager = RenderManager(opts, log, container)
     page_layout = get_page_layout(opts)
     pdf_doc = None
-    anchor_locations = {}
-    jobs = []
+    anchor_locations: dict[str, AnchorLocation] = {}
+    jobs: list[Job] = []
     for margin_file in margin_files:
         jobs.append(job_for_name(container, margin_file.name, margin_file.margins, page_layout))
     results = manager.convert_html_files(jobs, settle_time=1, has_maths=has_maths)
     num_pages = 0
-    page_margins_map = []
-    for margin_file in margin_files:
+    page_margins_map: list[ResolvedMargins] = []
+    all_docs: list[PDFDoc] = []
+    for i, margin_file in enumerate(margin_files):
         name = margin_file.name
         data = results[name]
         if not isinstance(data, bytes):
             raise SystemExit(data)
         doc = data_as_pdf_doc(data)
-        anchor_locations.update(get_anchor_locations(name, doc, num_pages + 1, links_page_uuid, log))
+        effective_margins = resolve_margins(margin_file.margins, page_layout)
+        anchor_locations.update(get_anchor_locations(name, doc, num_pages + 1, links_page_uuid, log, effective_margins.top))
         doc_pages = doc.page_count()
-        page_margins_map.extend(repeat(resolve_margins(margin_file.margins, page_layout), doc_pages))
+        page_margins_map.extend(repeat(effective_margins, doc_pages))
         num_pages += doc_pages
+        all_docs.append(doc)
 
-        if pdf_doc is None:
-            pdf_doc = doc
-        else:
-            pdf_doc.append(doc)
+    pdf_doc = all_docs[0]
+    pdf_doc.append(*all_docs[1:])
 
     page_number_display_map = get_page_number_display_map(manager, opts, num_pages, log)
 
@@ -1062,12 +1376,15 @@ def convert(opf_path, opts, metadata=None, output_path=None, log=default_log, co
         annotate_toc(toc, anchor_locations, name_anchor_map, log)
         if opts.pdf_add_toc:
             tocname = create_skeleton(container)
-            root = container.parsed(tocname)
+            root = parsed_html(container, tocname)
             add_pagenum_toc(root, toc, opts, page_number_display_map)
             container.commit()
             jobs = [job_for_name(container, tocname, None, page_layout)]
             results = manager.convert_html_files(jobs, settle_time=1)
-            tocdoc = data_as_pdf_doc(results[tocname])
+            data = results[tocname]
+            if not isinstance(data, bytes):
+                raise SystemExit(data)
+            tocdoc = data_as_pdf_doc(data)
             page_margins_map.extend(repeat(resolve_margins(None, page_layout), tocdoc.page_count()))
             pdf_doc.append(tocdoc)
 
@@ -1075,14 +1392,23 @@ def convert(opf_path, opts, metadata=None, output_path=None, log=default_log, co
 
     fix_links(pdf_doc, anchor_locations, name_anchor_map, opts.pdf_mark_links, log)
     if toc and len(toc):
-        add_toc(PDFOutlineRoot(pdf_doc), toc)
+        add_toc(PDFOutlineRoot(pdf_doc), toc, log, pdf_doc)
     report_progress(0.75, _('Added links to PDF content'))
 
     pdf_metadata = PDFMetadata(metadata)
     add_header_footer(
-        manager, opts, pdf_doc, container,
-        page_number_display_map, page_layout, page_margins_map,
-        pdf_metadata, report_progress, toc if has_toc else None)
+        manager,
+        opts,
+        pdf_doc,
+        container,
+        page_number_display_map,
+        page_layout,
+        page_margins_map,
+        pdf_metadata,
+        report_progress,
+        toc if has_toc else None,
+        log,
+    )
 
     num_removed = remove_unused_fonts(pdf_doc)
     if num_removed:
@@ -1098,20 +1424,21 @@ def convert(opf_path, opts, metadata=None, output_path=None, log=default_log, co
         log('Removed', num_removed, 'duplicate images')
 
     if opts.pdf_odd_even_offset:
-        for i in range(1, pdf_doc.page_count()):
-            margins = page_margins_map[i]
-            mult = -1 if i % 2 else 1
+        for page_num in range(1, pdf_doc.page_count() + 1):
+            margins = page_margins_map[page_num - 1]
+            mult = -1 if page_num % 2 else 1
             val = opts.pdf_odd_even_offset
             if abs(val) < min(margins.left, margins.right):
-                box = list(pdf_doc.get_page_box("CropBox", i))
+                box = list(pdf_doc.get_page_box('CropBox', page_num))
                 box[0] += val * mult
-                pdf_doc.set_page_box("CropBox", i, *box)
+                pdf_doc.set_page_box('CropBox', page_num, *box)
 
     if cover_data:
         add_cover(pdf_doc, cover_data, page_layout, opts)
 
     if metadata is not None:
         update_metadata(pdf_doc, pdf_metadata)
+    pdf_doc.creator = pdf_doc.producer = __appname__ + ' ' + __version__
     report_progress(1, _('Updated metadata in PDF'))
 
     if opts.uncompressed_pdf:

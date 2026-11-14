@@ -106,7 +106,7 @@ example, ``vl:Read`` will find all the books in the *Read* Virtual library. The 
 The value following ``vl:`` must be the name of a Virtual library. If the Virtual library name
 contains spaces then surround it with quotes.
 
-One use for a Virtual library search is in the content server. In
+One use for a Virtual library search is in the Content server. In
 :guilabel:`Preferences->Sharing over the net->Require username and password` you
 can limit the calibre libraries visible to a user. For each visible library you
 can specify a search expression to further limit which books are seen. Use
@@ -116,7 +116,7 @@ Using additional restrictions
 -------------------------------
 
 You can further restrict the books shown in a Virtual library by using
-:guilabel:`Additional restrictions`. An additional restriction is saved search
+:guilabel:`Additional restrictions`. An additional restriction is a saved search
 you previously created that can be applied to the current Virtual library to
 further restrict the books shown in a Virtual library. For example, say you
 have a Virtual library for books tagged as :guilabel:`Historical Fiction` and a

@@ -1,25 +1,20 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2013, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2013, Kovid Goyal <kovid at kovidgoyal.net>
 
 import time
-from threading import Thread
 from functools import partial
+from threading import Thread
 
-from PyQt5.Qt import (QWidget, QVBoxLayout, QLabel, Qt, QPainter, QBrush, QRect, QApplication, QCursor)
+from qt.core import QApplication, QBrush, QCursor, QLabel, QPainter, QRect, Qt, QVBoxLayout, QWidget
 
 from calibre.gui2 import Dispatcher
 from calibre.gui2.progress_indicator import ProgressIndicator
 
 
 class LongJob(Thread):
-
     daemon = True
 
-    def __init__(self, name, user_text, callback, function, *args, **kwargs):
+    def __init__(self, name, user_text, callback, function, *args, **kwargs) -> None:
         Thread.__init__(self, name=name)
         self.user_text = user_text
         self.function = function
@@ -28,12 +23,13 @@ class LongJob(Thread):
         self.time_taken = None
         self.callback = callback
 
-    def run(self):
+    def run(self) -> None:
         st = time.time()
         try:
             self.result = self.function(*self.args, **self.kwargs)
-        except:
+        except Exception:
             import traceback
+
             self.traceback = traceback.format_exc()
         self.time_taken = time.time() - st
         try:
@@ -43,8 +39,7 @@ class LongJob(Thread):
 
 
 class BlockingJob(QWidget):
-
-    def __init__(self, parent):
+    def __init__(self, parent) -> None:
         QWidget.__init__(self, parent)
         l = QVBoxLayout()
         self.setLayout(l)
@@ -59,38 +54,42 @@ class BlockingJob(QWidget):
         self.text = ''
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-    def start(self):
-        self.setGeometry(0, 0, self.parent().width(), self.parent().height())
+    def start(self) -> None:
+        p = self.parent()
+        assert isinstance(p, QWidget)
+        self.setGeometry(0, 0, p.width(), p.height())
         self.setVisible(True)
-        # Prevent any actions from being triggerred by key presses
-        self.parent().setEnabled(False)
-        self.raise_()
+        # Prevent any actions from being triggered by key presses
+        p.setEnabled(False)
+        self.raise_and_focus()
         self.setFocus(Qt.FocusReason.OtherFocusReason)
         self.pi.startAnimation()
         QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
 
-    def stop(self):
+    def stop(self) -> None:
         QApplication.restoreOverrideCursor()
         self.pi.stopAnimation()
         self.setVisible(False)
-        self.parent().setEnabled(True)
+        p = self.parent()
+        assert isinstance(p, QWidget)
+        p.setEnabled(True)
         # The following line is needed on OS X, because of this bug:
         # https://bugreports.qt-project.org/browse/QTBUG-34371 it causes
         # keyboard events to no longer work
-        self.parent().setFocus(Qt.FocusReason.OtherFocusReason)
+        p.setFocus(Qt.FocusReason.OtherFocusReason)
 
-    def job_done(self, callback, job):
+    def job_done(self, callback, job) -> None:
         del job.callback
         self.stop()
         callback(job)
 
-    def paintEvent(self, ev):
-        br = ev.region().boundingRect()
+    def paintEvent(self, a0) -> None:
+        br = a0.region().boundingRect()
         p = QPainter(self)
         p.setOpacity(0.2)
         p.fillRect(br, QBrush(self.palette().text()))
         p.end()
-        QWidget.paintEvent(self, ev)
+        QWidget.paintEvent(self, a0)
         p = QPainter(self)
         p.setClipRect(br)
         f = p.font()
@@ -102,11 +101,11 @@ class BlockingJob(QWidget):
         p.drawText(r, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextSingleLine, self.text)
         p.end()
 
-    def set_msg(self, text):
+    def set_msg(self, text) -> None:
         self.text = text
 
     def __call__(self, name, user_text, callback, function, *args, **kwargs):
-        ' Run a job that blocks the GUI providing some feedback to the user '
+        "Run a job that blocks the GUI providing some feedback to the user"
         self.set_msg(user_text)
         job = LongJob(name, user_text, Dispatcher(partial(self.job_done, callback)), function, *args, **kwargs)
         job.start()

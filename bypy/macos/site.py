@@ -1,13 +1,23 @@
 import builtins
 import os
 import sys
+
 import _sitebuiltins
+
+USER_SITE = None
 
 
 def nuke_stdout():
     # Redirect stdout, stdin and stderr to /dev/null
     from calibre_extensions.speedup import detach
     detach(os.devnull)
+
+
+def setup_langtool():
+    # The langtool data files, including the precompiled rule tables, are
+    # placed in resources/langtool by the freeze scripts, as they must be real
+    # files, not frozen
+    os.environ['LANGTOOL_RESOURCE_DIR'] = os.path.join(sys.resources_location, 'langtool')
 
 
 def set_helper():
@@ -20,8 +30,17 @@ def set_quit():
     builtins.exit = _sitebuiltins.Quitter('exit', eof)
 
 
+def exit_code(ret: object) -> int:
+    # Entry points may return None or arbitrary non-numeric objects, only
+    # integers (including bools) are meaningful as process exit codes
+    if isinstance(ret, int):
+        return int(ret)
+    return 0
+
+
 def main():
     sys.argv[0] = sys.calibre_basename
+    setup_langtool()
     set_helper()
     set_quit()
     mod = __import__(sys.calibre_module, fromlist=[1])
@@ -36,4 +55,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(exit_code(main()))

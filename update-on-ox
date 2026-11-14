@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# vim:fileencoding=utf-8
 # License: GPL v3 Copyright: 2017, Kovid Goyal <kovid at kovidgoyal.net>
 
 import ast
@@ -17,7 +16,7 @@ if False:
     dmg = sys.argv[-1]
     mp = tempfile.mkdtemp()
     atexit.register(os.rmdir, mp)
-    subprocess.check_call('hdiutil attach {} -mountpoint {}'.format(dmg, mp).split())
+    subprocess.check_call(f'hdiutil attach {dmg} -mountpoint {mp}'.split())
     try:
         os.chdir(mp)
         for app in glob.glob('*.app'):
@@ -27,7 +26,7 @@ if False:
             subprocess.check_call('ditto -v {} {}'.format(app, os.path.join('/Applications', app)).split())
     finally:
         os.chdir('/')
-        subprocess.check_call('hdiutil detach {}'.format(mp).split())
+        subprocess.check_call(f'hdiutil detach {mp}'.split())
 
 # EOF_REMOTE
 
@@ -56,9 +55,9 @@ with tempfile.NamedTemporaryFile(prefix='install-dmg-', suffix='.py') as f:
     cmd = './setup.py osx --dont-shutdown'
     if 'develop' in sys.argv:
         print('Disabling code-signing and notarization')
-        cmd += ' --dont-sign --dont-notarize'
+        cmd += ' --dont-sign --dont-notarize --dont-strip'
     run(cmd)
     f.write(script.encode('utf-8'))
     f.flush()
     run(f'scp dist/{dmg} {f.name} {HOST}:/tmp')
-    run(f'ssh {HOST} python /tmp/{os.path.basename(f.name)} /tmp/{dmg}')
+    run(f'ssh {HOST} python3 /tmp/{os.path.basename(f.name)} /tmp/{dmg}')

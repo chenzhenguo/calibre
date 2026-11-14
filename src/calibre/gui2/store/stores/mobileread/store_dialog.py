@@ -1,13 +1,7 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
 
 
-__license__ = 'GPL 3'
-__copyright__ = '2011, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
-
-
-from PyQt5.Qt import (Qt, QDialog, QIcon, QComboBox, QApplication)
+from qt.core import QComboBox, QDialog, QIcon, Qt
 
 from calibre.gui2.store.stores.mobileread.adv_search_builder import AdvSearchBuilderDialog
 from calibre.gui2.store.stores.mobileread.models import BooksModel
@@ -15,8 +9,7 @@ from calibre.gui2.store.stores.mobileread.store_dialog_ui import Ui_Dialog
 
 
 class MobileReadStoreDialog(QDialog, Ui_Dialog):
-
-    def __init__(self, plugin, *args):
+    def __init__(self, plugin, *args) -> None:
         QDialog.__init__(self, *args)
         self.setupUi(self)
 
@@ -25,61 +18,72 @@ class MobileReadStoreDialog(QDialog, Ui_Dialog):
         self.search_query.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.search_query.setMinimumContentsLength(25)
 
-        self.adv_search_button.setIcon(QIcon(I('search.png')))
+        self.adv_search_button.setIcon(QIcon.ic('search.png'))
 
         self._model = BooksModel(self.plugin.get_book_list())
         self.results_view.setModel(self._model)
-        self.total.setText('%s' % self.results_view.model().rowCount())
+        model = self.results_view.model()
+        assert model is not None
+        self.total.setText(str(model.rowCount()))
 
         self.search_button.clicked.connect(self.do_search)
         self.adv_search_button.clicked.connect(self.build_adv_search)
         self.results_view.activated.connect(self.open_store)
-        self.results_view.model().total_changed.connect(self.update_book_total)
+        self._model.total_changed.connect(self.update_book_total)
         self.finished.connect(self.dialog_closed)
 
         self.restore_state()
 
-    def do_search(self):
-        self.results_view.model().search(type(u'')(self.search_query.text()))
+    def do_search(self) -> None:
+        _m = self.results_view.model()
+        assert _m is not None
+        assert isinstance(_m, BooksModel)
+        _m.search(str(self.search_query.text()))
 
-    def open_store(self, index):
-        result = self.results_view.model().get_book(index)
+    def open_store(self, index) -> None:
+        _m = self.results_view.model()
+        assert _m is not None
+        assert isinstance(_m, BooksModel)
+        result = _m.get_book(index)
         if result:
-            self.plugin.open(self, result.detail_item)
+            self.plugin.open(self, detail_item=result.detail_item)
 
-    def update_book_total(self, total):
-        self.total.setText('%s' % total)
+    def update_book_total(self, total) -> None:
+        self.total.setText(str(total))
 
-    def build_adv_search(self):
+    def build_adv_search(self) -> None:
         adv = AdvSearchBuilderDialog(self)
-        if adv.exec_() == QDialog.DialogCode.Accepted:
+        if adv.exec() == QDialog.DialogCode.Accepted:
             self.search_query.setText(adv.search_string())
 
-    def restore_state(self):
-        geometry = self.plugin.config.get('dialog_geometry', None)
-        if geometry:
-            QApplication.instance().safe_restore_geometry(self, geometry)
-
+    def restore_state(self) -> None:
+        self.restore_geometry(self.plugin.config, 'dialog_geometry')
         results_cwidth = self.plugin.config.get('dialog_results_view_column_width')
         if results_cwidth:
             for i, x in enumerate(results_cwidth):
-                if i >= self.results_view.model().columnCount():
+                if i >= self._model.columnCount():
                     break
                 self.results_view.setColumnWidth(i, x)
         else:
-            for i in range(self.results_view.model().columnCount()):
+            for i in range(self._model.columnCount()):
                 self.results_view.resizeColumnToContents(i)
 
-        self.results_view.model().sort_col = self.plugin.config.get('dialog_sort_col', 0)
-        self.results_view.model().sort_order = self.plugin.config.get('dialog_sort_order', Qt.SortOrder.AscendingOrder)
-        self.results_view.model().sort(self.results_view.model().sort_col, self.results_view.model().sort_order)
-        self.results_view.header().setSortIndicator(self.results_view.model().sort_col, self.results_view.model().sort_order)
+        self._model.sort_col = self.plugin.config.get('dialog_sort_col', 0)
+        try:
+            so = Qt.SortOrder(self.plugin.config.get('dialog_sort_order', Qt.SortOrder.AscendingOrder))
+        except Exception:
+            so = Qt.SortOrder.AscendingOrder
+        self._model.sort_order = so
+        self._model.sort(self._model.sort_col, so)
+        header = self.results_view.header()
+        assert header is not None
+        header.setSortIndicator(self._model.sort_col, so)
 
-    def save_state(self):
-        self.plugin.config['dialog_geometry'] = bytearray(self.saveGeometry())
-        self.plugin.config['dialog_results_view_column_width'] = [self.results_view.columnWidth(i) for i in range(self.results_view.model().columnCount())]
-        self.plugin.config['dialog_sort_col'] = self.results_view.model().sort_col
-        self.plugin.config['dialog_sort_order'] = self.results_view.model().sort_order
+    def save_state(self) -> None:
+        self.save_geometry(self.plugin.config, 'dialog_geometry')
+        self.plugin.config['dialog_results_view_column_width'] = [self.results_view.columnWidth(i) for i in range(self._model.columnCount())]
+        self.plugin.config['dialog_sort_col'] = self._model.sort_col
+        self.plugin.config['dialog_sort_order'] = self._model.sort_order
 
-    def dialog_closed(self, result):
+    def dialog_closed(self, result) -> None:
         self.save_state()

@@ -1,35 +1,30 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2009, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
 
 import textwrap
 
-from PyQt5.Qt import QComboBox, Qt
+from qt.core import QComboBox, Qt
 
 from calibre.gui2 import config as gui_conf
-from polyglot.builtins import unicode_type
+from calibre.gui2.removable_history import enable_item_removal_for_combobox, remove_item_from_combobox
 
 
 class HistoryBox(QComboBox):
-
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         QComboBox.__init__(self, parent)
         self.setEditable(True)
 
-    def initialize(self, opt_name, default, help=None):
+    def initialize(self, opt_name, default, help=None) -> None:
         self.opt_name = opt_name
         self.set_value(default)
+        enable_item_removal_for_combobox(self, self.remove_history_item)
         if help:
             self.setStatusTip(help)
             help = '\n'.join(textwrap.wrap(help))
             self.setToolTip(help)
             self.setWhatsThis(help)
 
-    def set_value(self, val):
+    def set_value(self, val) -> None:
         history = gui_conf[self.opt_name]
         if val not in history:
             history.append(val)
@@ -37,12 +32,16 @@ class HistoryBox(QComboBox):
         self.addItems(history)
         self.setCurrentIndex(self.findText(val, Qt.MatchFlag.MatchFixedString))
 
-    def save_history(self, opt_name):
-        history = [unicode_type(self.itemText(i)) for i in range(self.count())]
+    def remove_history_item(self, item) -> None:
+        if remove_item_from_combobox(self, item):
+            gui_conf[self.opt_name] = [str(self.itemText(i)) for i in range(self.count())]
+
+    def save_history(self, opt_name) -> None:
+        history = [str(self.itemText(i)) for i in range(self.count())]
         ct = self.text()
         if ct not in history:
             history = [ct] + history
         gui_conf[opt_name] = history[:10]
 
     def text(self):
-        return unicode_type(self.currentText()).strip()
+        return str(self.currentText()).strip()

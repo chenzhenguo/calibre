@@ -1,200 +1,281 @@
+# License: GPLv3 Copyright: 2008, Marshall T. Vandegrift <llasram@gmail.com>
 
-'''
+"""
 SVG rasterization transform.
-'''
+"""
 
-__license__   = 'GPL v3'
-__copyright__ = '2008, Marshall T. Vandegrift <llasram@gmail.com>'
+import os
+import re
+from base64 import standard_b64encode
+from functools import lru_cache
+from typing import TYPE_CHECKING, Literal, Self, overload
+from urllib.parse import urldefrag
 
-import os, re
+from lxml import etree
+from qt.core import QBuffer, QByteArray, QColor, QImage, QIODevice, QPainter, QSvgRenderer, Qt
 
-from PyQt5.Qt import (
-    Qt, QByteArray, QBuffer, QIODevice, QColor, QImage, QPainter, QSvgRenderer)
-from calibre.ebooks.oeb.base import XHTML, XLINK
-from calibre.ebooks.oeb.base import SVG_MIME, PNG_MIME
-from calibre.ebooks.oeb.base import xml2str, xpath
-from calibre.ebooks.oeb.base import urlnormalize
+from calibre import guess_type
+from calibre.ebooks.oeb.base import PNG_MIME, SVG_MIME, XHTML, XLINK, is_element_list, urlnormalize, xml2str, xpath
 from calibre.ebooks.oeb.stylizer import Stylizer
-from calibre.ptempfile import PersistentTemporaryFile
 from calibre.utils.imghdr import what
-from polyglot.builtins import unicode_type
-from polyglot.urllib import urldefrag
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from optparse import Values
+
+    from lxml.etree import _Element
+
+    from calibre.ebooks.oeb.base import Manifest, OEBBook
+    from calibre.ebooks.oeb.stylizer import Style
 
 IMAGE_TAGS = {XHTML('img'), XHTML('object')}
 KEEP_ATTRS = {'class', 'style', 'width', 'height', 'align'}
+
+
+def test_svg() -> bytes:  # {{{
+    TEST_PNG_DATA_URI = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAAGXRFWHRTb2Z0d2FyZQBBZG9iZSBJbWFnZVJlYWR5ccllPAAAAWJQTFRFAAAAAAAAAAAAAAAAAAAAAQEAAgIBAwIBBgQCBwUCCAYDCggECwkEDgsFDwwFEA0GHRcKHxkLIBkLIxwMJR0NJx8OKCAOKCAPKSAPMScSPTAWQTQXQzUYSjsaSjsbSzsbUD8dUUAdVEMeWkggW0ggW0ghW0khXUohYk4ja1Umb1gocVoocVopclspc1spdV0qd18reF8riW0xjXEzl3g2mns3nn04nn45n345oIA6ooE7o4I7pII7pIM7pYQ7p4U8qYY8rYo+s45Bxp1Hx55Hy6FJy6JJzaRJz6RKz6RLz6VL0qdL1KpM1apM1qtN16xN2KxN2K1O2a1O2q1O265P3K9P3bBQ3rBP37FP37FQ37JQ4rNR47VR5LVR7LxV7bxV7r1V7r5W8L9W8MBW8b9V8b9W8cBW8cBX8sBW8sBX8sFW8sFX88BX88FW88FX88FY88JX88JY9MFX9MJX9MJY9MNYSw0rOAAAAAR0Uk5T2+rr8giKtGMAAAFDSURBVDjLhdNFUwNBEIbhJWkkuLu7u5PgHtwWl0CGnW34aJLl/3OgUlRlGfKepqafmstUW1Yw8E9By6IMWVn/z7OsQOpYNrE0H4lEwuFwZHmyLnUb+AUzIiLMItDgrWIfKH3mnz4RA6PX/8Im8xuEgVfxxG33g+rVi9OT46OdPQ0kDgv8gCg3FMrLphkNyCD9BYiIqEErraP5ZrDGDrw2MoIhsPACGUH5g2gVqzWDKQ/gETKCZmHwbo4ZbHhJ1q1kBMMJCKbJCCof35V+qjCDOUCrMTKCFkc8vU5GENpW8NwmMxhVccYsGUHVvWKOFhlBySJicV6u7+7s6Ozq6anxgT44Lwy4jlKK4br96WDl09GA/gA4zp7gLh2MM3MS+EgCGl+iD9JB4cDZzbV9ZV/atn1+frvfaPhuX4HMq0cZsjKt/zfXXmDab9zjGwAAAABJRU5ErkJggg=='  # ruff: ignore[line-too-long]
+    return f'''
+    <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+    <path d="M4.5 11H3v4h4v-1.5H4.5V11zM3 7h1.5V4.5H7V3H3v4zm10.5 6.5H11V15h4v-4h-1.5v2.5zM11 3v1.5h2.5V7H15V3h-4z"/>
+    <image width="32" height="32" x="32" y="32" xlink:href="{TEST_PNG_DATA_URI}"/>
+    </svg>'''.encode()
+
+
+# }}}
 
 
 class Unavailable(Exception):
     pass
 
 
-class SVGRasterizer(object):
+@overload
+def rasterize_svg(
+    data: bytes | None = None,
+    sizes: Sequence[float] | None = (),
+    width: float = 0,
+    height: float = 0,
+    print: Callable[[str], object] | None = None,
+    fmt: str = 'PNG',
+    as_qimage: Literal[False] = False,
+) -> bytes: ...
+@overload
+def rasterize_svg(
+    data: bytes | None = None,
+    sizes: Sequence[float] | None = (),
+    width: float = 0,
+    height: float = 0,
+    print: Callable[[str], object] | None = None,
+    fmt: str = 'PNG',
+    *,
+    as_qimage: Literal[True],
+) -> QImage: ...
+def rasterize_svg(
+    data: bytes | None = None,
+    sizes: Sequence[float] | None = (),
+    width: float = 0,
+    height: float = 0,
+    print: Callable[[str], object] | None = None,
+    fmt: str = 'PNG',
+    as_qimage: bool = False,
+) -> bytes | QImage:
+    from calibre.gui2 import must_use_qt
 
-    def __init__(self, base_css=''):
+    must_use_qt()
+    if data is None:
+        data = test_svg()
+    svg = QSvgRenderer(QByteArray(data))
+    size = svg.defaultSize()
+    if size.width() == 100 and size.height() == 100 and sizes:
+        size.setWidth(int(sizes[0]))
+        size.setHeight(int(sizes[1]))
+    if width or height:
+        size.scale(int(width), int(height), Qt.AspectRatioMode.KeepAspectRatio)
+    if print is not None:
+        print(f'Rasterizing SVG to {size.width()} x {size.height()}')
+    image = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(QColor('white').rgb())
+    painter = QPainter(image)
+    svg.render(painter)
+    painter.end()
+    if as_qimage:
+        return image
+    array = QByteArray()
+    buffer = QBuffer(array)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    image.save(buffer, fmt)
+    return array.data()
+
+
+@lru_cache(maxsize=128)
+def data_url(mime_type: str, data: bytes) -> str:
+    return f'data:{mime_type};base64,' + standard_b64encode(data).decode('ascii')
+
+
+class SVGRasterizer:
+    def __init__(self, base_css: str = '', save_svg_originals: bool = False) -> None:
         self.base_css = base_css
-        from calibre.gui2 import must_use_qt
-        must_use_qt()
+        self.save_svg_originals = save_svg_originals
 
     @classmethod
-    def config(cls, cfg):
+    def config[T](cls, cfg: T) -> T:
         return cfg
 
     @classmethod
-    def generate(cls, opts):
+    def generate(cls, opts: Values) -> Self:
         return cls()
 
-    def __call__(self, oeb, context):
+    def __call__(self, oeb: OEBBook, context: Values) -> None:
         oeb.logger.info('Rasterizing SVG images...')
-        self.temp_files = []
-        self.stylizer_cache = {}
+        self.stylizer_cache: dict[Manifest.Item, Stylizer] = {}
         self.oeb = oeb
         self.opts = context
         self.profile = context.dest
-        self.images = {}
-        self.dataize_manifest()
+        self.images: dict[tuple[str, int, int], str] = {}
+        self.svg_originals: dict[str, str] = {}
+        self.scan_for_linked_resources_in_manifest()
         self.rasterize_spine()
         self.rasterize_cover()
-        for pt in self.temp_files:
-            try:
-                os.remove(pt)
-            except:
-                pass
 
-    def rasterize_svg(self, elem, width=0, height=0, format='PNG'):
+    def rasterize_svg(self, elem: _Element, width: float = 0, height: float = 0, format: str = 'PNG') -> bytes:
         view_box = elem.get('viewBox', elem.get('viewbox', None))
-        sizes = None
+        sizes: list[float] | None = None
         logger = self.oeb.logger
 
         if view_box is not None:
             try:
-                box = [float(x) for x in filter(None, re.split('[, ]', view_box))]
-                sizes = [box[2]-box[0], box[3] - box[1]]
-            except (TypeError, ValueError, IndexError):
-                logger.warn('SVG image has invalid viewBox="%s", ignoring the viewBox' % view_box)
+                box = [float(x) for x in filter(None, re.split(r'[, ]', view_box))]
+                sizes = [box[2] - box[0], box[3] - box[1]]
+            except TypeError, ValueError, IndexError:
+                logger.warn(f'SVG image has invalid viewBox="{view_box}", ignoring the viewBox')
             else:
-                for image in elem.xpath('descendant::*[local-name()="image" and '
-                        '@height and contains(@height, "%")]'):
+                for image in elem.xpath('descendant::*[local-name()="image" and @height and contains(@height, "%")]'):
                     logger.info('Found SVG image height in %, trying to convert...')
                     try:
-                        h = float(image.get('height').replace('%', ''))/100.
-                        image.set('height', unicode_type(h*sizes[1]))
-                    except:
-                        logger.exception('Failed to convert percentage height:',
-                                image.get('height'))
+                        h = float(image.get('height').replace('%', '')) / 100.0
+                        image.set('height', str(h * sizes[1]))
+                    except Exception:
+                        logger.exception('Failed to convert percentage height:', image.get('height'))
 
-        data = QByteArray(xml2str(elem, with_tail=False))
-        svg = QSvgRenderer(data)
-        size = svg.defaultSize()
-        if size.width() == 100 and size.height() == 100 and sizes:
-            size.setWidth(sizes[0])
-            size.setHeight(sizes[1])
-        if width or height:
-            size.scale(width, height, Qt.AspectRatioMode.KeepAspectRatio)
-        logger.info('Rasterizing %r to %dx%d'
-                    % (elem, size.width(), size.height()))
-        image = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
-        image.fill(QColor("white").rgb())
-        painter = QPainter(image)
-        svg.render(painter)
-        painter.end()
-        array = QByteArray()
-        buffer = QBuffer(array)
-        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-        image.save(buffer, format)
-        return array.data()
+        return rasterize_svg(xml2str(elem, with_tail=False), sizes=sizes, width=width, height=height, print=logger.info, fmt=format)
 
-    def dataize_manifest(self):
+    def scan_for_linked_resources_in_manifest(self) -> None:
         for item in self.oeb.manifest.values():
             if item.media_type == SVG_MIME and item.data is not None:
-                self.dataize_svg(item)
+                self.scan_for_linked_resources_in_svg(item)
 
-    def dataize_svg(self, item, svg=None):
+    def scan_for_linked_resources_in_svg(self, item: Manifest.Item, svg: _Element | None = None) -> _Element:
         if svg is None:
-            svg = item.data
+            data = item.data
+            assert isinstance(data, etree._Element)  # a non-empty SVG item, parsed as XML
+            svg = data
         hrefs = self.oeb.manifest.hrefs
-        for elem in xpath(svg, '//svg:*[@xl:href]'):
-            href = urlnormalize(elem.attrib[XLINK('href')])
+        ha = XLINK('href')
+        elems = xpath(svg, '//svg:*[@xl:href]')
+        assert is_element_list(elems)
+        for elem in elems:
+            href = urlnormalize(elem.attrib[ha])
             path = urldefrag(href)[0]
             if not path:
                 continue
             abshref = item.abshref(path)
-            if abshref not in hrefs:
+            linkee = hrefs.get(abshref)
+            if linkee is None:
                 continue
-            linkee = hrefs[abshref]
             data = linkee.bytes_representation
-            ext = what(None, data) or 'jpg'
-            with PersistentTemporaryFile(suffix='.'+ext) as pt:
-                pt.write(data)
-                self.temp_files.append(pt.name)
-            elem.attrib[XLINK('href')] = pt.name
+            ext = what(None, data)
+            if not ext:
+                continue
+            mt = guess_type('file.' + ext)[0]
+            if not mt or not mt.startswith('image/'):
+                continue
+            elem.set(ha, data_url(mt, data))
+
         return svg
 
-    def stylizer(self, item):
+    def stylizer(self, item: Manifest.Item) -> Stylizer:
         ans = self.stylizer_cache.get(item, None)
         if ans is None:
-            ans = Stylizer(item.data, item.href, self.oeb, self.opts,
-                    self.profile, base_css=self.base_css)
-            self.stylizer_cache[item] = ans
+            root = item.data
+            assert isinstance(root, etree._Element)  # only called for spine items
+            ans = self.stylizer_cache[item] = Stylizer(root, item.href, self.oeb, self.opts, self.profile, base_css=self.base_css)
         return ans
 
-    def rasterize_spine(self):
+    def rasterize_spine(self) -> None:
         for item in self.oeb.spine:
             self.rasterize_item(item)
 
-    def rasterize_item(self, item):
+    def rasterize_item(self, item: Manifest.Item) -> None:
         html = item.data
+        assert isinstance(html, etree._Element)  # spine items are always (X)HTML documents
         hrefs = self.oeb.manifest.hrefs
-        for elem in xpath(html, '//h:img[@src]'):
+        imgs = xpath(html, '//h:img[@src]')
+        assert is_element_list(imgs)
+        for elem in imgs:
             src = urlnormalize(elem.attrib['src'])
             image = hrefs.get(item.abshref(src), None)
             if image and image.media_type == SVG_MIME:
                 style = self.stylizer(item).style(elem)
                 self.rasterize_external(elem, style, item, image)
-        for elem in xpath(html, '//h:object[@type="%s" and @data]' % SVG_MIME):
+        objects = xpath(html, f'//h:object[@type="{SVG_MIME}" and @data]')
+        assert is_element_list(objects)
+        for elem in objects:
             data = urlnormalize(elem.attrib['data'])
             image = hrefs.get(item.abshref(data), None)
             if image and image.media_type == SVG_MIME:
                 style = self.stylizer(item).style(elem)
                 self.rasterize_external(elem, style, item, image)
-        for elem in xpath(html, '//svg:svg'):
+        svgs = xpath(html, '//svg:svg')
+        assert is_element_list(svgs)
+        for elem in svgs:
             style = self.stylizer(item).style(elem)
             self.rasterize_inline(elem, style, item)
 
-    def rasterize_inline(self, elem, style, item):
-        width = style['width']
-        height = style['height']
+    def rasterize_inline(self, elem: _Element, style: Style, item: Manifest.Item) -> None:
+        width = style.width
+        height = style.height
         width = (width / 72) * self.profile.dpi
         height = (height / 72) * self.profile.dpi
-        elem = self.dataize_svg(item, elem)
+        self.scan_for_linked_resources_in_svg(item, elem)
         data = self.rasterize_svg(elem, width, height)
         manifest = self.oeb.manifest
         href = os.path.splitext(item.href)[0] + '.png'
         id, href = manifest.generate(item.id, href)
         manifest.add(id, href, PNG_MIME, data=data)
         img = elem.makeelement(XHTML('img'), src=item.relhref(href))
-        elem.getparent().replace(elem, img)
+        if self.save_svg_originals:
+            svg_bytes = etree.tostring(elem, encoding='utf-8', xml_declaration=True, pretty_print=True, with_tail=False)
+            svg_id, svg_href = manifest.generate(item.id, 'inline.svg')
+            manifest.add(svg_id, svg_href, SVG_MIME, data=svg_bytes)
+            self.svg_originals[href] = svg_href
+        img.tail = elem.tail
+        elem.getparent().replace(elem, img)  # ty: ignore[missing-union-attribute] inline <svg> is always inside <body>
         for prop in ('width', 'height'):
             if prop in elem.attrib:
                 img.attrib[prop] = elem.attrib[prop]
 
-    def rasterize_external(self, elem, style, item, svgitem):
-        width = style['width']
-        height = style['height']
+    def rasterize_external(self, elem: _Element, style: Style, item: Manifest.Item, svgitem: Manifest.Item) -> None:
+
+        width = style.width
+        height = style.height
         width = (width / 72) * self.profile.dpi
         height = (height / 72) * self.profile.dpi
+        # Qt is needed only when there is actually an SVG image to rasterize, so
+        # that converting books without any does not create a QApplication
+        from calibre.gui2 import must_use_qt
+
+        must_use_qt()
         data = QByteArray(svgitem.bytes_representation)
         svg = QSvgRenderer(data)
         size = svg.defaultSize()
-        size.scale(width, height, Qt.AspectRatioMode.KeepAspectRatio)
+        size.scale(int(width), int(height), Qt.AspectRatioMode.KeepAspectRatio)
         key = (svgitem.href, size.width(), size.height())
         if key in self.images:
             href = self.images[key]
         else:
             logger = self.oeb.logger
-            logger.info('Rasterizing %r to %dx%d'
-                        % (svgitem.href, size.width(), size.height()))
+            logger.info(f'Rasterizing {svgitem.href!r} to {size.width()}x{size.height()}')
             image = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
-            image.fill(QColor("white").rgb())
+            image.fill(QColor('white').rgb())
             painter = QPainter(image)
             svg.render(painter)
             painter.end()
@@ -208,6 +289,7 @@ class SVGRasterizer(object):
             id, href = manifest.generate(svgitem.id, href)
             manifest.add(id, href, PNG_MIME, data=data)
             self.images[key] = href
+        self.svg_originals[href] = svgitem.href
         elem.tag = XHTML('img')
         for attr in elem.attrib:
             if attr not in KEEP_ATTRS:
@@ -219,21 +301,28 @@ class SVGRasterizer(object):
         for child in elem:
             elem.remove(child)
 
-    def rasterize_cover(self):
+    def rasterize_cover(self) -> None:
         covers = self.oeb.metadata.cover
         if not covers:
             return
-        if unicode_type(covers[0]) not in self.oeb.manifest.ids:
+        if str(covers[0]) not in self.oeb.manifest.ids:
             self.oeb.logger.warn('Cover not in manifest, skipping.')
             self.oeb.metadata.clear('cover')
             return
-        cover = self.oeb.manifest.ids[unicode_type(covers[0])]
-        if not cover.media_type == SVG_MIME:
+        cover = self.oeb.manifest.ids[str(covers[0])]
+        if cover.media_type != SVG_MIME:
             return
         width = (self.profile.width / 72) * self.profile.dpi
         height = (self.profile.height / 72) * self.profile.dpi
-        data = self.rasterize_svg(cover.data, width, height)
+        svg = cover.data
+        assert isinstance(svg, etree._Element)  # media_type is SVG_MIME, so it is parsed as XML
+        data = self.rasterize_svg(svg, width, height)
         href = os.path.splitext(cover.href)[0] + '.png'
         id, href = self.oeb.manifest.generate(cover.id, href)
         self.oeb.manifest.add(id, href, PNG_MIME, data=data)
         covers[0].value = id
+
+
+if __name__ == '__main__':
+    with open('/t/test-svg-rasterization.png', 'wb') as f:
+        f.write(rasterize_svg())

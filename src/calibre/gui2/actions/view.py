@@ -1,44 +1,47 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
 
 import json
 import os
 import time
 from functools import partial
-from PyQt5.Qt import QAction, QIcon, Qt, pyqtSignal, QDialog
+
+from qt.core import QAction, QDialog, QIcon, pyqtSignal
 
 from calibre.constants import ismacos, iswindows
-from calibre.gui2 import (
-    Dispatcher, config, elided_text, error_dialog, info_dialog, open_local_file,
-    question_dialog
-)
+from calibre.db.constants import DATA_DIR_NAME
+from calibre.gui2 import Dispatcher, config, elided_text, error_dialog, info_dialog, open_local_file, question_dialog
 from calibre.gui2.actions import InterfaceAction
 from calibre.gui2.dialogs.choose_format import ChooseFormatDialog
 from calibre.ptempfile import PersistentTemporaryFile
 from calibre.utils.config import prefs, tweaks
-from polyglot.builtins import as_bytes, unicode_type
+from calibre.utils.localization import _
+from polyglot.builtins import as_bytes
+
+
+def preferred_format(formats):
+    formats = tuple(x.upper() for x in formats if x)
+    fmt = formats[0]
+    for format in prefs['input_format_order']:
+        if format in formats:
+            fmt = format
+            break
+    return fmt
 
 
 class HistoryAction(QAction):
-
     view_historical = pyqtSignal(object)
 
-    def __init__(self, id_, title, parent):
+    def __init__(self, id_, title, parent) -> None:
         QAction.__init__(self, title, parent)
         self.id = id_
         self.triggered.connect(self._triggered)
 
-    def _triggered(self):
+    def _triggered(self) -> None:
         self.view_historical.emit(self.id)
 
 
 class ViewAction(InterfaceAction):
-
     name = 'View'
     action_spec = (_('View'), 'view.png', _('Read books'), _('V'))
     action_type = 'current'
@@ -46,32 +49,43 @@ class ViewAction(InterfaceAction):
     action_menu_clone_qaction = True
     force_internal_viewer = False
 
-    def genesis(self):
+    def genesis(self) -> None:
         self.persistent_files = []
         self.qaction.triggered.connect(self.view_book)
         self.view_action = self.menuless_qaction
         self.view_menu = self.qaction.menu()
+        assert self.view_menu is not None
         cm = partial(self.create_menu_action, self.view_menu)
-        self.view_specific_action = cm('specific', _('View specific format'),
-                shortcut='Alt+V', triggered=self.view_specific_format)
-        self.internal_view_action = cm('internal', _('View with calibre E-book viewer'), triggered=self.view_internal)
-        self.action_pick_random = cm('pick random', _('Read a random book'),
-                icon='random.png', triggered=self.view_random)
-        self.view_menu.addAction(QIcon(I('highlight.png')), _('Browse annotations'), self.browse_annots)
+        self.view_specific_action = cm('specific', _('View specific format'), shortcut='Alt+V', triggered=self.view_specific_format)
+        self.llm_action = cm('llm-book', _('Discuss selected book(s) with AI'), triggered=self.ask_ai, icon='ai.png', shortcut=False)
+        self.llm_action.setVisible(not tweaks['hide_ai_features'])
+        self.internal_view_action = cm('internal', _('View with calibre E-book viewer'), icon='viewer.png', triggered=self.view_internal)
+        self.action_pick_random = cm('pick random', _('Read a random book'), icon='random.png', triggered=self.view_random)
+        self.view_menu.addAction(QIcon.ic('highlight.png'), _('Browse annotations'), self.browse_annots)
         self.clear_sep1 = self.view_menu.addSeparator()
         self.clear_sep2 = self.view_menu.addSeparator()
-        self.clear_history_action = cm('clear history',
-                _('Clear recently viewed list'), triggered=self.clear_history)
+        self.clear_history_action = cm('clear history', _('Clear recently viewed list'), icon='trash.png', triggered=self.clear_history)
         self.history_actions = [self.clear_sep1]
         self.action_view_last_read = ac = self.create_action(
-            spec=(_('Continue reading previous book'), None, _('Continue reading the last opened book'), 'shift+v'), attr='action_view_last_read')
+            spec=(_('Continue reading previous book'), None, _('Continue reading the last opened book'), 'shift+v'),
+            attr='action_view_last_read',
+        )
         ac.triggered.connect(self.view_last_read)
+        self.view_menu.aboutToShow.connect(self.about_to_show_menu)
         self.gui.addAction(ac)
 
-    def initialization_complete(self):
+    def initialization_complete(self) -> None:
         self.build_menus(self.gui.current_db)
 
-    def build_menus(self, db):
+    def about_to_show_menu(self) -> None:
+        from qt.core import QKeySequence
+
+        t = self.llm_action.text().split('\t')[0]
+        sc = self.gui.iactions['Discuss book with AI'].menuless_qaction.shortcut()
+        self.llm_action.setText(t + '\t' + sc.toString(QKeySequence.SequenceFormat.NativeText))
+
+    def build_menus(self, db) -> None:
+        assert self.view_menu is not None
         for ac in self.history_actions:
             self.view_menu.removeAction(ac)
         self.history_actions = []
@@ -86,38 +100,41 @@ class ViewAction(InterfaceAction):
                 ac.view_historical.connect(self.view_historical)
                 self.history_actions.append(ac)
 
-    def view_last_read(self):
+    def view_last_read(self) -> None:
         history = self.gui.current_db.new_api.pref('gui_view_history', [])
         for book_id, title in history:
             self.view_historical(book_id)
             break
 
-    def browse_annots(self):
+    def browse_annots(self) -> None:
         self.gui.iactions['Browse Annotations'].show_browser()
 
-    def clear_history(self):
+    def clear_history(self) -> None:
         db = self.gui.current_db
         db.new_api.set_pref('gui_view_history', [])
         self.build_menus(db)
 
-    def view_historical(self, id_):
+    def view_historical(self, id_) -> None:
         self._view_calibre_books([id_])
 
-    def library_changed(self, db):
+    def library_changed(self, db) -> None:
         self.build_menus(db)
 
-    def location_selected(self, loc):
+    def location_selected(self, loc) -> None:
         enabled = loc == 'library'
+        assert self.view_menu is not None
         for action in list(self.view_menu.actions())[1:]:
             action.setEnabled(enabled)
 
-    def view_format(self, row, format):
+    def view_format(self, row, format) -> None:
         id_ = self.gui.library_view.model().id(row)
         self.view_format_by_id(id_, format)
 
     def calibre_book_data(self, book_id, fmt):
         from calibre.db.annotations import merge_annotations
+        from calibre.db.book_storage import newest_book_storage
         from calibre.gui2.viewer.config import get_session_pref, vprefs
+
         vprefs.refresh()
         sync_annots_user = get_session_pref('sync_annots_user', default='')
         db = self.gui.current_db.new_api
@@ -126,29 +143,44 @@ class ViewAction(InterfaceAction):
             other_annotations_map = db.annotations_map_for_book(book_id, fmt, user_type='web', user=sync_annots_user)
             if other_annotations_map:
                 merge_annotations(other_annotations_map, annotations_map, merge_last_read=False)
+        book_storage = db.book_storage_for_book(book_id, fmt)
+        if sync_annots_user:
+            book_storage = newest_book_storage(book_storage, db.book_storage_for_book(book_id, fmt, user_type='web', user=sync_annots_user))
         return {
-            'book_id': book_id, 'uuid': db.field_for('uuid', book_id), 'fmt': fmt.upper(),
-            'annotations_map': annotations_map, 'library_id': getattr(self.gui.current_db.new_api, 'server_library_id', None)
+            'book_id': book_id,
+            'uuid': db.field_for('uuid', book_id),
+            'fmt': fmt.upper(),
+            'annotations_map': annotations_map,
+            'book_storage': book_storage,
+            'library_id': getattr(self.gui.current_db.new_api, 'server_library_id', None),
+            'calibre_pid': os.getpid(),
         }
 
-    def view_format_by_id(self, id_, format, open_at=None):
+    def view_format_by_id(self, id_, format, open_at=None) -> None:
         db = self.gui.current_db
-        fmt_path = db.format_abspath(id_, format,
-                index_is_id=True)
+        fmt_path = db.format_abspath(id_, format, index_is_id=True)
         if fmt_path:
             title = db.title(id_, index_is_id=True)
             self._view_file(fmt_path, calibre_book_data=self.calibre_book_data(id_, format), open_at=open_at)
             self.update_history([(id_, title)])
+        else:
+            error_dialog(
+                self.gui,
+                _('E-book file missing'),
+                _('The {} format file is missing from the calibre library folder').format(format),
+                show=True,
+            )
 
-    def book_downloaded_for_viewing(self, job):
+    def book_downloaded_for_viewing(self, job) -> None:
         if job.failed:
             self.gui.device_job_exception(job)
             return
         self._view_file(job.result)
 
     def _launch_viewer(self, name=None, viewer='ebook-viewer', internal=True, calibre_book_data=None, open_at=None):
-        self.gui.setCursor(Qt.CursorShape.BusyCursor)
-        try:
+        from calibre.gui2.widgets import BusyCursor
+
+        with BusyCursor():
             if internal:
                 args = [viewer]
                 if ismacos and 'ebook' in viewer:
@@ -156,50 +188,58 @@ class ViewAction(InterfaceAction):
 
                 if name is not None:
                     args.append(name)
-                    if open_at is not None:
-                        args.append('--open-at=' + open_at)
-                    if calibre_book_data is not None:
-                        with PersistentTemporaryFile('.json') as ptf:
-                            ptf.write(as_bytes(json.dumps(calibre_book_data)))
-                            args.append('--internal-book-data=' + ptf.name)
-                self.gui.job_manager.launch_gui_app(viewer,
-                        kwargs=dict(args=args))
+                    if viewer != 'lrfviewer':
+                        if open_at is not None:
+                            args.append('--open-at=' + open_at)
+                        if calibre_book_data is not None:
+                            with PersistentTemporaryFile('.json') as ptf:
+                                ptf.write(as_bytes(json.dumps(calibre_book_data)))
+                                args.append('--internal-book-data=' + ptf.name)
+                self.gui.job_manager.launch_gui_app(viewer, kwargs=dict(args=args))
             else:
                 if iswindows:
                     from calibre_extensions import winutil
+
+                    assert name is not None
                     ext = name.rpartition('.')[-1]
                     if ext:
                         try:
-                            prog = winutil.file_association(unicode_type('.' + ext))
+                            prog = winutil.file_association(str('.' + ext))
                         except Exception:
                             prog = None
                         if prog and prog.lower().endswith('calibre.exe'):
                             name = os.path.basename(name)
                             return error_dialog(
-                                self.gui, _('No associated program'), _(
+                                self.gui,
+                                _('No associated program'),
+                                _(
                                     'Windows will try to open %s with calibre itself'
                                     ' resulting in a duplicate in your calibre library. You'
                                     ' should install some program capable of viewing this'
                                     ' file format and tell Windows to use that program to open'
-                                    ' files of this type.') % name, show=True)
+                                    ' files of this type.'
+                                )
+                                % name,
+                                show=True,
+                            )
 
                 open_local_file(name)
                 time.sleep(2)  # User feedback
-        finally:
-            self.gui.unsetCursor()
 
-    def _view_file(self, name, calibre_book_data=None, open_at=None):
-        ext = os.path.splitext(name)[1].upper().replace('.',
-                '').replace('ORIGINAL_', '')
+    def _view_file(self, name, calibre_book_data=None, open_at=None) -> None:
+        ext = os.path.splitext(name)[1].upper().replace('.', '').replace('ORIGINAL_', '')
         viewer = 'lrfviewer' if ext == 'LRF' else 'ebook-viewer'
         internal = self.force_internal_viewer or ext in config['internally_viewed_formats'] or open_at is not None
         self._launch_viewer(name, viewer, internal, calibre_book_data=calibre_book_data, open_at=open_at)
 
-    def view_specific_format(self, triggered):
+    def ask_ai(self) -> None:
+        self.gui.iactions['Discuss book with AI'].ask_ai()
+
+    def view_specific_format(self, triggered) -> None:
         rows = list(self.gui.library_view.selectionModel().selectedRows())
         if not rows or len(rows) == 0:
             d = error_dialog(self.gui, _('Cannot view'), _('No book selected'))
-            d.exec_()
+            d.exec()
             return
 
         db = self.gui.library_view.model().db
@@ -212,18 +252,15 @@ class ViewAction(InterfaceAction):
                 for f in x:
                     all_fmts.add(f)
         if not all_fmts:
-            error_dialog(self.gui,  _('Format unavailable'),
-                    _('Selected books have no formats'), show=True)
+            error_dialog(self.gui, _('Format unavailable'), _('Selected books have no formats'), show=True)
             return
-        d = ChooseFormatDialog(self.gui, _('Choose the format to view'),
-                list(sorted(all_fmts)), show_open_with=True)
+        d = ChooseFormatDialog(self.gui, _('Choose the format to view'), list(sorted(all_fmts)), show_open_with=True)
         self.gui.book_converted.connect(d.book_converted)
-        if d.exec_() == QDialog.DialogCode.Accepted:
+        if d.exec() == QDialog.DialogCode.Accepted:
             formats = [[x.upper() for x in db.new_api.formats(book_id)] for book_id in book_ids]
             fmt = d.format()
             orig_num = len(rows)
-            rows = [rows[i] for i in range(len(rows)) if formats[i] and fmt in
-                    formats[i]]
+            rows = [rows[i] for i in range(len(rows)) if formats[i] and fmt in formats[i]]
             if self._view_check(len(rows)):
                 for row in rows:
                     if d.open_with_format is None:
@@ -231,97 +268,132 @@ class ViewAction(InterfaceAction):
                     else:
                         self.open_fmt_with(row, *d.open_with_format)
                 if len(rows) < orig_num:
-                    info_dialog(self.gui, _('Format unavailable'),
-                            _('Not all the selected books were available in'
-                                ' the %s format. You should convert'
-                                ' them first.')%fmt, show=True)
+                    info_dialog(
+                        self.gui,
+                        _('Format unavailable'),
+                        _('Not all the selected books were available in the %s format. You should convert them first.') % fmt,
+                        show=True,
+                    )
         self.gui.book_converted.disconnect(d.book_converted)
 
-    def open_fmt_with(self, row, fmt, entry):
+    def open_fmt_with(self, row, fmt, entry) -> None:
         book_id = self.gui.library_view.model().id(row)
         self.gui.book_details.open_fmt_with.emit(book_id, fmt, entry)
 
     def _view_check(self, num, max_=5, skip_dialog_name=None):
         if num <= max_:
             return True
-        return question_dialog(self.gui, _('Multiple books selected'),
-                _('You are attempting to open %d books. Opening too many '
+        return question_dialog(
+            self.gui,
+            _('Multiple books selected'),
+            _(
+                'You are attempting to open %d books. Opening too many '
                 'books at once can be slow and have a negative effect on the '
                 'responsiveness of your computer. Once started the process '
                 'cannot be stopped until complete. Do you wish to continue?'
-                ) % num, show_copy_button=False, skip_dialog_name=skip_dialog_name)
+            )
+            % num,
+            show_copy_button=False,
+            skip_dialog_name=skip_dialog_name,
+        )
 
-    def view_folder(self, *args):
+    def view_folder(self, *args, **kwargs) -> None:
         rows = self.gui.current_view().selectionModel().selectedRows()
         if not rows or len(rows) == 0:
-            d = error_dialog(self.gui, _('Cannot open folder'),
-                    _('No book selected'))
-            d.exec_()
+            d = error_dialog(self.gui, _('Cannot open folder'), _('No book selected'))
+            d.exec()
             return
         if not self._view_check(len(rows), max_=10, skip_dialog_name='open-folder-many-check'):
             return
+        data_folder = kwargs.get('data_folder', False)
+        db = self.gui.current_db
         for i, row in enumerate(rows):
-            path = self.gui.library_view.model().db.abspath(row.row())
-            open_local_file(path)
-            if ismacos and i < len(rows) - 1:
-                time.sleep(0.1)  # Finder cannot handle multiple folder opens
+            self.gui.extra_files_watcher.watch_book(db.id(row.row()))
+            path = db.abspath(row.row())
+            if path:
+                if data_folder:
+                    path = os.path.join(path, DATA_DIR_NAME)
+                    if not os.path.exists(path):
+                        try:
+                            os.mkdir(path)
+                        except Exception as e:
+                            error_dialog(self.gui, _('Failed to create folder'), str(e), show=True)
+                            continue
+                try:
+                    open_local_file(path)
+                except Exception as e:
+                    import traceback
 
-    def view_folder_for_id(self, id_):
-        path = self.gui.library_view.model().db.abspath(id_, index_is_id=True)
+                    # We shouldn't get here ...
+                    error_dialog(self.gui, _('Cannot open folder'), str(e), det_msg=traceback.format_exc(), show=True)
+                if ismacos and i < len(rows) - 1:
+                    time.sleep(0.1)  # Finder cannot handle multiple folder opens
+
+    def view_folder_for_id(self, id_) -> None:
+        self.gui.extra_files_watcher.watch_book(id_)
+        path = self.gui.current_db.abspath(id_, index_is_id=True)
         open_local_file(path)
 
-    def view_book(self, triggered):
+    def view_data_folder_for_id(self, id_) -> None:
+        self.gui.extra_files_watcher.watch_book(id_)
+        path = self.gui.current_db.abspath(id_, index_is_id=True)
+        path = os.path.join(path, DATA_DIR_NAME)
+        if not os.path.exists(path):
+            try:
+                os.mkdir(path)
+            except Exception as e:
+                error_dialog(self.gui, _('Failed to create folder'), str(e), show=True)
+                return
+        open_local_file(path)
+
+    def view_book(self, triggered) -> None:
         rows = self.gui.current_view().selectionModel().selectedRows()
         self._view_books(rows)
 
-    def view_internal(self, triggered):
+    def view_internal(self, triggered) -> None:
         try:
             self.force_internal_viewer = True
             self.view_book(triggered)
         finally:
             self.force_internal_viewer = False
 
-    def view_triggered(self, index):
+    def view_triggered(self, index) -> None:
         self._view_books([index])
 
-    def view_specific_book(self, index):
+    def view_specific_book(self, index) -> None:
         self._view_books([index])
 
-    def view_random(self, *args):
+    def view_specific_calibre_book(self, index) -> None:
+        ids = [self.gui.library_view.model().id(index)]
+        self._view_calibre_books(ids)
+
+    def view_random(self, *args) -> None:
         self.gui.iactions['Pick Random Book'].pick_random()
         self._view_books([self.gui.library_view.currentIndex()])
 
-    def _view_calibre_books(self, ids):
+    def _view_calibre_books(self, ids) -> None:
         db = self.gui.current_db
         views = []
         for id_ in ids:
             try:
                 title = db.title(id_, index_is_id=True)
-            except:
-                error_dialog(self.gui, _('Cannot view'),
-                    _('This book no longer exists in your library'), show=True)
+            except Exception:
+                error_dialog(self.gui, _('Cannot view'), _('This book no longer exists in your library'), show=True)
                 self.update_history([], remove={id_})
                 continue
 
-            formats = db.formats(id_, index_is_id=True)
+            formats = db.new_api.formats(id_, verify_formats=True)
             if not formats:
-                error_dialog(self.gui, _('Cannot view'),
-                    _('%s has no available formats.')%(title,), show=True)
+                error_dialog(self.gui, _('Cannot view'), _('%s has no available formats.') % (title,), show=True)
                 continue
 
-            formats = formats.upper().split(',')
-
-            fmt = formats[0]
-            for format in prefs['input_format_order']:
-                if format in formats:
-                    fmt = format
-                    break
+            fmt = preferred_format(formats)
             views.append((id_, title))
             self.view_format_by_id(id_, fmt)
 
         self.update_history(views)
 
-    def update_history(self, views, remove=frozenset()):
+    def update_history(self, views, remove=frozenset()) -> None:
         db = self.gui.current_db
         vh = tweaks['gui_view_history_size']
         if views:
@@ -340,18 +412,15 @@ class ViewAction(InterfaceAction):
             db.new_api.set_pref('gui_view_history', history[:vh])
             self.build_menus(db)
 
-    def view_device_book(self, path):
-        pt = PersistentTemporaryFile('_view_device_book'+
-                os.path.splitext(path)[1])
+    def view_device_book(self, path) -> None:
+        pt = PersistentTemporaryFile('_view_device_book' + os.path.splitext(path)[1])
         self.persistent_files.append(pt)
         pt.close()
-        self.gui.device_manager.view_book(
-                Dispatcher(self.book_downloaded_for_viewing), path, pt.name)
+        self.gui.device_manager.view_book(Dispatcher(self.book_downloaded_for_viewing), path, pt.name)
 
     def _view_books(self, rows):
         if not rows or len(rows) == 0:
-            return error_dialog(self.gui, _('Cannot view'),
-                             _('No books selected'), show=True)
+            return error_dialog(self.gui, _('Cannot view'), _('No books selected'), show=True)
 
         if not self._view_check(len(rows)):
             return

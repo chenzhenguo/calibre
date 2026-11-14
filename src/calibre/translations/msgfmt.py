@@ -1,7 +1,5 @@
 #! /usr/bin/env python
-# vim:fileencoding=utf-8
 # Written by Martin v. Löwis <loewis@informatik.hu-berlin.de>
-
 
 """Generate binary message catalog from textual translation description.
 
@@ -27,42 +25,53 @@ Options:
         Display version information and exit.
 """
 
-import os
-import sys
+import array
 import ast
 import getopt
+import os
 import struct
-import array
+import sys
 from email.parser import HeaderParser
+from typing import IO, TYPE_CHECKING, NoReturn
 
-__version__ = "1.2"
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator, Sequence
 
-MESSAGES = {}
-STATS = {'translated': 0, 'untranslated': 0}
+__version__ = '1.2'
+
+MESSAGES: dict[bytes, bytes] = {}
+STATS: dict[str, int] = {'translated': 0, 'untranslated': 0, 'uniqified': 0}
+MAKE_UNIQUE = False
+NON_UNIQUE: set[bytes] = set()
 
 
-def usage(code, msg=''):
+def usage(code: int, msg: object = '') -> NoReturn:
     print(__doc__, file=sys.stderr)
     if msg:
         print(msg, file=sys.stderr)
     sys.exit(code)
 
 
-def add(ctxt, id, str, fuzzy):
+def add(ctxt: bytes | None, msgid: bytes, msgstr: bytes, fuzzy: int) -> None:
     "Add a non-fuzzy translation to the dictionary."
-    if not fuzzy and str:
-        if id:
+    if (not fuzzy or not msgid) and msgstr:
+        if msgid:
             STATS['translated'] += 1
         if ctxt is None:
-            MESSAGES[id] = str
+            if msgstr in NON_UNIQUE:
+                STATS['uniqified'] += 1
+                if MAKE_UNIQUE:
+                    msgstr += b' (' + msgid + b')'
+            else:
+                NON_UNIQUE.add(msgstr)
+            MESSAGES[msgid] = msgstr
         else:
-            MESSAGES[b"%b\x04%b" % (ctxt, id)] = str
-    else:
-        if id:
-            STATS['untranslated'] += 1
+            MESSAGES[b'%b\x04%b' % (ctxt, msgid)] = msgstr
+    elif msgid:
+        STATS['untranslated'] += 1
 
 
-def generate():
+def generate() -> bytes:
     "Return the generated output."
     # the keys are sorted in the .mo file
     keys = sorted(MESSAGES.keys())
@@ -78,7 +87,7 @@ def generate():
     # The header is 7 32-bit unsigned integers.  We don't use hash tables, so
     # the keys start right after the index tables.
     # translated string.
-    keystart = 7*4+16*len(keys)
+    keystart = 7 * 4 + 16 * len(keys)
     # and the values start after the keys
     valuestart = keystart + len(ids)
     koffsets = []
@@ -86,26 +95,29 @@ def generate():
     # The string table first has the list of keys, then the list of values.
     # Each entry has first the size of the string, then the file offset.
     for o1, l1, o2, l2 in offsets:
-        koffsets += [l1, o1+keystart]
-        voffsets += [l2, o2+valuestart]
+        koffsets += [l1, o1 + keystart]
+        voffsets += [l2, o2 + valuestart]
     offsets = koffsets + voffsets
-    output = struct.pack("Iiiiiii",
-                         0x950412de,       # Magic
-                         0,                 # Version
-                         len(keys),         # # of entries
-                         7*4,               # start of key index
-                         7*4+len(keys)*8,   # start of value index
-                         0, 0)              # size and offset of hash table
+    output = struct.pack(
+        'Iiiiiii',
+        0x950412DE,  # Magic
+        0,  # Version
+        len(keys),  # of entries
+        7 * 4,  # start of key index
+        7 * 4 + len(keys) * 8,  # start of value index
+        0,
+        0,
+    )  # size and offset of hash table
     try:
-        output += array.array("i", offsets).tobytes()
+        output += array.array('i', offsets).tobytes()
     except AttributeError:
-        output += array.array("i", offsets).tostring()
+        output += array.array('i', offsets).tostring()  # type: ignore
     output += ids
     output += strs
     return output
 
 
-def make(filename, outfile):
+def make(filename: str, outfile: str | IO[bytes] | None) -> None:
     ID = 1
     STR = 2
     CTXT = 3
@@ -122,7 +134,7 @@ def make(filename, outfile):
     try:
         with open(infile, 'rb') as f:
             lines = f.readlines()
-    except IOError as msg:
+    except OSError as msg:
         print(msg, file=sys.stderr)
         sys.exit(1)
 
@@ -134,6 +146,15 @@ def make(filename, outfile):
     # until we know the exact encoding
     encoding = 'latin-1'
 
+    def check_encoding() -> None:
+        nonlocal encoding
+        if not msgid and msgstr:
+            # See whether there is an encoding declaration
+            p = HeaderParser()
+            charset = p.parsestr(msgstr.decode(encoding)).get_content_charset()
+            if charset:
+                encoding = charset
+
     # Parse the catalog
     lno = 0
     for l in lines:
@@ -142,6 +163,7 @@ def make(filename, outfile):
         # If we get a comment line after a msgstr, this is a new entry
         if l[0] == '#' and section == STR:
             add(msgctxt, msgid, msgstr, fuzzy)
+            check_encoding()
             section = msgctxt = None
             fuzzy = 0
         # Record a fuzzy mark
@@ -154,23 +176,13 @@ def make(filename, outfile):
         if l.startswith('msgctxt'):
             if section == STR:
                 add(msgctxt, msgid, msgstr, fuzzy)
+                check_encoding()
             section = CTXT
             l = l[7:]
             msgctxt = b''
         elif l.startswith('msgid') and not l.startswith('msgid_plural'):
             if section == STR:
                 add(msgctxt, msgid, msgstr, fuzzy)
-                if not msgid:
-                    # See whether there is an encoding declaration
-                    p = HeaderParser()
-                    if sys.version_info.major > 2:
-                        charset = p.parsestr(msgstr.decode(encoding)).get_content_charset()
-                    else:
-                        charset = p.parsestr(msgstr.decode(encoding).encode('ascii', 'replace')).get_content_charset()
-                        if isinstance(charset, bytes):
-                            charset = charset.decode('ascii')
-                    if charset:
-                        encoding = charset
             section = ID
             l = l[5:]
             msgid = msgstr = b''
@@ -178,8 +190,7 @@ def make(filename, outfile):
         # This is a message with plural forms
         elif l.startswith('msgid_plural'):
             if section != ID:
-                print('msgid_plural not preceded by msgid on %s:%d' % (infile, lno),
-                      file=sys.stderr)
+                print(f'msgid_plural not preceded by msgid on {infile}:{lno}', file=sys.stderr)
                 sys.exit(1)
             l = l[12:]
             msgid += b'\0'  # separator of singular and plural
@@ -189,16 +200,14 @@ def make(filename, outfile):
             section = STR
             if l.startswith('msgstr['):
                 if not is_plural:
-                    print('plural without msgid_plural on %s:%d' % (infile, lno),
-                          file=sys.stderr)
+                    print(f'plural without msgid_plural on {infile}:{lno}', file=sys.stderr)
                     sys.exit(1)
                 l = l.split(']', 1)[1]
                 if msgstr:
                     msgstr += b'\0'  # Separator of the various plural forms
             else:
                 if is_plural:
-                    print('indexed msgstr required for plural on  %s:%d' % (infile, lno),
-                          file=sys.stderr)
+                    print(f'indexed msgstr required for plural on  {infile}:{lno}', file=sys.stderr)
                     sys.exit(1)
                 l = l[6:]
         # Skip empty lines
@@ -214,8 +223,7 @@ def make(filename, outfile):
         elif section == STR:
             msgstr += lb
         else:
-            print('Syntax error on %s:%d' % (infile, lno),
-                  'before:', file=sys.stderr)
+            print(f'Syntax error on {infile}:{lno}', 'before:', file=sys.stderr)
             print(l, file=sys.stderr)
             sys.exit(1)
     # Add last entry
@@ -225,38 +233,41 @@ def make(filename, outfile):
     # Compute output
     output = generate()
     try:
-        if hasattr(outfile, 'write'):
+        if not isinstance(outfile, str) and hasattr(outfile, 'write'):
             outfile.write(output)
         else:
-            with open(outfile, "wb") as f:
+            with open(outfile, 'wb') as f:
                 f.write(output)
-    except IOError as msg:
+    except OSError as msg:
         print(msg, file=sys.stderr)
 
 
-def make_with_stats(filename, outfile):
+def make_with_stats(filename: str, outfile: str | IO[bytes] | None) -> dict[str, int]:
     MESSAGES.clear()
-    STATS['translated'] = STATS['untranslated'] = 0
+    NON_UNIQUE.clear()
+    STATS['translated'] = STATS['untranslated'] = STATS['uniqified'] = 0
     make(filename, outfile)
-    return STATS['translated'], STATS['untranslated']
+    return STATS.copy()
 
 
-def run_batch(pairs):
-    for (filename, outfile) in pairs:
+def run_batch(pairs: Iterable[Sequence[str]]) -> Iterator[dict[str, int]]:
+    for filename, outfile in pairs:
         yield make_with_stats(filename, outfile)
 
 
-def main():
+def main() -> None:
+    global MAKE_UNIQUE
     args = sys.argv[1:]
-    if args == ['STDIN']:
+    if args[0] == 'STDIN':
+        MAKE_UNIQUE = args[1] == 'uniqify'
         import json
+
         results = tuple(run_batch(json.loads(sys.stdin.buffer.read())))
         sys.stdout.buffer.write(json.dumps(results).encode('utf-8'))
         sys.stdout.close()
         return
     try:
-        opts, args = getopt.getopt(args, 'hVso:',
-                                   ['help', 'version', 'statistics', 'output-file='])
+        opts, args = getopt.getopt(args, 'hVso:', ['help', 'version', 'statistics', 'output-file='])
     except getopt.error as msg:
         usage(1, msg)
 
@@ -267,7 +278,7 @@ def main():
         if opt in ('-h', '--help'):
             usage(0)
         elif opt in ('-V', '--version'):
-            print("msgfmt.py", __version__, file=sys.stderr)
+            print('msgfmt.py', __version__, file=sys.stderr)
             sys.exit(0)
         elif opt in ('-o', '--output-file'):
             outfile = arg
@@ -280,7 +291,7 @@ def main():
         return
 
     for filename in args:
-        translated, untranslated = make_with_stats(filename, outfile)
+        make_with_stats(filename, outfile)
         if output_stats:
             print(STATS['translated'], 'translated messages,', STATS['untranslated'], 'untranslated messages.')
 

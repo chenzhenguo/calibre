@@ -1,21 +1,30 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
-
-
-__license__   = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid at kovidgoyal.net>
 
 import os
+from typing import TYPE_CHECKING, TypedDict
+from urllib.parse import urlparse
 
-from calibre.ebooks.pdf.render.common import Array, Name, Dictionary, String, UTF16String, current_log
-from polyglot.builtins import iteritems
-from polyglot.urllib import unquote, urlparse
+from calibre.ebooks.pdf.render.common import Array, Dictionary, Name, String, UTF16String, current_log
+from calibre.utils.localization import _
+from polyglot.urllib import unquote
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Mapping, Sequence
+
+    from calibre.ebooks.metadata.toc import TOC
+    from calibre.ebooks.pdf.render.common import Reference
+    from calibre.ebooks.pdf.render.serialize import PDFStream
+
+
+class AnchorPos(TypedDict):
+    column: int
+    left: float
+    top: float
 
 
 class Destination(Array):
-
-    def __init__(self, start_page, pos, get_pageref):
+    def __init__(self, start_page: int, pos: AnchorPos, get_pageref: Callable[[int], Reference[Dictionary]]) -> None:
         pnum = start_page + max(0, pos['column'])
         q = pnum
         while q > -1:
@@ -26,26 +35,23 @@ class Destination(Array):
                 pos['left'] = pos['top'] = 0
                 q -= 1
         if q != pnum:
-            current_log().warn('Could not find page {} for link destination, using page {} instead'.format(pnum, q))
-        super(Destination, self).__init__([
-            pref, Name('XYZ'), pos['left'], pos['top'], None
-        ])
+            current_log().warn(f'Could not find page {pnum} for link destination, using page {q} instead')
+        super().__init__([pref, Name('XYZ'), pos['left'], pos['top'], None])
 
 
-class Links(object):
-
-    def __init__(self, pdf, mark_links, page_size):
-        self.anchors = {}
-        self.links = []
-        self.start = {'top':page_size[1], 'column':0, 'left':0}
+class Links:
+    def __init__(self, pdf: PDFStream, mark_links: bool, page_size: tuple[float, float]) -> None:
+        self.anchors: dict[str, dict[str | None, Destination]] = {}
+        self.links: list[tuple[tuple[str, str, str | None], Dictionary, Array]] = []
+        self.start: AnchorPos = {'top': page_size[1], 'column': 0, 'left': 0}
         self.pdf = pdf
         self.mark_links = mark_links
 
-    def add(self, base_path, start_page, links, anchors):
+    def add(self, base_path: str, start_page: int, links: Iterable[tuple[str, int, Sequence[float]]], anchors: Mapping[str, AnchorPos]) -> None:
         path = os.path.normcase(os.path.abspath(base_path))
         self.anchors[path] = a = {}
         a[None] = Destination(start_page, self.start, self.pdf.get_pageref)
-        for anchor, pos in iteritems(anchors):
+        for anchor, pos in anchors.items():
             a[anchor] = Destination(start_page, pos, self.pdf.get_pageref)
         for link in links:
             href, page, rect = link
@@ -54,26 +60,27 @@ class Links(object):
                 pref = self.pdf.get_pageref(page).obj
             except IndexError:
                 try:
-                    pref = self.pdf.get_pageref(page-1).obj
+                    pref = self.pdf.get_pageref(page - 1).obj
                 except IndexError:
-                    self.pdf.debug('Unable to find page for link: %r, ignoring it' % link)
+                    self.pdf.debug(f'Unable to find page for link: {link!r}, ignoring it')
                     continue
-                self.pdf.debug('The link %s points to non-existent page, moving it one page back' % href)
+                self.pdf.debug(f'The link {href} points to non-existent page, moving it one page back')
             self.links.append(((path, p, frag or None), pref, Array(rect)))
 
-    def add_links(self):
+    def add_links(self) -> None:
         for link in self.links:
             path, href, frag = link[0]
             page, rect = link[1:]
             combined_path = os.path.normcase(os.path.abspath(os.path.join(os.path.dirname(path), *unquote(href).split('/'))))
             is_local = not href or combined_path in self.anchors
             annot = Dictionary({
-                'Type':Name('Annot'), 'Subtype':Name('Link'),
-                'Rect':rect, 'Border':Array([0,0,0]),
+                'Type': Name('Annot'),
+                'Subtype': Name('Link'),
+                'Rect': rect,
+                'Border': Array([0, 0, 0]),
             })
             if self.mark_links:
-                annot.update({'Border':Array([16, 16, 1]), 'C':Array([1.0, 0,
-                                                                      0])})
+                annot.update({'Border': Array([16, 16, 1]), 'C': Array([1.0, 0, 0])})
             if is_local:
                 path = combined_path if href else path
                 try:
@@ -84,15 +91,16 @@ class Links(object):
                     except KeyError:
                         pass
             else:
-                url = href + (('#'+frag) if frag else '')
+                url = href + (('#' + frag) if frag else '')
                 try:
                     purl = urlparse(url)
                 except Exception:
-                    self.pdf.debug('Ignoring unparseable URL: %r' % url)
+                    self.pdf.debug(f'Ignoring unparsable URL: {url!r}')
                     continue
                 if purl.scheme and purl.scheme != 'file':
                     action = Dictionary({
-                        'Type':Name('Action'), 'S':Name('URI'),
+                        'Type': Name('Action'),
+                        'S': Name('URI'),
                     })
                     # Do not try to normalize/quote/unquote this URL as if it
                     # has a query part, it will get corrupted
@@ -103,17 +111,16 @@ class Links(object):
                     page['Annots'] = Array()
                 page['Annots'].append(self.pdf.objects.add(annot))
             else:
-                self.pdf.debug('Could not find destination for link: %s in file %s'%
-                               (href, path))
+                self.pdf.debug(f'Could not find destination for link: {href} in file {path}')
 
-    def add_outline(self, toc):
-        parent = Dictionary({'Type':Name('Outlines')})
+    def add_outline(self, toc: TOC) -> None:
+        parent = Dictionary({'Type': Name('Outlines')})
         parentref = self.pdf.objects.add(parent)
         self.process_children(toc, parentref, parent_is_root=True)
         self.pdf.catalog.obj['Outlines'] = parentref
 
-    def process_children(self, toc, parentref, parent_is_root=False):
-        childrefs = []
+    def process_children(self, toc: TOC, parentref: Reference[Dictionary], parent_is_root: bool = False) -> None:
+        childrefs: list[Reference[Dictionary]] = []
         for child in toc:
             childref = self.process_toc_item(child, parentref)
             if childref is None:
@@ -131,7 +138,7 @@ class Links(object):
             if not parent_is_root:
                 parentref.obj['Count'] = -len(childrefs)
 
-    def process_toc_item(self, toc, parentref):
+    def process_toc_item(self, toc: TOC, parentref: Reference[Dictionary]) -> Reference[Dictionary] | None:
         path = toc.abspath or None
         frag = toc.fragment or None
         if path is None:
@@ -141,6 +148,5 @@ class Links(object):
             return None
         a = self.anchors[path]
         dest = a.get(frag, a[None])
-        item = Dictionary({'Parent':parentref, 'Dest':dest,
-                           'Title':UTF16String(toc.text or _('Unknown'))})
+        item = Dictionary({'Parent': parentref, 'Dest': dest, 'Title': UTF16String(toc.text or _('Unknown'))})
         return self.pdf.objects.add(item)

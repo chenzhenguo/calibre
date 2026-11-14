@@ -1,24 +1,30 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
-
-
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
 import re
+from typing import TYPE_CHECKING, cast
+
+from lxml import etree
+
 from calibre.ebooks.oeb.base import XPath, urlunquote
 from polyglot.builtins import as_bytes
 
+if TYPE_CHECKING:
+    from optparse import Values
 
-class DataURL(object):
+    from calibre.ebooks.conversion.plumber import OptionValues
+    from calibre.ebooks.oeb.base import OEBBook
 
-    def __call__(self, oeb, opts):
+
+class DataURL:
+    def __call__(self, oeb: OEBBook, opts: Values | OptionValues) -> None:
         from calibre.utils.imghdr import what
+
         self.log = oeb.log
         attr_path = XPath('//h:img[@src]')
         for item in oeb.spine:
             root = item.data
-            if not hasattr(root, 'xpath'):
+            if not isinstance(root, etree._Element):
                 continue
             for img in attr_path(root):
                 raw = img.get('src', '')
@@ -30,6 +36,7 @@ class DataURL(object):
                 if ';base64' in header:
                     data = re.sub(r'\s+', '', data)
                     from polyglot.binary import from_base64_bytes
+
                     try:
                         data = from_base64_bytes(data)
                     except Exception:
@@ -44,9 +51,10 @@ class DataURL(object):
                     continue
                 img.set('src', item.relhref(self.convert_image_data_uri(data, fmt, oeb)))
 
-    def convert_image_data_uri(self, data, fmt, oeb):
+    def convert_image_data_uri(self, data: bytes, fmt: str, oeb: OEBBook) -> str:
         self.log('Found image encoded as data URI converting it to normal image')
         from calibre import guess_type
+
         item_id, item_href = oeb.manifest.generate('data-url-image', 'data-url-image.' + fmt)
-        oeb.manifest.add(item_id, item_href, guess_type(item_href)[0], data=data)
+        oeb.manifest.add(item_id, item_href, cast('str', guess_type(item_href)[0]), data=data)
         return item_href

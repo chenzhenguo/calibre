@@ -1,21 +1,12 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
 
-store_version = 2  # Needed for dynamic plugin loading
 
-__license__ = 'GPL 3'
-__copyright__ = '2011, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+store_version = 3  # Needed for dynamic plugin loading
 
 from contextlib import closing
-try:
-    from urllib.parse import quote
-except ImportError:
-    from urllib import quote
+from urllib.parse import quote
 
-from lxml import html
-
-from PyQt5.Qt import QUrl
+from qt.core import QUrl
 
 from calibre import browser
 from calibre.gui2 import open_url
@@ -24,12 +15,16 @@ from calibre.gui2.store.basic_config import BasicStoreConfig
 from calibre.gui2.store.search_result import SearchResult
 from calibre.gui2.store.web_store_dialog import WebStoreDialog
 
+try:
+    from calibre.utils.xml_parse import safe_html_fromstring
+except ImportError:
+    from lxml.html import fromstring as safe_html_fromstring
+
 
 class EBookNLStore(BasicStoreConfig, StorePlugin):
-
-    def open(self, parent=None, detail_item=None, external=False):
+    def open(self, gui=None, parent=None, detail_item=None, external=False) -> None:
         url = 'http://www.ebook.nl/'
-        url_details = ('http://www.ebook.nl/store/{0}')
+        url_details = 'http://www.ebook.nl/store/{0}'
 
         if external or self.config.get('open_external', False):
             if detail_item:
@@ -42,15 +37,15 @@ class EBookNLStore(BasicStoreConfig, StorePlugin):
             d = WebStoreDialog(self.gui, url, parent, detail_url)
             d.setWindowTitle(self.name)
             d.set_tags(self.config.get('tags', ''))
-            d.exec_()
+            d.exec()
 
     def search(self, query, max_results=10, timeout=60):
-        url = ('http://www.ebook.nl/store/advanced_search_result.php?keywords=' + quote(query))
+        url = 'http://www.ebook.nl/store/advanced_search_result.php?keywords=' + quote(query)
         br = browser()
 
         counter = max_results
         with closing(br.open(url, timeout=timeout)) as f:
-            doc = html.fromstring(f.read())
+            doc = safe_html_fromstring(f.read())
             for data in doc.xpath('//div[@id="books"]/div[@itemtype="http://schema.org/Book"]'):
                 if counter <= 0:
                     break
@@ -76,10 +71,10 @@ class EBookNLStore(BasicStoreConfig, StorePlugin):
 
                 yield s
 
-    def get_details(self, search_result, timeout):
+    def get_details(self, search_result, timeout=60) -> bool:
         br = browser()
         with closing(br.open(search_result.detail_item, timeout=timeout)) as nf:
-            idata = html.fromstring(nf.read())
+            idata = safe_html_fromstring(nf.read())
             formats = []
             if idata.xpath('.//div[@id="book_detail_body"]/ul/li[strong[contains(., "Type")]]/span[contains(., "ePub")]'):
                 if idata.xpath('.//div[@id="book_detail_body"]/ul/li[strong[contains(., "Type")]]/span[contains(., "EPUB3")]'):
@@ -90,9 +85,11 @@ class EBookNLStore(BasicStoreConfig, StorePlugin):
                 formats.append('PDF')
             search_result.formats = ', '.join(formats)
 
-            if idata.xpath('.//div[@id="book_detail_body"]/ul/li[strong[contains(., "Type")]]'
-                           '//span[@class="ePubAdobeDRM" or @class="ePubwatermerk" or'
-                           ' @class="Pdfwatermark" or @class="PdfAdobeDRM"]'):
+            if idata.xpath(
+                './/div[@id="book_detail_body"]/ul/li[strong[contains(., "Type")]]'
+                '//span[@class="ePubAdobeDRM" or @class="ePubwatermerk" or'
+                ' @class="Pdfwatermark" or @class="PdfAdobeDRM"]'
+            ):
                 search_result.drm = SearchResult.DRM_LOCKED
             if idata.xpath('.//div[@id="book_detail_body"]/ul/li[strong[contains(., "Type")]]//span[@class="ePubzonderDRM"]'):
                 search_result.drm = SearchResult.DRM_UNLOCKED

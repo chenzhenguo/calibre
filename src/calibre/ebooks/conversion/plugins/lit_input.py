@@ -1,37 +1,43 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2009, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
+from typing import IO, TYPE_CHECKING
 
 from calibre.customize.conversion import InputFormatPlugin
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from calibre.ebooks.oeb.base import OEBBook
+    from calibre.utils.logging import Log
 
 
 class LITInput(InputFormatPlugin):
-
-    name        = 'LIT Input'
-    author      = 'Marshall T. Vandegrift'
-    description = 'Convert LIT files to HTML'
-    file_types  = {'lit'}
+    name = 'LIT Input'
+    author = 'Marshall T. Vandegrift'
+    description = _('Convert LIT files to HTML')
+    file_types = {'lit'}
     commit_name = 'lit_input'
 
-    def convert(self, stream, options, file_ext, log,
-                accelerators):
-        from calibre.ebooks.lit.reader import LitReader
+    def convert(self, stream: IO[bytes], options: Values, file_ext: str, log: Log, accelerators: dict[str, str]) -> OEBBook:
         from calibre.ebooks.conversion.plumber import create_oebbook
+        from calibre.ebooks.lit.reader import LitReader
+
         self.log = log
         return create_oebbook(log, stream, options, reader=LitReader)
 
-    def postprocess_book(self, oeb, opts, log):
-        from calibre.ebooks.oeb.base import XHTML_NS, XPath, XHTML
+    def postprocess_book(self, oeb: OEBBook, opts: Values, log: Log) -> None:
+        from lxml import etree
+
+        from calibre.ebooks.oeb.base import XHTML, XHTML_NS, XPath
+
         for item in oeb.spine:
             root = item.data
-            if not hasattr(root, 'xpath'):
+            if not isinstance(root, etree._Element):
                 continue
             for bad in ('metadata', 'guide'):
-                metadata = XPath('//h:'+bad)(root)
+                metadata = XPath('//h:' + bad)(root)
                 if metadata:
                     for x in metadata:
                         x.getparent().remove(x)
@@ -40,20 +46,20 @@ class LITInput(InputFormatPlugin):
                 body = body[0]
                 if len(body) == 1 and body[0].tag == XHTML('pre'):
                     pre = body[0]
-                    from calibre.ebooks.txt.processor import convert_basic, \
-                        separate_paragraphs_single_line
-                    from calibre.ebooks.chardet import xml_to_unicode
-                    from calibre.utils.xml_parse import safe_xml_fromstring
                     import copy
-                    self.log('LIT file with all text in singe <pre> tag detected')
+
+                    from calibre.ebooks.chardet import xml_to_unicode
+                    from calibre.ebooks.txt.processor import convert_basic, separate_paragraphs_single_line
+                    from calibre.utils.xml_parse import safe_xml_fromstring
+
+                    self.log('LIT file with all text in single <pre> tag detected')
                     html = separate_paragraphs_single_line(pre.text)
-                    html = convert_basic(html).replace('<html>',
-                            '<html xmlns="%s">'%XHTML_NS)
-                    html = xml_to_unicode(html, strip_encoding_pats=True,
-                            resolve_entities=True)[0]
+                    html = convert_basic(html).replace('<html>', f'<html xmlns="{XHTML_NS}">')
+                    html = xml_to_unicode(html, strip_encoding_pats=True, resolve_entities=True)[0]
                     if opts.smarten_punctuation:
                         # SmartyPants skips text inside <pre> tags
                         from calibre.ebooks.conversion.preprocess import smarten_punctuation
+
                         html = smarten_punctuation(html, self.log)
                     root = safe_xml_fromstring(html)
                     body = XPath('//h:body')(root)

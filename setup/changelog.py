@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPL v3 Copyright: 2020, Kovid Goyal <kovid at kovidgoyal.net>
 
 from datetime import date
@@ -14,7 +13,7 @@ def parse(raw, parse_dates=True):
         nonlocal current_entry, current_section
         if not stripped_line:
             return normal
-        if stripped_line.startswith('{' '{' '{'):
+        if stripped_line.startswith('{{{'):
             parts = line.split()[1:]
             if len(parts) != 2:
                 raise ValueError(f'The entry start line is malformed: {line}')
@@ -32,7 +31,7 @@ def parse(raw, parse_dates=True):
 
     def in_entry(linenum, line, stripped_line):
         nonlocal current_section, current_entry
-        if stripped_line == '}' '}' '}':
+        if stripped_line == '}}}':
             if current_entry is None:
                 raise ValueError(f'Entry terminator without active entry at line: {linenum}')
             entries.append(current_entry)
@@ -60,7 +59,7 @@ def parse(raw, parse_dates=True):
             if idx == -1:
                 items.append({'title': line.strip()})
             else:
-                items.append({'title': line[:idx].strip(), 'author': line[idx + 3:].strip()})
+                items.append({'title': line[:idx].strip(), 'author': line[idx + 3 :].strip()})
             return in_entry
         item = {}
         if line.startswith('['):
@@ -73,7 +72,7 @@ def parse(raw, parse_dates=True):
                     continue
                 num = int(x)
                 item.setdefault('tickets', []).append(num)
-            item['title'] = line[idx+1:].strip()
+            item['title'] = line[idx + 1 :].strip()
         else:
             item['title'] = line.strip()
         items.append(item)
@@ -94,7 +93,7 @@ def parse(raw, parse_dates=True):
         if line.startswith('-'):
             finalize_item(item)
             return start_item(linenum, line, stripped_line)
-        if line.startswith('}' '}' '}'):
+        if line.startswith('}}}'):
             return in_entry(linenum, line, stripped_line)
         if not stripped_line:
             if 'description' not in item:
@@ -103,7 +102,7 @@ def parse(raw, parse_dates=True):
         if 'description' in item:
             item['description'] += stripped_line + ' '
         else:
-            item['title'] += stripped_line
+            item['title'] += ' ' + stripped_line
         return in_item
 
     state = normal
@@ -135,11 +134,12 @@ def migrate():
         lines.append('')
 
     for name in ('Changelog.yaml', 'Changelog.old.yaml'):
-        entries = safe_load(open(name).read())
+        with open(name) as f:
+            entries = safe_load(f.read())
         lines = []
         for entry in entries:
             lines.append('')
-            lines.append('{' '{' '{' f' {entry["version"]} {entry["date"]}')
+            lines.append('{{{' + f' {entry["version"]} {entry["date"]}')
             for w in ('new features', 'bug fixes'):
                 nf = entry.get(w)
                 if nf:
@@ -167,7 +167,7 @@ def migrate():
                 lines.append('')
             with open(name.replace('yaml', 'txt'), 'w') as f:
                 f.write('\n'.join(lines))
-            lines.append(''), lines.append('}' '}' '}'), lines.append('')
+            lines.append(''), lines.append('}}}'), lines.append('')
 
 
 if __name__ == '__main__':

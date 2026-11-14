@@ -1,41 +1,43 @@
+# License: GPLv3 Copyright: 2008, Kovid Goyal <kovid at kovidgoyal.net>
 
+import gc
+import os
+import sys
+import weakref
 
-__license__   = 'GPL v3'
-__copyright__ = '2008, Kovid Goyal <kovid at kovidgoyal.net>'
+from qt.core import QAction, QIcon, QKeySequence, QMainWindow, QMenu, QMenuBar, QObject, Qt, QTimer, pyqtSignal
 
-
-import sys, gc, weakref
-
-from PyQt5.Qt import (QMainWindow, QTimer, QAction, QMenu, QMenuBar, QIcon,
-                      QObject, QKeySequence)
-from calibre.utils.config import OptionParser
+from calibre import as_unicode, prepare_string_for_xml, prints
+from calibre.constants import iswindows
 from calibre.gui2 import error_dialog
-from calibre import prints, as_unicode, prepare_string_for_xml
+from calibre.utils.config import OptionParser
+from calibre.utils.localization import _
 from polyglot.io import PolyglotStringIO
 
 
-def option_parser(usage='''\
+def option_parser(
+    usage='''\
 Usage: %prog [options]
 
 Launch the Graphical User Interface
-'''):
+''',
+):
     parser = OptionParser(usage)
     return parser
 
 
 class GarbageCollector(QObject):
-
-    '''
+    """
     Disable automatic garbage collection and instead collect manually
     every INTERVAL milliseconds.
 
     This is done to ensure that garbage collection only happens in the GUI
     thread, as otherwise Qt can crash.
-    '''
+    """
 
     INTERVAL = 5000
 
-    def __init__(self, parent, debug=False):
+    def __init__(self, parent, debug=False) -> None:
         QObject.__init__(self, parent)
         self.debug = debug
 
@@ -47,7 +49,7 @@ class GarbageCollector(QObject):
         self.timer.start(self.INTERVAL)
         # gc.set_debug(gc.DEBUG_SAVEALL)
 
-    def check(self):
+    def check(self) -> None:
         # return self.debug_cycles()
         l0, l1, l2 = gc.get_count()
         if self.debug:
@@ -65,30 +67,29 @@ class GarbageCollector(QObject):
                     if self.debug:
                         print('collecting gen 2, found:', num, 'unreachable')
 
-    def debug_cycles(self):
+    def debug_cycles(self) -> None:
         gc.collect()
         for obj in gc.garbage:
             print(obj, repr(obj), type(obj))
 
 
-class ExceptionHandler(object):
-
-    def __init__(self, main_window):
+class ExceptionHandler:
+    def __init__(self, main_window) -> None:
         self.wref = weakref.ref(main_window)
 
     def __call__(self, type, value, tb):
         mw = self.wref()
         if mw is not None:
-            mw.unhandled_exception(type, value, tb)
+            mw.display_unhandled_exception.emit(type, value, tb)
         else:
             sys.__excepthook__(type, value, tb)
 
 
 class MainWindow(QMainWindow):
-
     ___menu_bar = None
-    ___menu     = None
-    __actions   = []
+    ___menu = None
+    __actions = []
+    display_unhandled_exception = pyqtSignal(object, object, object)
 
     @classmethod
     def create_application_menubar(cls):
@@ -105,8 +106,8 @@ class MainWindow(QMainWindow):
 
     @classmethod
     def get_menubar_actions(cls):
-        preferences_action = QAction(QIcon(I('config.png')), _('&Preferences'), None)
-        quit_action        = QAction(QIcon(I('window-close.png')), _('&Quit'), None)
+        preferences_action = QAction(QIcon.ic('config.png'), _('&Preferences'), None)
+        quit_action = QAction(QIcon.ic('window-close.png'), _('&Quit'), None)
         preferences_action.setMenuRole(QAction.MenuRole.PreferencesRole)
         quit_action.setMenuRole(QAction.MenuRole.QuitRole)
         return preferences_action, quit_action
@@ -115,42 +116,139 @@ class MainWindow(QMainWindow):
     def native_menubar(self):
         return self.___menu_bar
 
-    def __init__(self, opts, parent=None, disable_automatic_gc=False):
+    def __init__(self, opts=None, parent=None, disable_automatic_gc=False) -> None:
         QMainWindow.__init__(self, parent)
+        self.display_unhandled_exception.connect(self.unhandled_exception, type=Qt.ConnectionType.QueuedConnection)
         if disable_automatic_gc:
             self._gc = GarbageCollector(self, debug=False)
 
-    def enable_garbage_collection(self, enabled=True):
+    def enable_garbage_collection(self, enabled=True) -> None:
         if hasattr(self, '_gc'):
             self._gc.timer.blockSignals(not enabled)
         else:
             gc.enable() if enabled else gc.disable()
 
-    def set_exception_handler(self):
+    def set_exception_handler(self) -> None:
         sys.excepthook = ExceptionHandler(self)
 
-    def unhandled_exception(self, exc_type, value, tb):
+    def show_possible_sharing_violation(self, e: Exception, det_msg: str = '') -> bool:
+        if not iswindows or not isinstance(e, OSError):
+            return False
+        import errno
+
+        from calibre_extensions import winutil
+
+        if not (e.winerror == winutil.ERROR_SHARING_VIOLATION or e.errno == errno.EACCES or isinstance(e, PermissionError)):
+            return False
+        msg = getattr(e, 'locking_violation_msg', '')
+        if msg:
+            msg = msg.strip() + ' '
+        fname = e.filename
+
+        def no_processes_found() -> bool:
+            is_folder = fname and os.path.isdir(fname)
+            if e.winerror == winutil.ERROR_SHARING_VIOLATION:
+                if fname:
+                    if is_folder:
+                        dmsg = _('The folder "{}" is opened in another program, so calibre cannot access it.').format(fname)
+                    else:
+                        dmsg = _('The file "{}" is opened in another program, so calibre cannot access it.').format(fname)
+                elif is_folder:
+                    dmsg = _('A folder is open in another program so calibre cannot access it.')
+                else:
+                    dmsg = _('A file is open in another program so calibre cannot access it.')
+                if is_folder:
+                    dmsg += _(
+                        'This is usually caused by leaving Windows explorer or a similar file manager open'
+                        ' to a folder in the calibre library. Close Windows explorer and retry.'
+                    )
+                else:
+                    dmsg += _(
+                        'This is usually caused by software such as antivirus or file sync (aka DropBox and similar)'
+                        ' accessing files in the calibre library folder at the same time as calibre. Try excluding'
+                        ' the calibre library folder from such software.'
+                    )
+                error_dialog(self, _('Cannot open file or folder as it is in use'), msg + dmsg, det_msg=det_msg, show=True)
+                return True
+            if msg:
+                if fname:
+                    dmsg = _('Permission was denied by the operating system when calibre tried to access the file: "{0}".').format(fname)
+                else:
+                    dmsg = _('Permission was denied by the operating system when calibre tried to access a file.')
+                dmsg += ' ' + _('This means either that the permissions on the file or its parent folder are incorrect or the file is open in another program.')
+                error_dialog(self, _('Cannot open file or folder'), msg + dmsg, det_msg=det_msg, show=True)
+                return True
+            return False
+
+        if not hasattr(winutil, 'get_processes_using_files'):
+            return no_processes_found()  # running from source
+        if not e.filename and not e.filename2:
+            return no_processes_found()
+        if e.filename and isinstance(e.filename, str):
+            if os.path.isdir(e.filename):
+                return no_processes_found()
+            try:
+                p = winutil.get_processes_using_files(e.filename)
+            except OSError:
+                return no_processes_found()
+        if not p and e.filename2 and isinstance(e.filename2, str):
+            if os.path.isdir(e.filename2):
+                return no_processes_found()
+            try:
+                p = winutil.get_processes_using_files(e.filename2)
+            except OSError:
+                return no_processes_found()
+            fname = e.filename2
+        if not p:
+            return no_processes_found()
+
+        path_map = {x['path']: x for x in p}
+        is_folder = fname and os.path.isdir(fname)
+        if is_folder:
+            dmsg = _('Could not open the folder: "{}". It is already opened in the following programs:').format(fname)
+        else:
+            dmsg = _('Could not open the file: "{}". It is already opened in the following programs:').format(fname)
+        for path, x in path_map.items():
+            dmsg += '<div>' + prepare_string_for_xml(f'{x["app_name"]}: {path}')
+        msg = prepare_string_for_xml(msg)
+        error_dialog(self, _('Cannot open file or folder as it is in use'), '<p>' + msg + dmsg, det_msg=det_msg, show=True)
+        return True
+
+    def unhandled_exception(self, exc_type, value, tb) -> None:
         if exc_type is KeyboardInterrupt:
             return
         import traceback
+
         try:
             sio = PolyglotStringIO(errors='replace')
             try:
                 from calibre.debug import print_basic_debug_info
+
                 print_basic_debug_info(out=sio)
-            except:
+            except Exception:
                 pass
             traceback.print_exception(exc_type, value, tb, file=sio)
             if getattr(value, 'locking_debug_msg', None):
                 prints(value.locking_debug_msg, file=sio)
             fe = sio.getvalue()
-            msg = '<b>%s</b>:'%exc_type.__name__ + prepare_string_for_xml(as_unicode(value))
-            error_dialog(self, _('Unhandled exception'), msg, det_msg=fe,
-                    show=True)
             prints(fe, file=sys.stderr)
+            try:
+                if self.show_possible_sharing_violation(value, det_msg=fe):
+                    return
+            except Exception:
+                traceback.print_exc()
+            try:
+                from calibre.gui2.device import show_device_stopped_responding_error
+
+                if show_device_stopped_responding_error(self, value, fe):
+                    return
+            except Exception:
+                traceback.print_exc()
+            msg = f'<b>{exc_type.__name__}</b>:' + prepare_string_for_xml(as_unicode(value))
+            error_dialog(self, _('Unhandled exception'), msg, det_msg=fe, show=True)
         except BaseException:
             pass
-        except:
+        except Exception:
             pass
 
 
@@ -174,11 +272,14 @@ def clone_menu(menu):
         ans.setEnabled(ac.isEnabled())
         ans.setStatusTip(ac.statusTip())
         ans.setVisible(ac.isVisible())
+        ans.setCheckable(ac.isCheckable())
+        ans.setChecked(ac.isChecked())
         return ans
 
     def clone_one_menu(m):
         m.aboutToShow.emit()
         ans = QMenu(m.parent())
+        ans.hovered.connect(m.hovered.emit)
         for ac in m.actions():
             cac = clone_action(ac, ans)
             ans.addAction(cac)
@@ -186,4 +287,5 @@ def clone_menu(menu):
             if m is not None:
                 cac.setMenu(clone_menu(m))
         return ans
+
     return clone_one_menu(menu)

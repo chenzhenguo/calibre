@@ -1,7 +1,7 @@
 Function mode for Search & replace in the Editor
 ================================================
 
-The :guilabel:`Search & replace` tool in the editor support a *function mode*.
+The :guilabel:`Search & replace` tool in the editor supports a *function mode*.
 In this mode, you can combine regular expressions (see :doc:`regexp`) with
 arbitrarily powerful Python functions to do all sorts of advanced text
 processing.
@@ -31,7 +31,7 @@ automatically change the case of all text inside heading tags to title case::
     Find expression: <([Hh][1-6])[^>]*>.+?</\1>
 
 For the function, simply choose the :guilabel:`Title-case text (ignore tags)` builtin
-function. The will change titles that look like: ``<h1>some TITLE</h1>`` to
+function. This will change titles that look like: ``<h1>some titLE</h1>`` to
 ``<h1>Some Title</h1>``. It will work even if there are other HTML tags inside
 the heading tags.
 
@@ -41,7 +41,7 @@ Your first custom function - smartening hyphens
 
 The real power of function mode comes from being able to create your own
 functions to process text in arbitrary ways. The Smarten Punctuation tool in
-the editor leaves individual hyphens alone, so you can use the this function to
+the editor leaves individual hyphens alone, so you can use this function to
 replace them with em-dashes.
 
 To create a new function, simply click the :guilabel:`Create/edit` button to create a new
@@ -54,7 +54,7 @@ function and copy the Python code from below.
 
 Every :guilabel:`Search & replace` custom function must have a unique name and consist of a
 Python function named replace, that accepts all the arguments shown above.
-For the moment, we wont worry about all the different arguments to
+For the moment, we won't worry about all the different arguments to
 ``replace()`` function. Just focus on the ``match`` argument. It represents a
 match when running a search and replace. Its full documentation in available
 `here <https://docs.python.org/library/re.html#match-objects>`_.
@@ -153,7 +153,7 @@ are processed in the order in which they appear in the book. See
 Auto create a Table of Contents
 -------------------------------
 
-Finally, lets try something a little more ambitious. Suppose your book has
+Finally, let's try something a little more ambitious. Suppose your book has
 headings in ``h1`` and ``h2`` tags that look like
 ``<h1 id="someid">Some Text</h1>``. We will auto-generate an HTML Table of
 Contents based on these headings. Create the custom function below:
@@ -176,9 +176,9 @@ Contents based on these headings. Create the custom function below:
                     parent = root.children[-1] if tag_name == 'h2' and root.children else root
                     parent.add(text, file_name, anchor)
                 toc = toc_to_html(root, current_container(), 'toc.html', 'Table of Contents for ' + metadata.title, metadata.language)
-                print (xml2str(toc))
+                print(xml2str(toc))
             else:
-                print ('No headings to build ToC from found')
+                print('No headings to build ToC from found')
         else:
             # Add an entry corresponding to this match to the Table of Contents
             if 'toc' not in data:
@@ -207,7 +207,7 @@ HTML Table of Contents, ready to be pasted into :file:`toc.html`.
 The function above is heavily commented, so it should be easy to follow. The
 key new feature is the use of another useful extra argument to the
 ``replace()`` function, the ``data`` object. The ``data`` object is a Python
-*dict* that persists between all successive invocations of ``replace()`` during
+*dictionary* that persists between all successive invocations of ``replace()`` during
 a single :guilabel:`Replace All` operation.
 
 Another new feature is the use of ``call_after_last_match`` -- setting that to
@@ -278,9 +278,9 @@ for the current book's language.
 The ``data`` argument
 ^^^^^^^^^^^^^^^^^^^^^
 
-This a simple Python ``dict``. When you run
+This a simple Python ``dictionary``. When you run
 :guilabel:`Replace all`, every successive match will cause ``replace()`` to be
-called with the same ``dict`` as data. You can thus use it to store arbitrary
+called with the same ``dictionary`` as data. You can thus use it to store arbitrary
 data between invocations of ``replace()`` during a :guilabel:`Replace all`
 operation.
 
@@ -290,7 +290,7 @@ The ``functions`` argument
 The ``functions`` argument gives you access to all other user defined
 functions. This is useful for code re-use. You can define utility functions in
 one place and re-use them in all your other functions. For example, suppose you
-create a function name ``My Function`` like this:
+create a function named ``My Function`` like this:
 
 .. code-block:: python
 
@@ -341,8 +341,8 @@ Choose file order when running on multiple HTML files
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 When you run a :guilabel:`Replace all` on multiple HTML files, the order in
-which the files are processes depends on what files you have open for editing.
-You can force the search to process files in the order in which the appear by
+which the files are processed depends on what files you have open for editing.
+You can force the search to process files in the order in which they appear by
 setting the ``file_order`` attribute on your function, like this:
 
 .. code-block:: python
@@ -376,7 +376,7 @@ Appending the output from the function to marked text
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 When running search and replace on marked text, it is sometimes useful to
-append so text to the end of the marked text. You can do that by setting
+append some text to the end of the marked text. You can do that by setting
 the ``append_final_output_to_marked`` attribute on your function (note that you
 also need to set ``call_after_last_match``), like this:
 

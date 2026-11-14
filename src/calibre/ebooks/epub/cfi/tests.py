@@ -1,66 +1,65 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
+# License: GPLv3 Copyright: 2014, Kovid Goyal <kovid at kovidgoyal.net>
 
+import unittest
+from typing import TYPE_CHECKING, cast
 
-__license__ = 'GPL v3'
-__copyright__ = '2014, Kovid Goyal <kovid at kovidgoyal.net>'
+from calibre.ebooks.epub.cfi.parse import CFIPath, CFIStep, TextAssertion, cfi_sort_key, decode_cfi, parser
 
-import unittest, numbers
-from polyglot.builtins import map
-
-from calibre.ebooks.epub.cfi.parse import parser, cfi_sort_key, decode_cfi
-from polyglot.builtins import iteritems, unicode_type
+if TYPE_CHECKING:
+    from lxml.etree import _Element
 
 
 class Tests(unittest.TestCase):
-
-    def test_sorting(self):
+    def test_sorting(self) -> None:
         null_offsets = (0, (0, 0), 0)
         for path, key in [
-                ('/1/2/3', ((1, 2, 3), null_offsets)),
-                ('/1[id]:34[yyyy]', ((1,), (0, (0, 0), 34))),
-                ('/1@1:2', ((1,), (0, (2, 1), 0))),
-                ('/1~1.2', ((1,), (1.2, (0, 0), 0))),
+            ('/1/2/3', ((1, 2, 3), null_offsets)),
+            ('/1[id]:34[yyyy]', ((1,), (0, (0, 0), 34))),
+            ('/1@1:2', ((1,), (0, (2, 1), 0))),
+            ('/1~1.2', ((1,), (1.2, (0, 0), 0))),
         ]:
             self.assertEqual(cfi_sort_key(path), key)
 
-    def test_parsing(self):
+    def test_parsing(self) -> None:
         p = parser()
 
-        def step(x):
-            if isinstance(x, numbers.Integral):
+        def step(x: int | tuple[int, str]) -> CFIStep:
+            if isinstance(x, int):
                 return {'num': x}
-            return {'num':x[0], 'id':x[1]}
+            return {'num': x[0], 'id': x[1]}
 
-        def s(*args):
-            return {'steps':list(map(step, args))}
+        def s(*args: int | tuple[int, str]) -> CFIPath:
+            return {'steps': list(map(step, args))}
 
-        def r(*args):
+        def r(*args: int | tuple[int, str] | str) -> CFIPath:
             idx = args.index('!')
-            ans = s(*args[:idx])
-            ans['redirect'] = s(*args[idx+1:])
+            # '!' only occurs at idx
+            ans = s(*cast('tuple[int | tuple[int, str], ...]', args[:idx]))
+            ans['redirect'] = s(*cast('tuple[int | tuple[int, str], ...]', args[idx + 1 :]))
             return ans
 
-        def o(*args):
+        def o(*args: str | float | tuple[float, float]) -> CFIPath:
             ans = s(1)
-            step = ans['steps'][-1]
-            typ, val = args[:2]
-            step[{'@':'spatial_offset', '~':'temporal_offset', ':':'text_offset'}[typ]] = val
+            # keys are chosen dynamically, so treat the step as a plain dict
+            step = cast('dict[str, object]', ans['steps'][-1])
+            typ, val = cast('tuple[str, object]', args[:2])
+            step[{'@': 'spatial_offset', '~': 'temporal_offset', ':': 'text_offset'}[typ]] = val
             if len(args) == 4:
-                typ, val = args[2:]
-                step[{'@':'spatial_offset', '~':'temporal_offset'}[typ]] = val
+                typ, val = cast('tuple[str, object]', args[2:])
+                step[{'@': 'spatial_offset', '~': 'temporal_offset'}[typ]] = val
             return ans
 
-        def a(before=None, after=None, **params):
+        def a(before: str | None = None, after: str | None = None, **params: str | tuple[str, ...]) -> CFIPath:
             ans = o(':', 3)
             step = ans['steps'][-1]
-            ta = {}
+            ta: TextAssertion = {}
             if before is not None:
                 ta['before'] = before
             if after is not None:
                 ta['after'] = after
             if params:
-                ta['params'] = {unicode_type(k):(v,) if isinstance(v, unicode_type) else v for k, v in iteritems(params)}
+                ta['params'] = {str(k): (v,) if isinstance(v, str) else v for k, v in params.items()}
             if ta:
                 step['text_assertion'] = ta
             return ans
@@ -73,7 +72,6 @@ class Tests(unittest.TestCase):
             ('/1/2!/3/4', r(1, 2, '!', 3, 4), ''),
             ('/1/2[id]!/3/4', r(1, (2, 'id'), '!', 3, 4), ''),
             ('/1!/2[id]/3/4', r(1, '!', (2, 'id'), 3, 4), ''),
-
             # Test parsing of offsets
             ('/1~0', o('~', 0), ''),
             ('/1~7', o('~', 7), ''),
@@ -81,24 +79,28 @@ class Tests(unittest.TestCase):
             ('/1~0.01', o('~', 0.01), ''),
             ('/1~1.301', o('~', 1.301), ''),
             ('/1@23:34.1', o('@', (23, 34.1)), ''),
+            ('/1@23:34.10', o('@', (23, 34.1)), ''),
             ('/1~3@3.1:2.3', o('~', 3.0, '@', (3.1, 2.3)), ''),
             ('/1:0', o(':', 0), ''),
             ('/1:3', o(':', 3), ''),
-
             # Test parsing of text assertions
             ('/1:3[aa^,b]', a('aa,b'), ''),
+            ('/1:3[aa-b]', a('aa-b'), ''),
+            ('/1:3[aa^-b]', a('aa-b'), ''),
+            ('/1:3[aa-^--b]', a('aa---b'), ''),
             ('/1:3[aa^,b,c1]', a('aa,b', 'c1'), ''),
             ('/1:3[,aa^,b]', a(after='aa,b'), ''),
             ('/1:3[;s=a]', a(s='a'), ''),
             ('/1:3[a;s=a]', a('a', s='a'), ''),
             ('/1:3[a;s=a^,b,c^;d;x=y]', a('a', s=('a,b', 'c;d'), x='y'), ''),
-
         ]:
             self.assertEqual(p.parse_path(raw), (path, leftover))
 
-    def test_cfi_decode(self):
+    def test_cfi_decode(self) -> None:
         from calibre.ebooks.oeb.polish.parsing import parse
-        root = parse('''
+
+        root = parse(
+            '''
 <html>
 <head></head>
 <body id="body01">
@@ -114,24 +116,27 @@ class Tests(unittest.TestCase):
         <p><span>hello</span><span>goodbye</span>text here<em>adieu</em>text there</p>
     </body>
 </html>
-''', line_numbers=True, linenumber_attribute='data-lnum')
+''',
+            line_numbers=True,
+            linenumber_attribute='data-lnum',
+        )
         body = root[-1]
 
-        def test(cfi, expected):
+        def test(cfi: str, expected: _Element) -> None:
             self.assertIs(decode_cfi(root, cfi), expected)
 
         for cfi in '/4 /4[body01] /900[body01] /2[body01]'.split():
             test(cfi, body)
 
         for i in range(len(body)):
-            test('/4/{}'.format((i + 1)*2), body[i])
+            test(f'/4/{(i + 1) * 2}', body[i])
 
         p = body[4]
         test('/4/999[para05]', p)
         test('/4/999[para05]/2', p[0])
 
 
-def find_tests():
+def find_tests() -> unittest.TestSuite:
     return unittest.TestLoader().loadTestsFromTestCase(Tests)
 
 

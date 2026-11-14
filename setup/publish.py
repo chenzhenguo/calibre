@@ -1,20 +1,23 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
 
 
 __license__ = 'GPL v3'
 __copyright__ = '2009, Kovid Goyal <kovid@kovidgoyal.net>'
 __docformat__ = 'restructuredtext en'
 
-import os, shutil, subprocess, tempfile, json, time, filecmp, sys
+import filecmp
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
 
-from setup import Command, __version__, require_clean_git, require_git_master
-from setup.upload import installers
-from setup.parallel_build import parallel_build, create_job
+from setup import Command, __version__, installer_names, manual_build_dir, require_clean_git, require_git_master
+from setup.parallel_build import create_job, parallel_build
 
 
 class Stage1(Command):
-
     description = 'Stage 1 of the publish process'
 
     sub_commands = [
@@ -28,7 +31,6 @@ class Stage1(Command):
 
 
 class Stage2(Command):
-
     description = 'Stage 2 of the publish process, builds the binaries'
 
     def run(self, opts):
@@ -42,45 +44,41 @@ class Stage2(Command):
         self.info('Starting builds for all platforms, this will take a while...')
 
         session = ['layout vertical']
-        platforms = 'linux', 'osx', 'win'
+        platforms = 'linux64', 'linuxarm64', 'osx', 'win'
         for x in platforms:
             cmd = (
-                '''{exe} -c "import subprocess; subprocess.Popen(['{exe}', './setup.py', '{x}']).wait() != 0 and'''
-                ''' input('Build of {x} failed, press Enter to exit');"'''
-            ).format(exe=sys.executable, x=x)
+                f'''{sys.executable} -c "import subprocess; subprocess.Popen(['{sys.executable}', './setup.py', '{x}']).wait() != 0 and'''
+                f''' input('Build of {x} failed, press Enter to exit');"'''
+            )
             session.append('title ' + x)
             session.append('launch ' + cmd)
 
-        p = subprocess.Popen([
-            'kitty', '-o', 'enabled_layouts=vertical,stack', '-o', 'scrollback_lines=20000',
-            '-o', 'close_on_child_death=y', '--session=-'
-        ], stdin=subprocess.PIPE)
+        p = subprocess.Popen(
+            ['kitty', '-o', 'enabled_layouts=vertical,stack', '-o', 'scrollback_lines=20000', '-o', 'close_on_child_death=y', '--session=-'],
+            stdin=subprocess.PIPE,
+        )
 
         p.communicate('\n'.join(session).encode('utf-8'))
         p.wait()
 
-        for installer in installers(include_source=False):
+        for installer in installer_names(include_source=False):
             installer = self.j(self.d(self.SRC), installer)
             if not os.path.exists(installer) or os.path.getsize(installer) < 10000:
-                raise SystemExit(
-                    'The installer %s does not exist' % os.path.basename(installer)
-                )
+                raise SystemExit(f'The installer {os.path.basename(installer)} does not exist')
+            os.chmod(installer, 0o644)
 
 
 class Stage3(Command):
-
     description = 'Stage 3 of the publish process'
     sub_commands = ['upload_user_manual', 'upload_demo', 'sdist', 'tag_release']
 
 
 class Stage4(Command):
-
     description = 'Stage 4 of the publish process'
     sub_commands = ['upload_installers']
 
 
 class Stage5(Command):
-
     description = 'Stage 5 of the publish process'
     sub_commands = ['upload_to_server']
 
@@ -88,8 +86,13 @@ class Stage5(Command):
         subprocess.check_call('rm -rf build/* dist/*', shell=True)
 
 
-class Publish(Command):
+def require_hsm_for_signing():
+    cp = subprocess.run(['pkcs11-tool', '-L'], stdout=subprocess.DEVNULL)
+    if cp.returncode != 0:
+        raise SystemExit('Attach the HSM for authenticode signing first')
 
+
+class Publish(Command):
     description = 'Publish a new calibre release'
     sub_commands = [
         'stage1',
@@ -102,10 +105,15 @@ class Publish(Command):
     def pre_sub_commands(self, opts):
         require_git_master()
         require_clean_git()
+        require_hsm_for_signing()
+        version = tuple(map(int, __version__.split('.')))  # ruff: ignore[map-int-version-parsing]
+        if version[2] > 99:
+            raise SystemExit(f'The version number {__version__} indicates a preview release, did you mean to run ./setup.py publish_preview?')
         if 'PUBLISH_BUILD_DONE' not in os.environ:
             subprocess.check_call([sys.executable, 'setup.py', 'check'])
             subprocess.check_call([sys.executable, 'setup.py', 'build'])
-            subprocess.check_call([sys.executable, 'setup.py', 'test'])
+            if 'SKIP_CALIBRE_TESTS' not in os.environ:
+                subprocess.check_call([sys.executable, 'setup.py', 'test'])
             subprocess.check_call([sys.executable, 'setup.py', 'pot'])
             subprocess.check_call([sys.executable, 'setup.py', 'translations'])
             os.environ['PUBLISH_BUILD_DONE'] = '1'
@@ -113,23 +121,44 @@ class Publish(Command):
 
 
 class PublishBetas(Command):
-
     sub_commands = ['stage1', 'stage2', 'sdist']
 
     def pre_sub_commands(self, opts):
         require_clean_git()
+        require_hsm_for_signing()
         # require_git_master()
 
     def run(self, opts):
         dist = self.a(self.j(self.d(self.SRC), 'dist'))
-        subprocess.check_call((
-            'rsync --partial -rh --info=progress2 --delete-after %s/ download.calibre-ebook.com:/srv/download/betas/'
-            % dist
-        ).split())
+        subprocess.check_call((f'rsync --partial -rh --info=progress2 --delete-after {dist}/ download.calibre-ebook.com:/srv/download/betas/').split())
+
+
+class PublishPreview(Command):
+    sub_commands = ['stage1', 'stage2', 'sdist']
+
+    def pre_sub_commands(self, opts):
+        version = tuple(map(int, __version__.split('.')))  # ruff: ignore[map-int-version-parsing]
+        if version[2] < 100:
+            raise SystemExit('Must set calibre version to have patch level greater than 100')
+        require_clean_git()
+        require_git_master()
+        require_hsm_for_signing()
+
+    def run(self, opts):
+        dist = self.a(self.j(self.d(self.SRC), 'dist'))
+        with open(os.path.join(dist, 'README.txt'), 'w') as f:
+            print(
+                '''\
+These are preview releases of changes to calibre since the last normal release.
+Preview releases are typically released every Friday, they serve as a way
+for users to test upcoming features/fixes in the next calibre release.
+''',
+                file=f,
+            )
+        subprocess.check_call((f'rsync -rh --info=progress2 --delete-after --delete {dist}/ download.calibre-ebook.com:/srv/download/preview/').split())
 
 
 class Manual(Command):
-
     description = '''Build the User Manual '''
 
     def add_options(self, parser):
@@ -138,45 +167,45 @@ class Manual(Command):
             '--language',
             action='append',
             default=[],
-            help=(
-                'Build translated versions for only the specified languages (can be specified multiple times)'
-            )
+            help=('Build translated versions for only the specified languages (can be specified multiple times)'),
         )
-        parser.add_option(
-            '--serve',
-            action='store_true',
-            default=False,
-            help='Run a webserver on the built manual files'
-        )
+        parser.add_option('--serve', action='store_true', default=False, help='Run a webserver on the built manual files')
 
     def run(self, opts):
-        tdir = self.j(tempfile.gettempdir(), 'user-manual-build')
+        tdir = manual_build_dir()
         if os.path.exists(tdir):
             shutil.rmtree(tdir)
         os.mkdir(tdir)
         st = time.time()
         base = self.j(self.d(self.SRC), 'manual')
-        for d in ('generated', ):
+        for d in ('generated',):
             d = self.j(base, d)
             if os.path.exists(d):
                 shutil.rmtree(d)
             os.makedirs(d)
         jobs = []
-        languages = opts.language or list(
-            json.load(open(self.j(base, 'locale', 'completed.json'), 'rb'))
-        )
-        languages = ['en'] + list(set(languages) - {'en'})
+        languages = opts.language
+        if not languages:
+            with open(self.j(base, 'locale', 'completed.json'), 'rb') as f:
+                languages = list(json.load(f))
+        languages = set(languages) - {'en'}
+        languages.discard('ta')  # Tamil translations break Sphinx
+        languages = ['en'] + list(languages)
         os.environ['ALL_USER_MANUAL_LANGUAGES'] = ' '.join(languages)
         for language in languages:
-            jobs.append(create_job([
-                sys.executable, self.j(self.d(self.SRC), 'manual', 'build.py'),
-                language, self.j(tdir, language)
-            ], '\n\n**************** Building translations for: %s' % language))
-        self.info('Building manual for %d languages' % len(jobs))
+            jobs.append(
+                create_job(
+                    [sys.executable, self.j(self.d(self.SRC), 'manual', 'build.py'), language, self.j(tdir, language)],
+                    f'\n\n**************** Building translations for: {language}',
+                )
+            )
+        self.info(f'Building manual for {len(jobs)} languages')
         subprocess.check_call(jobs[0].cmd)
         if not parallel_build(jobs[1:], self.info):
             raise SystemExit(1)
         cwd = os.getcwd()
+        with open('resources/localization/website-languages.txt') as wl:
+            languages = frozenset(filter(None, (x.strip() for x in wl.read().split())))
         try:
             os.chdir(self.j(tdir, 'en', 'html'))
             for x in os.listdir(tdir):
@@ -184,11 +213,11 @@ class Manual(Command):
                     shutil.copytree(self.j(tdir, x, 'html'), x)
                     self.replace_with_symlinks(x)
                 else:
-                    os.symlink('..', 'en')
-            self.info(
-                'Built manual for %d languages in %s minutes' %
-                (len(jobs), int((time.time() - st) / 60.))
-            )
+                    os.symlink('.', 'en')
+            for x in languages:
+                if x and not os.path.exists(x):
+                    os.symlink('.', x)
+            self.info(f'Built manual for {len(jobs)} languages in {int((time.time() - st) / 60.0)} minutes')
         finally:
             os.chdir(cwd)
 
@@ -197,30 +226,33 @@ class Manual(Command):
 
     def serve_manual(self, root):
         os.chdir(root)
-        from polyglot.http_server import HTTPServer, SimpleHTTPRequestHandler
+        from http.server import HTTPServer, SimpleHTTPRequestHandler
+
         HandlerClass = SimpleHTTPRequestHandler
         ServerClass = HTTPServer
-        Protocol = "HTTP/1.0"
+        Protocol = 'HTTP/1.0'
         server_address = ('127.0.0.1', 8000)
 
         HandlerClass.protocol_version = Protocol
         httpd = ServerClass(server_address, HandlerClass)
 
-        print("Serving User Manual on localhost:8000")
+        print('Serving User Manual on localhost:8000')
         from calibre.gui2 import open_url
+
         open_url('http://localhost:8000')
         httpd.serve_forever()
 
     def replace_with_symlinks(self, lang_dir):
-        ' Replace all identical files with symlinks to save disk space/upload bandwidth '
+        "Replace all identical files with symlinks to save disk space/upload bandwidth"
         from calibre import walk
+
         base = self.a(lang_dir)
         for f in walk(base):
             r = os.path.relpath(f, base)
             orig = self.j(self.d(base), r)
             try:
                 sz = os.stat(orig).st_size
-            except EnvironmentError:
+            except OSError:
                 continue
             if sz == os.stat(f).st_size and filecmp._do_cmp(f, orig):
                 os.remove(f)
@@ -233,7 +265,6 @@ class Manual(Command):
 
 
 class ManPages(Command):
-
     description = '''Build the man pages '''
 
     def add_options(self, parser):
@@ -245,25 +276,25 @@ class ManPages(Command):
 
     def build_man_pages(self, dest, compress=False):
         from calibre.utils.localization import available_translations
+
         dest = os.path.abspath(dest)
         if os.path.exists(dest):
             shutil.rmtree(dest)
         os.makedirs(dest)
         base = self.j(self.d(self.SRC), 'manual')
-        languages = list(available_translations())
-        languages = ['en'] + list(set(languages) - {'en', 'en_GB'})
+        languages = set(available_translations())
+        languages.discard('ta')  # Tamil translatins are completely borked break sphinx
+        languages.discard('id')  # Indonesian man page fails to build
+        languages = ['en'] + list(languages - {'en', 'en_GB'})
         os.environ['ALL_USER_MANUAL_LANGUAGES'] = ' '.join(languages)
         try:
             os.makedirs(dest)
-        except EnvironmentError:
+        except OSError:
             pass
         jobs = []
         for l in languages:
-            jobs.append(create_job(
-                [sys.executable, self.j(base, 'build.py'), '--man-pages', l, dest],
-                '\n\n**************** Building translations for: %s' % l)
-            )
-        self.info('\tCreating man pages in {} for {} languages...'.format(dest, len(jobs)))
+            jobs.append(create_job([sys.executable, self.j(base, 'build.py'), '--man-pages', l, dest], f'\n\n**************** Building translations for: {l}'))
+        self.info(f'\tCreating man pages in {dest} for {len(jobs)} languages...')
         subprocess.check_call(jobs[0].cmd)
         if not parallel_build(jobs[1:], self.info, verbose=False):
             raise SystemExit(1)
@@ -294,12 +325,9 @@ class ManPages(Command):
 
 
 class TagRelease(Command):
-
     description = 'Tag a new release in git'
 
     def run(self, opts):
         self.info('Tagging release')
-        subprocess.check_call(
-            'git tag -s v{0} -m "version-{0}"'.format(__version__).split()
-        )
-        subprocess.check_call('git push origin v{0}'.format(__version__).split())
+        subprocess.check_call(f'git tag -s v{__version__} -m "version-{__version__}"'.split())
+        subprocess.check_call(f'git push origin v{__version__}'.split())

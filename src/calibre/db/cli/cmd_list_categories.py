@@ -1,24 +1,36 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2017, Kovid Goyal <kovid at kovidgoyal.net>
-
 
 import csv
 import sys
 from textwrap import TextWrapper
+from typing import IO, TYPE_CHECKING, cast
 
 from calibre import prints
-from polyglot.builtins import as_bytes, map, unicode_type
+from calibre.utils.localization import _
+from polyglot.builtins import as_bytes
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+    from optparse import Values
+
+    from calibre.db.cache import Cache
+    from calibre.db.categories import Tag
+    from calibre.db.cli.main import DBContext
+    from calibre.ebooks.metadata.book.base import FieldMetadataDict
+    from calibre.library.field_metadata import FieldMetadata
+    from calibre.srv.changes import ChangeEvent
+    from calibre.utils.config import OptionParser
 
 readonly = True
 version = 0  # change this if you change signature of implementation()
 
 
-def implementation(db, notify_changes):
+def implementation(db: Cache, notify_changes: Callable[[ChangeEvent], None] | None) -> tuple[dict[str, list[Tag]], FieldMetadata]:
     return db.get_categories(), db.field_metadata
 
 
-def option_parser(get_parser, args):
+def option_parser(get_parser: Callable[[str], OptionParser], args: Sequence[str]) -> OptionParser:
     parser = get_parser(
         _(
             '''\
@@ -35,64 +47,52 @@ information is the equivalent of what is shown in the Tag browser.
         '--item_count',
         default=False,
         action='store_true',
-        help=_(
-            'Output only the number of items in a category instead of the '
-            'counts per item within the category'
-        )
+        help=_('Output only the number of items in a category instead of the counts per item within the category'),
     )
-    parser.add_option(
-        '-c', '--csv', default=False, action='store_true', help=_('Output in CSV')
-    )
+    parser.add_option('-c', '--csv', default=False, action='store_true', help=_('Output in CSV'))
     parser.add_option(
         '--dialect',
         default='excel',
         choices=csv.list_dialects(),
-        help=_('The type of CSV file to produce. Choices: {}')
-        .format(', '.join(sorted(csv.list_dialects())))
+        help=_('The type of CSV file to produce. Choices: {}').format(', '.join(sorted(csv.list_dialects()))),
     )
     parser.add_option(
         '-r',
         '--categories',
         default='',
         dest='report',
-        help=_("Comma-separated list of category lookup names. "
-               "Default: all")
+        help=_('Comma-separated list of category lookup names. Default: all'),
     )
     parser.add_option(
         '-w',
         '--width',
         default=-1,
         type=int,
-        help=_(
-            'The maximum width of a single line in the output. '
-            'Defaults to detecting screen size.'
-        )
+        help=_('The maximum width of a single line in the output. Defaults to detecting screen size.'),
     )
     return parser
 
 
-def do_list(fields, data, opts):
-    from calibre.utils.terminal import geometry, ColoredStream
+def do_list(fields: Sequence[str], data: Sequence[Mapping[str, object]], opts: Values | None) -> None:
+    from calibre.utils.terminal import ColoredStream, geometry
 
     separator = ' '
-    widths = list(map(lambda x: 0, fields))
+    widths = [0 for x in fields]
     for i in data:
         for j, field in enumerate(fields):
-            widths[j] = max(widths[j], max(len(field), len(unicode_type(i[field]))))
+            widths[j] = max(widths[j], len(field), len(str(i[field])))
 
     screen_width = geometry()[0]
     if not screen_width:
         screen_width = 80
     field_width = screen_width // len(fields)
-    base_widths = list(map(lambda x: min(x + 1, field_width), widths))
+    base_widths = [min(x + 1, field_width) for x in widths]
 
     while sum(base_widths) < screen_width:
         adjusted = False
         for i in range(len(widths)):
             if base_widths[i] < widths[i]:
-                base_widths[i] += min(
-                    screen_width - sum(base_widths), widths[i] - base_widths[i]
-                )
+                base_widths[i] += min(screen_width - sum(base_widths), widths[i] - base_widths[i])
                 adjusted = True
                 break
         if not adjusted:
@@ -100,38 +100,36 @@ def do_list(fields, data, opts):
 
     widths = list(base_widths)
     titles = map(
-        lambda x, y: '%-*s%s' % (x - len(separator), y, separator), widths, fields
+        lambda x, y: '%-*s%s' % (x - len(separator), y, separator),  # ruff: ignore[printf-string-formatting]
+        widths,
+        fields,
     )
     with ColoredStream(sys.stdout, fg='green'):
         prints(''.join(titles))
 
-    wrappers = list(map(lambda x: TextWrapper(x - 1), widths))
+    wrappers = [TextWrapper(x - 1) for x in widths]
 
     for record in data:
-        text = [
-            wrappers[i].wrap(unicode_type(record[field]))
-            for i, field in enumerate(fields)
-        ]
+        text = [wrappers[i].wrap(str(record[field])) for i, field in enumerate(fields)]
         lines = max(map(len, text))
         for l in range(lines):
             for i, field in enumerate(text):
-                ft = text[i][l] if l < len(text[i]) else ''
-                filler = '%*s' % (widths[i] - len(ft) - 1, '')
-                print(ft.encode('utf-8') + filler.encode('utf-8'), end=separator)
+                ft = field[l] if l < len(field) else ''
+                filler = ' ' * (widths[i] - len(ft) - 1)
+                print(ft + filler, end=separator)
             print()
 
 
 class StdoutWriter:
+    def __init__(self) -> None:
+        f: IO[bytes] = getattr(sys.stdout, 'buffer', cast('IO[bytes]', sys.stdout))
+        self.do_write: Callable[[bytes], int] = f.write
 
-    def __init__(self):
-        self.do_write = getattr(sys.stdout, 'buffer', sys.stdout).write
-
-    def write(self, x):
-        x = as_bytes(x)
-        self.do_write(x)
+    def write(self, x: str | bytes) -> None:
+        self.do_write(as_bytes(x))
 
 
-def do_csv(fields, data, opts):
+def do_csv(fields: Sequence[str], data: Sequence[Mapping[str, object]], opts: Values) -> None:
     csv_print = csv.writer(StdoutWriter(), opts.dialect)
     csv_print.writerow(fields)
     for d in data:
@@ -139,39 +137,34 @@ def do_csv(fields, data, opts):
         csv_print.writerow(row)
 
 
-def main(opts, args, dbctx):
-    category_data, field_metadata = dbctx.run('list_categories')
+def main(opts: Values, args: list[str], dbctx: DBContext) -> int:
+    category_data, field_metadata = cast('tuple[dict[str, list[Tag]], FieldMetadata]', dbctx.run('list_categories'))
     data = []
     report_on = [c.strip() for c in opts.report.split(',') if c.strip()]
 
-    def category_metadata(k):
+    def category_metadata(k: str) -> FieldMetadataDict | None:
         return field_metadata.get(k)
 
-    categories = [
-        k for k in category_data.keys()
-        if category_metadata(k)['kind'] not in ['user', 'search'] and
-        (not report_on or k in report_on)
-    ]
+    categories = [k for k in category_data.keys() if category_metadata(k)['kind'] not in ['user', 'search'] and (not report_on or k in report_on)]  # ty: ignore[not-subscriptable]
 
     categories.sort(key=lambda x: x if x[0] != '#' else x[1:])
 
-    def fmtr(v):
+    def fmtr(v: float | None) -> str:
         v = v or 0
-        ans = '%.1f' % v
-        if ans.endswith('.0'):
-            ans = ans[:-2]
+        ans = f'{v:.1f}'
+        ans = ans.removesuffix('.0')
         return ans
 
     if not opts.item_count:
         for category in categories:
-            is_rating = category_metadata(category)['datatype'] == 'rating'
+            is_rating = category_metadata(category)['datatype'] == 'rating'  # ty: ignore[not-subscriptable]
             for tag in category_data[category]:
                 if is_rating:
-                    tag.name = unicode_type(len(tag.name))
+                    tag.name = str(len(tag.name))
                 data.append({
                     'category': category,
                     'tag_name': tag.name,
-                    'count': unicode_type(tag.count),
+                    'count': str(tag.count),
                     'rating': fmtr(tag.avg_rating),
                 })
     else:
@@ -179,8 +172,8 @@ def main(opts, args, dbctx):
             data.append({
                 'category': category,
                 'tag_name': _('CATEGORY ITEMS'),
-                'count': unicode_type(len(category_data[category])),
-                'rating': ''
+                'count': str(len(category_data[category])),
+                'rating': '',
             })
 
     fields = ['category', 'tag_name', 'count', 'rating']

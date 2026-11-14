@@ -1,9 +1,4 @@
-# -*- coding: utf-8 -*-
-
-
-__license__ = 'GPL 3'
-__copyright__ = '2010, Hiroshi Miura <miurahr@linux.com>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2010, Hiroshi Miura <miurahr@linux.com>
 
 '''
 Decode unicode text to an ASCII representation of the text in Chinese.
@@ -23,7 +18,6 @@ http://interglacial.com/~sburke/tpj/as_html/tpj22.html.
 The major differences between this implementation and others is it's written in
 python and it uses a single dictionary instead of loading the code group files
 as needed.
-
 
 Copyright (c) 2007 Russell Norris
 
@@ -48,7 +42,6 @@ WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 
-
 Copyright 2001, Sean M. Burke <sburke@cpan.org>, all rights reserved.
 
 The programs and documentation in this dist are distributed in the
@@ -61,50 +54,48 @@ it under the same terms as Perl itself.
 '''
 
 import re
+
 from calibre.ebooks.unihandecode.unicodepoints import CODEPOINTS
 from calibre.ebooks.unihandecode.zhcodepoints import CODEPOINTS as HANCODES
-from polyglot.builtins import unicode_type
 
 
-class Unidecoder(object):
+class Unidecoder:
+    codepoints: dict[str, list[str]] = {}
 
-    codepoints = {}
-
-    def __init__(self):
+    def __init__(self) -> None:
         self.codepoints = CODEPOINTS
         self.codepoints.update(HANCODES)
 
-    def decode(self, text):
-        # Replace characters larger than 127 with their ASCII equivelent.
-        return re.sub('[^\x00-\x7f]',lambda x: self.replace_point(x.group()), text)
+    def decode(self, text: str) -> str:
+        # Replace characters larger than 127 with their ASCII equivalent.
+        return re.sub(r'[^\x00-\x7f]', lambda x: self.replace_point(x.group()), text)
 
-    def replace_point(self, codepoint):
-        '''
+    def replace_point(self, codepoint: str) -> str:
+        """
         Returns the replacement character or ? if none can be found.
-        '''
+        """
         try:
             # Split the unicode character xABCD into parts 0xAB and 0xCD.
             # 0xAB represents the group within CODEPOINTS to query and 0xCD
             # represents the position in the list of characters for the group.
-            return self.codepoints[self.code_group(codepoint)][self.grouped_point(
-                codepoint)]
-        except:
+            return self.codepoints[self.code_group(codepoint)][self.grouped_point(codepoint)]
+        except Exception:
             return '?'
 
-    def code_group(self, character):
-        '''
+    def code_group(self, character: str | bytes) -> str:
+        """
         Find what group character is a part of.
-        '''
-        # Code groups withing CODEPOINTS take the form 'xAB'
-        if not isinstance(character, unicode_type):
-            character = unicode_type(character, "utf-8")
-        return 'x%02x' % (ord(character) >> 8)
+        """
+        # Code groups within CODEPOINTS take the form 'xAB'
+        if not isinstance(character, str):
+            character = str(character, 'utf-8')
+        return f'x{ord(character) >> 8:02x}'
 
-    def grouped_point(self, character):
-        '''
+    def grouped_point(self, character: str | bytes) -> int:
+        """
         Return the location the replacement character is in the list for a
         the group character is a part of.
-        '''
-        if not isinstance(character, unicode_type):
-            character = unicode_type(character, "utf-8")
+        """
+        if not isinstance(character, str):
+            character = str(character, 'utf-8')
         return ord(character) & 255

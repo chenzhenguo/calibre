@@ -1,34 +1,42 @@
 #!/usr/bin/env python
+# License: GPLv3 Copyright: 2008, Kovid Goyal kovid@kovidgoyal.net
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2008, Kovid Goyal kovid@kovidgoyal.net'
-__docformat__ = 'restructuredtext en'
-
-'''
+"""
 Logic for setting up conversion jobs
-'''
+"""
 
 import os
 
-from PyQt5.Qt import QDialog, QProgressDialog, QTimer
+from qt.core import QDialog, QProgressDialog, QTimer
 
-from calibre.ptempfile import PersistentTemporaryFile
-from calibre.gui2 import warning_dialog, question_dialog
-from calibre.gui2.convert.single import Config as SingleConfig
-from calibre.gui2.convert.bulk import BulkConfig
-from calibre.gui2.convert.metadata import create_opf_file, create_cover_file
 from calibre.customize.conversion import OptionRecommendation
-from calibre.utils.config import prefs
 from calibre.ebooks.conversion.config import (
-        GuiRecommendations, load_defaults, load_specifics, save_specifics,
-        get_input_format_for_book, NoSupportedInputFormats)
+    GuiRecommendations,
+    NoSupportedInputFormats,
+    get_input_format_for_book,
+    load_defaults,
+    load_specifics,
+    save_specifics,
+)
+from calibre.gui2 import question_dialog, warning_dialog
 from calibre.gui2.convert import bulk_defaults_for_input_format
-from polyglot.builtins import unicode_type, as_bytes
+from calibre.gui2.convert.bulk import BulkConfig
+from calibre.gui2.convert.metadata import create_cover_file, create_opf_file
+from calibre.gui2.convert.single import Config as SingleConfig
+from calibre.ptempfile import PersistentTemporaryDirectory, PersistentTemporaryFile
+from calibre.utils.config import prefs
+from calibre.utils.localization import _
+from polyglot.builtins import as_bytes
 
 
-def convert_single_ebook(parent, db, book_ids, auto_conversion=False,  # {{{
-        out_format=None, show_no_format_warning=True):
+def convert_single_ebook(
+    parent,
+    db,
+    book_ids,
+    auto_conversion=False,  # {{{
+    out_format=None,
+    show_no_format_warning=True,
+):
     changed = False
     jobs = []
     bad = []
@@ -47,19 +55,18 @@ def convert_single_ebook(parent, db, book_ids, auto_conversion=False,  # {{{
                 d.accept()
                 result = QDialog.DialogCode.Accepted
             else:
-                result = d.exec_()
+                result = d.exec()
 
             if result == QDialog.DialogCode.Accepted:
                 # if not convert_existing(parent, db, [book_id], d.output_format):
-                #    continue
+                #     continue
 
                 mi = db.get_metadata(book_id, True)
-                in_file = PersistentTemporaryFile('.'+d.input_format)
+                in_file = PersistentTemporaryFile('.' + d.input_format)
                 with in_file:
                     input_fmt = db.original_fmt(book_id, d.input_format).lower()
                     same_fmt = input_fmt == d.output_format.lower()
-                    db.copy_format_to(book_id, input_fmt, in_file,
-                            index_is_id=True)
+                    db.copy_format_to(book_id, input_fmt, in_file, index_is_id=True)
 
                 out_file = PersistentTemporaryFile('.' + d.output_format)
                 out_file.write(as_bytes(d.output_format))
@@ -67,20 +74,21 @@ def convert_single_ebook(parent, db, book_ids, auto_conversion=False,  # {{{
                 temp_files = [in_file]
 
                 try:
-                    dtitle = unicode_type(mi.title)
-                except:
+                    dtitle = str(mi.title)
+                except Exception:
                     dtitle = repr(mi.title)
-                desc = _('Convert book %(num)d of %(total)d (%(title)s)') % \
-                        {'num':i + 1, 'total':total, 'title':dtitle}
+                desc = _('Convert book %(num)d of %(total)d (%(title)s)') % {
+                    'num': i + 1,
+                    'total': total,
+                    'title': dtitle,
+                }
 
                 recs = d.recommendations
                 if d.opf_file is not None:
-                    recs.append(('read_metadata_from_opf', d.opf_file.name,
-                        OptionRecommendation.HIGH))
+                    recs.append(('read_metadata_from_opf', d.opf_file.name, OptionRecommendation.HIGH))
                     temp_files.append(d.opf_file)
                 if d.cover_file is not None:
-                    recs.append(('cover', d.cover_file.name,
-                        OptionRecommendation.HIGH))
+                    recs.append(('cover', d.cover_file.name, OptionRecommendation.HIGH))
                     temp_files.append(d.cover_file)
                 args = [in_file.name, out_file.name, recs]
                 temp_files.append(out_file)
@@ -91,7 +99,7 @@ def convert_single_ebook(parent, db, book_ids, auto_conversion=False,  # {{{
                 if same_fmt:
                     parts.append('same_fmt')
                 if parts:
-                    func += ':%s'%(';'.join(parts))
+                    func += ':{}'.format(';'.join(parts))
                 jobs.append((func, args, desc, d.output_format.upper(), book_id, temp_files))
 
                 changed = True
@@ -102,48 +110,61 @@ def convert_single_ebook(parent, db, book_ids, auto_conversion=False,  # {{{
     if bad and show_no_format_warning:
         if len(bad) == 1 and not bad[0][1]:
             title = db.title(bad[0][0], True)
-            warning_dialog(parent, _('Could not convert'), '<p>'+ _(
-                'Could not convert <b>%s</b> as it has no e-book files. If you '
-                'think it should have files, but calibre is not finding '
-                'them, that is most likely because you moved the book\'s '
-                'files around outside of calibre. You will need to find those files '
-                'and re-add them to calibre.')%title, show=True)
+            warning_dialog(
+                parent,
+                _('Could not convert'),
+                '<p>'
+                + _(
+                    'Could not convert <b>%s</b> as it has no e-book files. If you '
+                    'think it should have files, but calibre is not finding '
+                    "them, that is most likely because you moved the book's "
+                    'files around outside of calibre. You will need to find those files '
+                    'and re-add them to calibre.'
+                )
+                % title,
+                show=True,
+            )
         else:
             res = []
             for id, available_formats in bad:
                 title = db.title(id, True)
                 if available_formats:
-                    msg = _('No supported formats (Available formats: %s)')%(
-                        ', '.join(available_formats))
+                    msg = _('No supported formats (Available formats: %s)') % (', '.join(available_formats))
                 else:
                     msg = _('This book has no actual e-book files')
-                res.append('%s - %s'%(title, msg))
+                res.append(f'{title} - {msg}')
 
-            msg = '%s' % '\n'.join(res)
-            warning_dialog(parent, _('Could not convert some books'),
+            msg = '{}'.format('\n'.join(res))
+            warning_dialog(
+                parent,
+                _('Could not convert some books'),
                 (
                     _('Could not convert the book because no supported source format was found')
-                    if len(res) == 1 else
-                    _('Could not convert {num} of {tot} books, because no supported source formats were found.')
+                    if len(res) == 1
+                    else _('Could not convert {num} of {tot} books, because no supported source formats were found.')
                 ).format(num=len(res), tot=total),
-                msg).exec_()
+                msg,
+            ).exec()
 
     return jobs, changed, bad
+
+
 # }}}
 
 # Bulk convert {{{
 
 
-def convert_bulk_ebook(parent, queue, db, book_ids, out_format=None, args=[]):
+def convert_bulk_ebook(parent, queue, db, book_ids, out_format=None, args=None):
+    if args is None:
+        args = []
     total = len(book_ids)
     if total == 0:
         return None, None, None
 
     has_saved_settings = db.has_conversion_options(book_ids)
 
-    d = BulkConfig(parent, db, out_format,
-            has_saved_settings=has_saved_settings, book_ids=book_ids)
-    if d.exec_() != QDialog.DialogCode.Accepted:
+    d = BulkConfig(parent, db, out_format, has_saved_settings=has_saved_settings, book_ids=book_ids)
+    if d.exec() != QDialog.DialogCode.Accepted:
         return None
 
     output_format = d.output_format
@@ -151,24 +172,25 @@ def convert_bulk_ebook(parent, queue, db, book_ids, out_format=None, args=[]):
 
     book_ids = convert_existing(parent, db, book_ids, output_format)
     use_saved_single_settings = d.opt_individual_saved_settings.isChecked()
-    return QueueBulk(parent, book_ids, output_format, queue, db, user_recs,
-            args, use_saved_single_settings=use_saved_single_settings)
+    return QueueBulk(parent, book_ids, output_format, queue, db, user_recs, args, use_saved_single_settings=use_saved_single_settings)
 
 
 class QueueBulk(QProgressDialog):
-
-    def __init__(self, parent, book_ids, output_format, queue, db, user_recs,
-            args, use_saved_single_settings=True):
-        QProgressDialog.__init__(self, '',
-                None, 0, len(book_ids), parent)
+    def __init__(self, parent, book_ids, output_format, queue, db, user_recs, args, use_saved_single_settings=True) -> None:
+        QProgressDialog.__init__(self, '', None, 0, len(book_ids), parent)
         self.setWindowTitle(_('Queueing books for bulk conversion'))
-        self.book_ids, self.output_format, self.queue, self.db, self.args, self.user_recs = \
-                book_ids, output_format, queue, db, args, user_recs
-        self.parent = parent
+        self.book_ids, self.output_format, self.queue, self.db, self.args, self.user_recs = (
+            book_ids,
+            output_format,
+            queue,
+            db,
+            args,
+            user_recs,
+        )
         self.use_saved_single_settings = use_saved_single_settings
         self.i, self.bad, self.jobs, self.changed = 0, [], [], False
         QTimer.singleShot(0, self.do_book)
-        self.exec_()
+        self.exec()
 
     def do_book(self):
         if self.i >= len(self.book_ids):
@@ -182,11 +204,10 @@ class QueueBulk(QProgressDialog):
             input_format = get_input_format_for_book(self.db, book_id, None)[0]
             input_fmt = self.db.original_fmt(book_id, input_format).lower()
             same_fmt = input_fmt == self.output_format.lower()
-            mi, opf_file = create_opf_file(self.db, book_id)
-            in_file = PersistentTemporaryFile('.'+input_format)
+            mi, opf_file = create_opf_file(self.db, book_id, for_conversion=True)
+            in_file = PersistentTemporaryFile('.' + input_format)
             with in_file:
-                self.db.copy_format_to(book_id, input_fmt, in_file,
-                        index_is_id=True)
+                self.db.copy_format_to(book_id, input_fmt, in_file, index_is_id=True)
 
             out_file = PersistentTemporaryFile('.' + self.output_format)
             out_file.write(as_bytes(self.output_format))
@@ -206,6 +227,7 @@ class QueueBulk(QProgressDialog):
             save_specifics(self.db, book_id, combined_recs)
             lrecs = list(combined_recs.to_recommendations())
             from calibre.customize.ui import plugin_for_output_format
+
             op = plugin_for_output_format(self.output_format)
             if op and op.recommendations:
                 prec = {x[0] for x in op.recommendations}
@@ -216,26 +238,23 @@ class QueueBulk(QProgressDialog):
             cover_file = create_cover_file(self.db, book_id)
 
             if opf_file is not None:
-                lrecs.append(('read_metadata_from_opf', opf_file.name,
-                    OptionRecommendation.HIGH))
+                lrecs.append(('read_metadata_from_opf', opf_file.name, OptionRecommendation.HIGH))
                 temp_files.append(opf_file)
             if cover_file is not None:
-                lrecs.append(('cover', cover_file.name,
-                    OptionRecommendation.HIGH))
+                lrecs.append(('cover', cover_file.name, OptionRecommendation.HIGH))
                 temp_files.append(cover_file)
 
             for x in list(lrecs):
                 if x[0] == 'debug_pipeline':
                     lrecs.remove(x)
             try:
-                dtitle = unicode_type(mi.title)
-            except:
+                dtitle = str(mi.title)
+            except Exception:
                 dtitle = repr(mi.title)
             if len(dtitle) > 50:
-                dtitle = dtitle[:50].rpartition(' ')[0]+'...'
-            self.setLabelText(_('Queueing ')+dtitle)
-            desc = _('Convert book %(num)d of %(tot)d (%(title)s)') % dict(
-                    num=self.i, tot=len(self.book_ids), title=dtitle)
+                dtitle = dtitle[:50].rpartition(' ')[0] + '...'
+            self.setLabelText(_('Queueing ') + dtitle)
+            desc = _('Convert book %(num)d of %(tot)d (%(title)s)') % dict(num=self.i, tot=len(self.book_ids), title=dtitle)
 
             args = [in_file.name, out_file.name, lrecs]
             temp_files.append(out_file)
@@ -250,38 +269,39 @@ class QueueBulk(QProgressDialog):
             self.bad.append(book_id)
         QTimer.singleShot(0, self.do_book)
 
-    def do_queue(self):
+    def do_queue(self) -> None:
         self.hide()
         if self.bad != []:
             res = []
             for id in self.bad:
                 title = self.db.title(id, True)
-                res.append('%s'%title)
+                res.append(f'{title}')
 
-            msg = '%s' % '\n'.join(res)
-            warning_dialog(self.parent, _('Could not convert some books'),
-                _('Could not convert %(num)d of %(tot)d books, because no suitable '
-                'source format was found.') % dict(num=len(res), tot=len(self.book_ids)),
-                msg).exec_()
-        self.parent = None
+            msg = '{}'.format('\n'.join(res))
+            warning_dialog(
+                self.parent(),
+                _('Could not convert some books'),
+                _('Could not convert %(num)d of %(tot)d books, because no suitable source format was found.') % dict(num=len(res), tot=len(self.book_ids)),
+                msg,
+            ).exec()
         self.jobs.reverse()
         self.queue(self.jobs, self.changed, self.bad, *self.args)
+
 
 # }}}
 
 
 def fetch_scheduled_recipe(arg):  # {{{
     fmt = prefs['output_format'].lower()
-    # Never use AZW3 for periodicals...
-    if fmt == 'azw3':
+    # Never use AZW3 or KFX for periodicals...
+    if fmt in ('azw3', 'kfx'):
         fmt = 'mobi'
-    pt = PersistentTemporaryFile(suffix='_recipe_out.%s'%fmt.lower())
+    pt = PersistentTemporaryFile(suffix=f'_recipe_out.{fmt.lower()}')
     pt.close()
     recs = []
     ps = load_defaults('page_setup')
     if 'output_profile' in ps:
-        recs.append(('output_profile', ps['output_profile'],
-            OptionRecommendation.HIGH))
+        recs.append(('output_profile', ps['output_profile'], OptionRecommendation.HIGH))
     for edge in ('left', 'top', 'bottom', 'right'):
         edge = 'margin_' + edge
         if edge in ps:
@@ -289,10 +309,8 @@ def fetch_scheduled_recipe(arg):  # {{{
 
     lf = load_defaults('look_and_feel')
     if lf.get('base_font_size', 0.0) != 0.0:
-        recs.append(('base_font_size', lf['base_font_size'],
-            OptionRecommendation.HIGH))
-        recs.append(('keep_ligatures', lf.get('keep_ligatures', False),
-            OptionRecommendation.HIGH))
+        recs.append(('base_font_size', lf['base_font_size'], OptionRecommendation.HIGH))
+        recs.append(('keep_ligatures', lf.get('keep_ligatures', False), OptionRecommendation.HIGH))
 
     lr = load_defaults('lrf_output')
     if lr.get('header', False):
@@ -306,7 +324,9 @@ def fetch_scheduled_recipe(arg):  # {{{
     if fmt == 'pdf':
         pdf = load_defaults('pdf_output')
         from calibre.customize.ui import plugin_for_output_format
+
         p = plugin_for_output_format('pdf')
+        assert p is not None
         for opt in p.options:
             recs.append((opt.option.name, pdf.get(opt.option.name, opt.recommended_value), OptionRecommendation.HIGH))
 
@@ -315,8 +335,14 @@ def fetch_scheduled_recipe(arg):  # {{{
         recs.append(('username', arg['username'], OptionRecommendation.HIGH))
     if arg['password'] is not None:
         recs.append(('password', arg['password'], OptionRecommendation.HIGH))
+    if arg.get('recipe_specific_options', None):
+        serialized = []
+        for name, val in arg['recipe_specific_options'].items():
+            serialized.append(f'{name}:{val}')
+        recs.append(('recipe_specific_option', serialized, OptionRecommendation.HIGH))
 
-    return 'gui_convert_recipe', args, _('Fetch news from %s')%arg['title'], fmt.upper(), [pt]
+    return 'gui_convert_recipe', args, _('Fetch news from %s') % arg['title'], fmt.upper(), [pt]
+
 
 # }}}
 
@@ -327,22 +353,22 @@ def generate_catalog(parent, dbspec, ids, device_manager, db):  # {{{
     # Build the Catalog dialog in gui2.dialogs.catalog
     d = Catalog(parent, dbspec, ids, db)
 
-    if d.exec_() != QDialog.DialogCode.Accepted:
+    if d.exec() != QDialog.DialogCode.Accepted:
         return None
 
     # Create the output file
-    out = PersistentTemporaryFile(suffix='_catalog_out.'+d.catalog_format.lower())
+    out = PersistentTemporaryFile(suffix='_catalog_out.' + d.catalog_format.lower())
 
     # Profile the connected device
     # Parallel initialization in calibre.db.cli.cmd_catalog
     connected_device = {
-                         'is_device_connected': device_manager.is_device_present,
-                         'kind': device_manager.connected_device_kind,
-                         'name': None,
-                         'save_template': None,
-                         'serial': None,
-                         'storage': None
-                       }
+        'is_device_connected': device_manager.is_device_present,
+        'kind': device_manager.connected_device_kind,
+        'name': None,
+        'save_template': None,
+        'serial': None,
+        'storage': None,
+    }
 
     if device_manager.is_device_present:
         device = device_manager.device
@@ -356,14 +382,22 @@ def generate_catalog(parent, dbspec, ids, device_manager, db):  # {{{
             if device._card_b_prefix:
                 storage.append(os.path.join(device._card_b_prefix, device.EBOOK_DIR_CARD_B))
             connected_device['storage'] = storage
-            connected_device['serial'] = device.detected_device.serial if \
-                                          hasattr(device.detected_device,'serial') else None
+            connected_device['serial'] = device.detected_device.serial if hasattr(device.detected_device, 'serial') else None
             connected_device['save_template'] = device.save_template()
-        except:
+        except Exception:
             pass
+
+    # Create a temporary copy of the databases to pass into the generation
+    # process. The backend looks for the notes directory (.calnotes) in the
+    # directory containing the metadata.db file. Copy the one from the current
+    # library.
+    temp_db_directory = PersistentTemporaryDirectory('callib')
+    temp_db_path = db.new_api.clone_for_readonly_access(temp_db_directory)
 
     # These args are passed inline to gui2.convert.gui_conversion:gui_catalog
     args = [
+        db.library_path,
+        temp_db_path,
         d.catalog_format,
         d.catalog_title,
         dbspec,
@@ -371,14 +405,15 @@ def generate_catalog(parent, dbspec, ids, device_manager, db):  # {{{
         out.name,
         d.catalog_sync,
         d.fmt_options,
-        connected_device
-        ]
+        connected_device,
+    ]
     out.close()
 
     # This returns to gui2.actions.catalog:generate_catalog()
     # Which then calls gui2.convert.gui_conversion:gui_catalog() with the args inline
-    return 'gui_catalog', args, _('Generate catalog'), out.name, d.catalog_sync, \
-            d.catalog_title
+    return 'gui_catalog', args, _('Generate catalog'), out.name, d.catalog_sync, d.catalog_title
+
+
 # }}}
 
 
@@ -391,11 +426,16 @@ def convert_existing(parent, db, book_ids, output_format):  # {{{
             already_converted_titles.append(db.get_metadata(book_id, True).title)
 
     if already_converted_ids:
-        if not question_dialog(parent, _('Convert existing'),
-                _('The following books have already been converted to the %s format. '
-                   'Do you wish to reconvert them?') % output_format.upper(),
-                det_msg='\n'.join(already_converted_titles), skip_dialog_name='confirm_bulk_reconvert'):
+        if not question_dialog(
+            parent,
+            _('Convert existing'),
+            _('The following books have already been converted to the %s format. Do you wish to reconvert them?') % output_format.upper(),
+            det_msg='\n'.join(already_converted_titles),
+            skip_dialog_name='confirm_bulk_reconvert',
+        ):
             book_ids = [x for x in book_ids if x not in already_converted_ids]
 
     return book_ids
+
+
 # }}}

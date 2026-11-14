@@ -12,7 +12,7 @@ from widgets import create_button
 CLASS_NAME = 'conversion-option-group'
 indent = '↳\xa0'
 
-add_extra_css(def():
+add_extra_css(def ():
     style = ''
     sel = '.' + CLASS_NAME + ' '
     style += build_rule(sel + 'input[type="checkbox"]', margin_left='0')
@@ -42,7 +42,7 @@ def ep(func):
 
 def add_listener(name, callback):
     if not listeners[name]:
-        listeners[name] = v'[]'
+        listeners[name] = []
     listeners[name].push(callback)
 
 
@@ -56,6 +56,7 @@ def sanitize_accelerator(text):
     return text.replace('&', '')
 # }}}
 
+
 def subset_choice(name, choices, tooltip=None):  # {{{
     if get_option_default_value(name) is undefined:
         raise KeyError(f'{name} is not a known option')
@@ -67,14 +68,14 @@ def subset_choice(name, choices, tooltip=None):  # {{{
         ans.appendChild(E.label(E.input(type='checkbox', name=cname), '\xa0' + choices[cname]))
     ops = {
         'get': def (container):
-            ans = v'[]'
+            ans = []
             for w in container.querySelectorAll('input'):
                 if w.checked:
                     ans.push(w.name)
             return ','.join(ans)
         ,
         'set': def (container, val):
-            q = {x.strip():True for x in (val or '').split(',')}
+            q = {x.strip(): True for x in (val or '').split(',')}
             for w in container.querySelectorAll('input'):
                 w.checked = bool(q[w.name])
         ,
@@ -85,6 +86,7 @@ def subset_choice(name, choices, tooltip=None):  # {{{
     ops.set(ans, get_option_value(name))
     return ans
 # }}}
+
 
 def create_simple_widget(name, text, tooltip, input_widget_, getter, setter, suffix):  # {{{
     if get_option_default_value(name) is undefined:
@@ -127,6 +129,7 @@ def create_simple_widget(name, text, tooltip, input_widget_, getter, setter, suf
     return label
 # }}}
 
+
 def checkbox(name, text, tooltip):  # {{{
     return create_simple_widget(name, text, tooltip, E.input(type='checkbox'),
         def getter(w):  # noqa: unused-local
@@ -138,6 +141,7 @@ def checkbox(name, text, tooltip):  # {{{
     )
 # }}}
 
+
 def lineedit(name, text, width=25, tooltip=None, suffix=None):  # {{{
     return create_simple_widget(name, text, tooltip, E.input(type='text', size=str(width)),
             def getter(w):  # noqa: unused-local
@@ -147,9 +151,10 @@ def lineedit(name, text, width=25, tooltip=None, suffix=None):  # {{{
             ,
             def setter(w, val):  # noqa: unused-local
                 w.value = val or ''
-            , suffix=suffix
+            , suffix = suffix
     )
 # }}}
+
 
 def float_spin(name, text, tooltip=None, step=0.1, min=0, max=100, unit=None):  # {{{
     f = E.input(type='number', step=str(step), min=str(min), max=str(max), required=True)
@@ -164,9 +169,10 @@ def float_spin(name, text, tooltip=None, step=0.1, min=0, max=100, unit=None):  
         def setter(w, val):  # noqa: unused-local
             w.value = str(float(val))
         ,
-        suffix=unit
+        suffix = unit
     )
 # }}}
+
 
 def int_spin(name, text, tooltip=None, step=1, min=0, max=100, unit=None):  # {{{
     f = E.input(type='number', step=str(step), min=str(min), max=str(max), required=True)
@@ -181,9 +187,10 @@ def int_spin(name, text, tooltip=None, step=1, min=0, max=100, unit=None):  # {{
         def setter(w, val):  # noqa: unused-local
             w.value = str(int(val))
         ,
-        suffix=unit
+        suffix = unit
     )
 # }}}
+
 
 def choices(name, text, choices, tooltip):  # {{{
     f = E.select()
@@ -203,6 +210,7 @@ def choices(name, text, choices, tooltip):  # {{{
     )
 # }}}
 
+
 def textarea(name, text, tooltip):  # {{{
     ans = create_simple_widget(name, text, tooltip, E.textarea(rows='30', cols='70'),
             def getter(w):  # noqa: unused-local
@@ -216,6 +224,7 @@ def textarea(name, text, tooltip):  # {{{
     ans.classList.add('vertical')
     return ans
 # }}}
+
 
 def container_for_option(name):
     return document.getElementById(container_id).querySelector(f'[data-option-name="{name}"]')
@@ -235,10 +244,11 @@ def set_disabled(name, val):
 
 # Look & feel {{{
 @ep
+@no_prune
 def look_and_feel(container):
     def subhead(text):
         container.appendChild(E.div(
-            style='border-bottom: solid 1px currentColor; margin-bottom: 1ex; max-width: 35em', E.b(sanitize_accelerator(text))))
+            style='border-bottom: var(--calibre-border-style-strong); margin-bottom: 1ex; max-width: 35em', E.b(sanitize_accelerator(text))))
 
     subhead(_('&Fonts'))
     add_listener('disable_font_rescaling', def (name):
@@ -289,10 +299,13 @@ def look_and_feel(container):
     container.appendChild(textarea('extra_css', 'E&xtra CSS'))
 # }}}
 
+
 # Heuristics {{{
 @ep
+@no_prune
 def heuristics(container):
-    settings = v'[]'
+    settings = []
+
     def add(func, name, text, **kw):
         g.appendChild(func(name, text, **kw))
         settings.push(name)
@@ -307,7 +320,7 @@ def heuristics(container):
     ' As the name implies, this involves guesswork, which means that it could end up worsening the result'
     ' of a conversion, if calibre guesses wrong. Therefore, it is disabled by default. Often, if a conversion'
     ' does not turn out as you expect, turning on heuristics can improve matters. Read more about the various'
-    ' heuristic processing options in the <a href="%s">User Manual</a>.''').replace(
+    ' heuristic processing options in the <a href="%s">User Manual</a>.' '').replace(
         '%s', 'https://manual.calibre-ebook.com/conversion.html#heuristic-processing')
     container.appendChild(E.div(style='margin-bottom: 1ex'))
     safe_set_inner_html(container.lastChild, blurb)
@@ -327,8 +340,10 @@ def heuristics(container):
     add(checkbox, 'fix_indents', _('Replace entity indents with CSS indents'))
 # }}}
 
+
 # Page setup {{{
 @ep
+@no_prune
 def page_setup(container):
     def show_profile_desc(name):
         profile = get(name)
@@ -351,8 +366,10 @@ def page_setup(container):
     g.appendChild(E.div(data_profile='output'))
 # }}}
 
+
 # Structure detection {{{
 @ep
+@no_prune
 def structure_detection(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -360,13 +377,16 @@ def structure_detection(container):
     g.appendChild(choices('chapter_mark', _('Chap&ter mark:'), ['pagebreak', 'rule', 'both', 'none']))
     g.appendChild(checkbox('remove_first_image', _('Remove first &image')))
     g.appendChild(checkbox('remove_fake_margins', _('Remove &fake margins')))
+    g.appendChild(checkbox('add_alt_text_to_img', _('Add &alt text to images')))
     g.appendChild(checkbox('insert_metadata', _('Insert metadata at start of book')))
     g.appendChild(lineedit('page_breaks_before', _('Insert page breaks before'), 50))
     g.appendChild(lineedit('start_reading_at', _('Start reading at'), 50))
 # }}}
 
+
 # ToC {{{
 @ep
+@no_prune
 def toc(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -381,15 +401,16 @@ def toc(container):
     g.appendChild(lineedit('level3_toc', _('Level &3 TOC (XPath expression):')))
 # }}}
 
+
 # Search & replace {{{
 @ep
+@no_prune
 def search_and_replace(container):
-
     def add(val):
         c = container_for_option('search_replace')
         c.appendChild(E.div(
             class_='simple-group sr-instance',
-            style='border-bottom: solid 1px currentColor; margin-bottom: 1ex',
+            style='border-bottom: var(--calibre-border-style-strong); margin-bottom: 1ex',
             E.label(
                 E.span(_('Search:')), E.input(type='text', name='search')
             ),
@@ -406,20 +427,20 @@ def search_and_replace(container):
 
     ops = {
         'get': def get(container):  # noqa: unused-local
-            ans = v'[]'
+            ans = []
             for div in container.querySelectorAll('.sr-instance'):
                 search, replace = div.querySelectorAll('input')
                 if search.value:
                     r = replace.value or ''  # noqa: unused-local
-                    ans.push(v'[search.value, r]')
+                    ans.push([search.value, r])
             return JSON.stringify(ans)
         ,
         'set': def set(container, encval):  # noqa: unused-local
             try:
                 vals = JSON.parse(encval)
             except:
-                vals = v'[]'
-            vals = vals or v'[]'
+                vals = []
+            vals = vals or []
             clear(container)
             for val in vals:
                 add(val)
@@ -432,14 +453,17 @@ def search_and_replace(container):
     ops.set(container.lastChild, get_option_value('search_replace'))
 
     container.appendChild(E.div(
-        create_button(_('Add'), 'plus', action=def(): add();)
+        create_button(_('Add'), 'plus', action=def (): add();)
     ))
 # }}}
 
+
 # Comic Input {{{
 @ep
+@no_prune
 def comic_input(container):
-    settings = v'[]'
+    settings = []
+
     def add(func, name, text, **kw):
         g.appendChild(func(name, text, **kw))
         settings.push(name)
@@ -459,45 +483,58 @@ def comic_input(container):
     add(lineedit, 'comic_image_size', _('Override image si&ze:'))
     add(checkbox, 'dont_normalize', _('Disable &normalize'))
     add(checkbox, 'keep_aspect_ratio', _('Keep &aspect ratio'))
-    add(checkbox, 'dont_sharpen', _('Disable &Sharpening'))
-    add(checkbox, 'disable_trim', _('Disable &Trimming'))
+    add(checkbox, 'dont_sharpen', _('Disable &sharpening'))
+    add(checkbox, 'disable_trim', _('Disable &trimming'))
     add(checkbox, 'wide', _('&Wide'))
     add(checkbox, 'landscape', _('&Landscape'))
     add(checkbox, 'right2left', _('&Right to left'))
     add(checkbox, 'no_sort', _('Don\'t so&rt'))
     add(checkbox, 'despeckle', _('De&speckle'))
-    g.appendChild(choices('output_format', _('O&utput format:'), v"['png', 'jpg']"))
+    g.appendChild(choices('output_format', _('O&utput format:'), ['png', 'jpg']))
     settings.push('output_format')
 
 # }}}
 
+
 # FB2 Input {{{
 @ep
+@no_prune
 def fb2_input(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
     g.appendChild(checkbox('no_inline_fb2_toc', _('Do not insert a Table of Contents at the beginning of the book')))
 # }}}
 
+
 # PDF Input {{{
 @ep
+@no_prune
 def pdf_input(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
     g.appendChild(float_spin('unwrap_factor', _('Line &un-wrapping factor:'), max=1, step=0.01))
     g.appendChild(checkbox('no_images', _('No &images')))
+    g.appendChild(choices('pdf_engine', _('PDF &engine:'), {'calibre': 'calibre', 'pdftohtml': 'pdftohtml'}))
+    g.appendChild(int_spin('pdf_header_skip', _('Remove headers at &top of page by:'), min=-1, max=999999, step=1))
+    g.appendChild(int_spin('pdf_footer_skip', _('Remove footers at &bottom of page by:'), min=-1, max=999999, step=1))
+    g.appendChild(lineedit('pdf_header_regex', _('Regular expression to remove &header at top of page:')))
+    g.appendChild(lineedit('pdf_footer_regex', _('Regular expression to remove &footer at bottom of page:')))
 # }}}
+
 
 # RTF Input {{{
 @ep
+@no_prune
 def rtf_input(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
     g.appendChild(checkbox('ignore_wmf', _('Ignore &WMF images in the RTF file')))
 # }}}
 
+
 # DOCX Input {{{
 @ep
+@no_prune
 def docx_input(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -506,8 +543,10 @@ def docx_input(container):
     g.appendChild(checkbox('docx_inline_subsup', _('Render &superscripts and subscripts so that they do not affect the line height')))
 # }}}
 
+
 # TXT Input {{{
 @ep
+@no_prune
 def txt_input(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -526,8 +565,10 @@ def txt_input(container):
     ))
 # }}}
 
+
 # EPUB Output {{{
 @ep
+@no_prune
 def epub_output(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -540,11 +581,34 @@ def epub_output(container):
     g.appendChild(checkbox('epub_toc_at_end', _('Put inserted Table of Contents at the &end of the book')))
     g.appendChild(lineedit('toc_title', _('&Title for inserted ToC:')))
     g.appendChild(int_spin('flow_size', _('Split files &larger than:'), unit='KB', max=1000000, step=20))
+    g.appendChild(lineedit('epub_max_image_size', _('Shrink &images larger than:')))
     g.appendChild(choices('epub_version', _('EP&UB version:'), ui_data.versions))
 # }}}
 
+
+# KEPUB Output {{{
+@ep
+@no_prune
+def kepub_output(container):
+    g = E.div(class_='simple-group')
+    container.appendChild(g)
+    g.appendChild(checkbox('dont_split_on_page_breaks', _('Do not &split on page breaks')))
+    g.appendChild(int_spin('flow_size', _('Split files &larger than:'), unit='KB', max=1000000, step=20))
+    g.appendChild(lineedit('kepub_max_image_size', _('Shrink &images larger than:')))
+    g.appendChild(lineedit('kepub_prefer_justification', _('Prefer improved text justification to proper highlighting')))
+    g.appendChild(checkbox('kepub_affect_hyphenation', _('Enable/disable &hyphenation for this book')))
+    g.appendChild(checkbox('kepub_disable_hyphenation', _('&Prevent all hyphenation')))
+    c = _('characters')
+    g.appendChild(int_spin('kepub_hyphenation_min_chars', _('Hyphenation: &minimum word length:'), unit=c))
+    g.appendChild(int_spin('kepub_hyphenation_min_chars_before', _('Hyphenation: minimum characters &before:'), unit=c))
+    g.appendChild(int_spin('kepub_hyphenation_min_chars_after', _('Hyphenation: minimum characters &after:'), unit=c))
+    g.appendChild(int_spin('kepub_hyphenation_limit_lines', _('Hyphenation: &limit lines:'), unit=_('lines')))
+# }}}
+
+
 # DOCX Output {{{
 @ep
+@no_prune
 def docx_output(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -559,8 +623,10 @@ def docx_output(container):
     g.appendChild(checkbox('preserve_cover_aspect_ratio', _('Preserve the aspect ratio of the image inserted as cover')))
 # }}}
 
+
 # FB2 Output {{{
 @ep
+@no_prune
 def fb2_output(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -568,8 +634,10 @@ def fb2_output(container):
     g.appendChild(choices('fb2_genre', _('&Genre:'), ui_data.genres))
 # }}}
 
+
 # LRF Output {{{
 @ep
+@no_prune
 def lrf_output(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -587,8 +655,10 @@ def lrf_output(container):
     g.appendChild(lineedit('mono_family', _('&Monospace font family:')))
 # }}}
 
+
 # MOBI Output {{{
 @ep
+@no_prune
 def mobi_output(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -604,8 +674,10 @@ def mobi_output(container):
     g.appendChild(checkbox('share_not_sync', _('Enable &sharing of book content via Facebook, etc. WARNING: Disables last read syncing')))
 # }}}
 
+
 # AZW3 Output {{{
 @ep
+@no_prune
 def azw3_output(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -617,8 +689,10 @@ def azw3_output(container):
     g.appendChild(checkbox('share_not_sync', _('Enable &sharing of book content via Facebook, etc. WARNING: Disables last read syncing')))
 # }}}
 
+
 # PDB Output {{{
 @ep
+@no_prune
 def pdb_output(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -627,8 +701,10 @@ def pdb_output(container):
     g.appendChild(checkbox('inline_toc', _('&Inline TOC')))
 # }}}
 
+
 # PDF Output {{{
 @ep
+@no_prune
 def pdf_output(container):
     add_listener('use_profile_size', def (name):
         disabled = get('use_profile_size')
@@ -647,6 +723,7 @@ def pdf_output(container):
     g.appendChild(choices('paper_size', indent + _('&Paper size:'), ui_data.paper_sizes))
     g.appendChild(lineedit('custom_size', indent + _('&Custom size:')))
     g.appendChild(choices('unit', indent + _('Custom size unit:'), ui_data.units))
+    g.appendChild(checkbox('pdf_no_cover', _('Discard book &cover')))
     g.appendChild(checkbox('preserve_cover_aspect_ratio', _('Preserve &aspect ratio of cover')))
     g.appendChild(checkbox('pdf_page_numbers', _('Add page &numbers to the bottom of every page')))
     g.appendChild(checkbox('pdf_hyphenate', _('&Break long words at the end of lines')))
@@ -669,8 +746,10 @@ def pdf_output(container):
     g.appendChild(lineedit('pdf_footer_template', _('&Footer template:')))
 # }}}
 
+
 # PMLZ Output {{{
 @ep
+@no_prune
 def pml_output(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -679,16 +758,20 @@ def pml_output(container):
     g.appendChild(checkbox('full_image_depth', _('Do not &reduce image size and depth')))
 # }}}
 
+
 # RB Output {{{
 @ep
+@no_prune
 def rb_output(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
     g.appendChild(checkbox('inline_toc', _('&Inline TOC')))
 # }}}
 
+
 # TXT Output {{{
 @ep
+@no_prune
 def txt_output(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -706,15 +789,20 @@ def txt_output(container):
     g = g.lastChild
     g.appendChild(checkbox('keep_links', _('Do not remove links (<a> tags) before processing')))
     g.appendChild(checkbox('keep_image_references', _('Do not remove image &references before processing')))
+    g.appendChild(checkbox('use_alt_text_for_images', _('Replace images with their alt attribute text')))
     g.appendChild(checkbox('keep_color', _('Keep text &color, when possible')))
 
+
 @ep
+@no_prune
 def txtz_output(container):
     return txt_output(container)
 # }}}
 
+
 # HTMLZ Output {{{
 @ep
+@no_prune
 def htmlz_output(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
@@ -723,25 +811,33 @@ def htmlz_output(container):
     g.appendChild(checkbox('htmlz_title_filename', _('Use book title as the filename for the HTML file')))
 # }}}
 
+
 # SNB Output {{{
 @ep
+@no_prune
 def snb_output(container):
     g = E.div(class_='simple-group')
     container.appendChild(g)
     g.appendChild(checkbox('snb_insert_empty_line', _('Insert &empty line between paragraphs')))
     g.appendChild(checkbox('snb_dont_indent_first_line', _('Don\'t indent the &first line for each paragraph')))
     g.appendChild(checkbox('snb_hide_chapter_name', _('Hide &chapter name')))
-    g.appendChild(checkbox('snb_full_screen', _('Optimize for full-&screen view ')))
+    g.appendChild(checkbox('snb_full_screen', _('Optimize for full-&screen mode')))
 # }}}
+
 
 def restore_defaults():
     for setting in registry:
         set(setting, get_option_default_value(setting))
 
 
-def create_option_group(group_name, ui_data_, profiles_, container, get_option_value_, get_option_default_value_, is_option_disabled_, get_option_help_, on_close):
+def create_option_group(
+    group_name, ui_data_, profiles_, container,
+    get_option_value_, get_option_default_value_, is_option_disabled_, get_option_help_, on_close
+):
     nonlocal get_option_value, get_option_default_value, is_option_disabled, container_id, registry, listeners, get_option_help, profiles, ui_data
-    get_option_value, get_option_default_value, is_option_disabled, get_option_help = get_option_value_, get_option_default_value_, is_option_disabled_, get_option_help_
+    get_option_value, get_option_default_value, is_option_disabled, get_option_help = (
+        get_option_value_, get_option_default_value_, is_option_disabled_, get_option_help_
+    )
     profiles, ui_data = profiles_, ui_data_
     registry = {}
     listeners = {}
@@ -749,7 +845,7 @@ def create_option_group(group_name, ui_data_, profiles_, container, get_option_v
     container.classList.add(CLASS_NAME)
     entry_points[group_name](container)
     container.appendChild(E.div(
-        style='margin-top: 2ex; padding-top: 2ex; border-top: solid 1px currentColor',
+        style='margin-top: 2ex; padding-top: 2ex; border-top: var(--calibre-border-style)',
         create_button(_('Done'), action=on_close),
         '\xa0\xa0',
         create_button(_('Restore defaults'), action=restore_defaults),

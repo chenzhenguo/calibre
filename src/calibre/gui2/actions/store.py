@@ -1,63 +1,60 @@
-# -*- coding: utf-8 -*-
-
-
-__license__ = 'GPL 3'
-__copyright__ = '2011, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
 
 from functools import partial
 
-from PyQt5.Qt import QIcon, QSize
+from qt.core import QIcon
 
 from calibre.gui2 import error_dialog
 from calibre.gui2.actions import InterfaceAction
 from calibre.gui2.dialogs.confirm_delete import confirm
-from calibre.utils.localization import localize_user_manual_link
+from calibre.utils.localization import _, localize_user_manual_link
 
 
 class StoreAction(InterfaceAction):
-
     name = 'Store'
-    action_spec = (_('Get books'), 'store.png', _('Search dozens of online e-book retailers for the cheapest books'), _('G'))
+    action_spec = (
+        _('Get books'),
+        'store.png',
+        _('Search dozens of online e-book retailers for the cheapest books'),
+        _('G'),
+    )
     action_add_menu = True
     action_menu_clone_qaction = _('Search for e-books')
 
-    def genesis(self):
+    def genesis(self) -> None:
         self.qaction.triggered.connect(self.do_search)
         self.store_menu = self.qaction.menu()
+        assert self.store_menu is not None
         cm = partial(self.create_menu_action, self.store_menu)
-        for x, t in [('author', _('this author')), ('title', _('this title')),
-                ('book', _('this book'))]:
-            func = getattr(self, 'search_%s'%('author_title' if x == 'book'
-                else x))
-            ac = cm(x, _('Search for %s')%t, triggered=func)
-            setattr(self, 'action_search_by_'+x, ac)
+        for x, t in [('author', _('this author')), ('title', _('this title')), ('book', _('this book'))]:
+            func = getattr(self, 'search_{}'.format('author_title' if x == 'book' else x))
+            ac = cm(x, _('Search for %s') % t, triggered=func)
+            setattr(self, 'action_search_by_' + x, ac)
         self.store_menu.addSeparator()
         self.store_list_menu = self.store_menu.addMenu(_('Stores'))
         self.load_menu()
         self.store_menu.addSeparator()
         cm('choose stores', _('Choose stores'), triggered=self.choose)
 
-    def load_menu(self):
+    def load_menu(self) -> None:
         self.store_list_menu.clear()
-        icon = QIcon()
-        icon.addFile(I('donate.png'), QSize(16, 16))
+        icon = QIcon.ic('donate.png')
         for n, p in sorted(self.gui.istores.items(), key=lambda x: x[0].lower()):
             if p.base_plugin.affiliate:
-                self.store_list_menu.addAction(icon, n,
-                                               partial(self.open_store, n))
+                self.store_list_menu.addAction(icon, n, partial(self.open_store, n))
             else:
                 self.store_list_menu.addAction(n, partial(self.open_store, n))
 
     def do_search(self):
         return self.search()
 
-    def search(self, query=''):
+    def search(self, query='') -> None:
         self.gui.istores.check_for_updates()
         self.show_disclaimer()
         from calibre.gui2.store.search.search import SearchDialog
+
         sd = SearchDialog(self.gui, self.gui, query)
-        sd.exec_()
+        sd.exec()
 
     def _get_selected_row(self):
         rows = self.gui.current_view().selectionModel().selectedRows()
@@ -84,7 +81,7 @@ class StoreAction(InterfaceAction):
 
         return ' & '.join(corrected_authors).strip()
 
-    def search_author(self):
+    def search_author(self) -> None:
         row = self._get_selected_row()
         if row is None:
             error_dialog(self.gui, _('Cannot search'), _('No book selected'), show=True)
@@ -101,28 +98,29 @@ class StoreAction(InterfaceAction):
 
         return title.strip()
 
-    def search_title(self):
+    def search_title(self) -> None:
         row = self._get_selected_row()
         if row is None:
             error_dialog(self.gui, _('Cannot search'), _('No book selected'), show=True)
             return
         self.search({'title': self._get_title(row)})
 
-    def search_author_title(self):
+    def search_author_title(self) -> None:
         row = self._get_selected_row()
         if row is None:
             error_dialog(self.gui, _('Cannot search'), _('No book selected'), show=True)
             return
         self.search({'author': self._get_author(row), 'title': self._get_title(row)})
 
-    def choose(self):
+    def choose(self) -> None:
         from calibre.gui2.store.config.chooser.chooser_dialog import StoreChooserDialog
+
         d = StoreChooserDialog(self.gui)
-        d.exec_()
+        d.exec()
         self.gui.load_store_plugins()
         self.load_menu()
 
-    def open_store(self, store_plugin_name):
+    def open_store(self, store_plugin_name) -> None:
         self.gui.istores.check_for_updates()
         # self.show_disclaimer()
         # It's not too important that the updated plugin have finished loading
@@ -130,25 +128,33 @@ class StoreAction(InterfaceAction):
         self.gui.istores.join(1.0)
         self.gui.istores[store_plugin_name].open(self.gui)
 
-    def show_disclaimer(self):
-        confirm(('<p>' +
-            _('calibre helps you find the e-books you want by searching '
-            'the websites of various commercial and public domain '
-            'book sources for you.') +
-            '<p>' +
-            _('Using the integrated search you can easily find which '
-            'store has the book you are looking for, at the best price. '
-            'You also get DRM status and other useful information.') + '<p>' +
-            _('All transactions (paid or otherwise) are handled between '
-            'you and the book seller. '
-            'calibre is not part of this process and any issues related '
-            'to a purchase should be directed to the website you are '
-            'buying from. Be sure to double check that any books you get '
-            'will work with your e-book reader, especially if the book you '
-            'are buying has '
-            '<a href="{}">DRM</a>.'
-            ).format(localize_user_manual_link(
-                'https://manual.calibre-ebook.com/drm.html'))), 'about_get_books_msg',
-            parent=self.gui, show_cancel_button=False,
+    def show_disclaimer(self) -> None:
+        confirm(
+            (
+                '<p>'
+                + _('calibre helps you find the e-books you want by searching the websites of various commercial and public domain book sources.')
+                + '<p>'
+                + _(
+                    'Using the integrated search you can easily find which '
+                    'store has the book you are looking for, at the best price. '
+                    'You also get DRM status and other useful information.'
+                )
+                + '<p>'
+                + _(
+                    'All transactions (paid or otherwise) are handled between '
+                    'you and the book seller. '
+                    'calibre is not part of this process and any issues related '
+                    'to a purchase should be directed to the website you are '
+                    'buying from. Be sure to double check that any books you get '
+                    'will work with your e-book reader, especially if the book you '
+                    'are buying has '
+                    '<a href="{}">DRM</a>.'
+                ).format(localize_user_manual_link('https://manual.calibre-ebook.com/drm.html'))
+            ),
+            'about_get_books_msg',
+            parent=self.gui,
+            show_cancel_button=False,
             confirm_msg=_('Show this message again'),
-            pixmap='dialog_information.png', title=_('About Get books'))
+            pixmap='dialog_information.png',
+            title=_('About Get books'),
+        )

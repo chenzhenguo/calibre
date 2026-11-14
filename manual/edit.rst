@@ -4,10 +4,10 @@ Editing e-books
 ========================
 
 calibre has an integrated e-book editor that can be used to edit books in the
-EPUB and AZW3 (Kindle) formats. The editor shows you the HTML and CSS that is
-used internally inside the book files, with a live preview that updates as you
-make changes. It also contains various automated tools to perform common
-cleanup and fixing tasks.
+EPUB, KEPUB (Kobo) and AZW3 (Kindle) formats. The editor shows you the HTML and
+CSS that is used internally inside the book files, with a live preview that
+updates as you make changes. It also contains various automated tools to
+perform common cleanup and fixing tasks.
 
 You can use this editor by right clicking on any book in calibre and selecting
 :guilabel:`Edit book`.
@@ -26,16 +26,15 @@ Basic workflow
 ---------------
 
 .. note::
-    A video tour of the calibre E-book editor is available `here
-    <https://calibre-ebook.com/demo#tutorials>`_.
+    A video tour of the calibre E-book editor is available :website:`here <demo#tutorials>`.
 
 When you first open a book with the Edit book tool, you will be presented with
 a list of files on the left. These are the individual HTML files, stylesheets,
 images, etc. that make up the content of the book. Simply double click on a
 file to start editing it. Note that if you want to do anything more
 sophisticated than making a few small tweaks, you will need to know `HTML
-Tutorial <http://html.net/tutorials/html/>`_ and `CSS Tutorial
-<http://html.net/tutorials/css/>`_.
+Tutorial <https://www.w3schools.com/Html/default.asp>`_ and `CSS Tutorial
+<https://www.w3schools.com/css/default.asp>`_.
 
 As you make changes to the HTML or CSS in the editor, the changes will be
 previewed, live, in the preview panel to the right. When you are happy with how
@@ -45,12 +44,12 @@ the changes you have made look, click the :guilabel:`Save` button or use
 One useful feature is :guilabel:`Checkpoints`. Before you embark on some
 ambitious set of edits, you can create a checkpoint. The checkpoint
 will preserve the current state of your book, then if in the future you decide
-you don't like the changes you have made to you can go back to the state when
+you don't like the changes you have made, you can go back to the state when
 you created the checkpoint. To create a checkpoint, use :guilabel:`Edit->Create
 checkpoint`. Checkpoints will also be automatically created for you whenever you
 run any automated tool like global search and replace. The checkpointing
 functionality is in addition to the normal undo/redo mechanism when editing
-individual files. Checkpoints are useful for when changes are spread over
+individual files. Checkpoints are needed for when changes are spread over
 multiple files in the book.
 
 That is the basic work flow for editing books -- Open a file, make changes,
@@ -61,7 +60,7 @@ The File browser
 ------------------
 
 .. image:: images/files_browser.png
-    :alt: The File browser
+    :alt: The File browser showing files in the book
     :class: float-left-img
 
 The :guilabel:`File browser` gives you an overview of the various files inside
@@ -127,14 +126,21 @@ links and references to the merged files. Note that merging files can sometimes
 cause text styling to change, since the individual files could have used
 different stylesheets.
 
+You can also select text files and then drag and drop the text files onto
+another text file to merge the dropped text files into the target text file.
+
 Changing text file order
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 You can re-arrange the order in which text (HTML) files are opened when reading
-the book by simply dragging and dropping them in the Files browser. For the
-technically inclined, this is called re-ordering the book spine. Note that you
-have to drop the items *between* other items, not on top of them, this can be a
-little fiddly until you get used to it.
+the book by simply dragging and dropping them in the :guilabel:`File browser` or clicking
+on the file to move and then pressing the :kbd:`Ctrl+Shift` modifiers with the
+:kbd:`Up`, :kbd:`Down`, :kbd:`Home` or :kbd:`End` keys. For the technically
+inclined, this is called re-ordering the book spine.
+
+Note that you have to drop the items *between* other items, not on top of them,
+this can be a little fiddly until you get used to it. Dropping on top of
+another file will cause the files to be merged.
 
 Marking the cover
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -144,7 +150,7 @@ E-books typically have a cover image. This image is indicated in the
 you want to designate some other image as the cover, you can do so by right
 clicking on the file and choosing :guilabel:`Mark as cover`.
 
-In addition, EPUB files has the concept of a *titlepage*. A title page is a
+In addition, EPUB files have the concept of a *titlepage*. A title page is a
 HTML file that acts as the title page/cover for the book. You can mark an HTML
 file as the titlepage when editing EPUBs by right-clicking. Be careful that the
 file you mark contains only the cover information. If it contains other
@@ -272,7 +278,7 @@ Search ignoring HTML tags
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 There is also a dedicated tool for searching for text, ignoring any HTML tags
-in between. For example, if the book has the HTML ``Empahisis on a
+in between. For example, if the book has the HTML ``Emphasis on a
 <i>word</i>.`` you can search for ``on a word`` and it will be found even
 though there is an ``<i>`` tag in the middle. Use this
 tool via the :guilabel:`Search->Search ignoring HTML markup` menu item.
@@ -312,15 +318,15 @@ will show you the location. Click OK once you are happy with the location.
     :alt: The Edit Table of Contents tool, how to change the location an entry points to
     :align: center
 
-Checking the Book
+Checking the book
 ^^^^^^^^^^^^^^^^^^^^^
 
-The :guilabel:`Check Book` tool searches your book for problems that could
+The :guilabel:`Check book` tool searches your book for problems that could
 prevent it working as intended on actual reader devices. Activate it via
-:guilabel:`Tools->Check Book`.
+:guilabel:`Tools->Check book`.
 
 .. image:: images/check-book.png
-    :alt: The Check Book tool
+    :alt: The Check book tool
     :align: center
 
 Any problems found are
@@ -329,6 +335,13 @@ some help about that error as well as giving you the option to auto-fix that
 error, if the error can be fixed automatically. You can also double click the
 error to open the location of the error in an editor, so you can fix it
 yourself.
+
+If there is a type of problem you do not care about, click the
+:guilabel:`Skip problems of this type` link in the help for that error. All
+problems of that type will no longer be reported. When some types of problems
+are being skipped, an entry at the bottom of the list says so. Click it to see
+the list of skipped problem types and un-skip any of them. Errors that prevent
+the book from being parsed cannot be skipped.
 
 Some of the checks performed are:
 
@@ -358,6 +371,20 @@ Some of the checks performed are:
 
     * Various compatibility checks for known problems that can cause the book
       to malfunction on reader devices.
+
+    * Accessibility problems, based on the `EPUB Accessibility
+      <https://www.w3.org/TR/epub-a11y-11/>`_ specification. Images,
+      including SVG images, without alternative text, HTML files that do not
+      specify their language and headings that skip levels are reported. For
+      EPUB 3 books, missing accessibility metadata and elements whose
+      ``epub:type`` has a corresponding ARIA role, such as ``doc-noteref`` for
+      ``noteref``, but that do not have a ``role`` attribute, are also
+      reported. Screen readers rely on the ``role`` attribute, not
+      ``epub:type``. The language of the HTML files can be set automatically
+      to the language of the book and the missing roles can be added
+      automatically. These checks are only run if you turn on the
+      :guilabel:`Check for accessibility problems` option below the list of
+      problems.
 
 Adding a cover
 ^^^^^^^^^^^^^^^
@@ -480,6 +507,49 @@ table of contents, etc. Simply choose the type of semantic information you want
 to specify and then select the location in the book the link should point to.
 This tool can be accessed via :guilabel:`Tools->Set semantics`.
 
+Making the book accessible
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This tool helps make the book accessible to readers with disabilities, such as
+people using screen readers. It can be accessed via
+:guilabel:`Tools->Accessibility` and has three tabs:
+
+:guilabel:`Language`
+    Set the languages of the book. Screen readers and text-to-speech engines
+    use the language to pronounce the text correctly. You can also set the
+    language of the HTML files in the book to the main language of the book,
+    either only for the files that do not specify a language or for all files.
+
+:guilabel:`Image descriptions`
+    Images should have a description, called *alternative text*, for readers
+    who cannot see them. This lists every image in the book, in reading order,
+    including SVG images inside the HTML files, along with its current
+    description, so you can add or change descriptions for all of them in one
+    place. The description of an SVG image is stored in its ``<title>``
+    element, or its ``aria-label`` attribute if it already has one. Selecting an image shows a larger preview
+    along with the text near the image in the book, to help you describe it.
+    Images that are purely decorative, such as ornaments and scene separators,
+    should be marked as :guilabel:`Decorative` so that screen readers skip
+    them. If the same image is used in several places, you can use the
+    :guilabel:`Use for all uses of this image` button to copy its description
+    to all of them.
+
+:guilabel:`Accessibility metadata`
+    EPUB 3 books can describe how accessible they are with accessibility
+    metadata, as required by the `EPUB Accessibility
+    <https://www.w3.org/TR/epub-a11y-11/>`_ specification. Reading systems and
+    online stores show this information to readers. Here you can set a short
+    summary of the accessibility of the book, the ways the content is
+    presented (text, images, audio, etc.), which of these are enough to
+    understand all of the content, accessibility features such as alternative
+    text for images or a page list, whether the book contains hazards such as
+    flashing content, and the accessibility standard the book conforms to.
+    Only claim what is actually true of the book.
+
+Only the things you actually change are written to the book, and all the
+changes can be undone together with the :guilabel:`Revert to` checkpoint that
+is created.
+
 Filtering style information
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -514,7 +584,7 @@ You can create a checkpoint via :guilabel:`Edit->Create checkpoint`. And go back
 to a previous checkpoint with :guilabel:`Edit->Revert to ...`
 
 The check pointing functionality is in addition to the normal Undo/redo
-mechanism when editing individual files. Checkpoints are particularly useful
+mechanism when editing individual files. Checkpoints are needed
 for when changes are spread over multiple files in the book or when you wish to
 be able to revert a large group of related changes as a whole.
 
@@ -529,10 +599,9 @@ The Live preview panel
 ------------------------
 
 .. image:: images/live-preview.png
-    :alt: The Live preview Panel
+    :alt: The Live preview panel showing a rendering of the current file
     :class: float-left-img
 
-The :guilabel:`File preview` gives you an overview of the various files inside
 The live preview panel shows you the changes you are making live (with a second
 or two of delay). As you edit HTML or CSS files, the preview panel is updated
 automatically to reflect your changes. As you move the cursor around in the
@@ -548,7 +617,7 @@ panel only happens when you are not actively typing in the editor, so as not to
 be distracting or slow you down, waiting for the preview to render.
 
 The preview panel shows you how the text will look when viewed. However, the
-preview panel is not a substitute for actually testing your book an actual
+preview panel is not a substitute for actually testing your book on an actual
 reader device. It is both more, and less capable than an actual reader. It will
 tolerate errors and sloppy markup much better than most reader devices. It will
 also not show you page margins, page breaks and embedded fonts that use font
@@ -590,7 +659,7 @@ The Live CSS panel
 ---------------------
 
 .. image:: images/live_css.png
-    :alt: The Live CSS Panel
+    :alt: The Live CSS panel showing the styles for the current element
     :class: float-left-img
 
 
@@ -634,7 +703,7 @@ Checking the spelling of words in the book
 You can run a spelling checker via :guilabel:`Tools->Check spelling`.
 
 .. image:: images/edit-book-spell.png
-    :alt: The Check Spelling tool
+    :alt: The Check spelling tool
     :align: center
     :class: fit-img
 
@@ -674,6 +743,14 @@ common in your book and to run a simple search and replace on individual words.
     check tool. If you do not do this and continue to use the Spell check tool,
     you could lose the changes you have made in the editor.
 
+.. note::
+   To exclude an individual file from being spell checked when running the
+   spell check tool, you can use the :guilabel:`Exclude files` button or
+   add the following comment just under the opening tag in the file::
+
+        <!-- calibre-no-spell-check -->
+
+
 Adding new dictionaries
 ###########################
 
@@ -683,6 +760,62 @@ Spanish languages. You can install your own dictionaries via
 checker can use dictionaries from the LibreOffice program (in the .oxt
 format). You can download these dictionaries from
 `The LibreOffice Extensions repository <https://extensions.libreoffice.org/?Tags%5B%5D=50>`_.
+
+
+Checking the grammar of the book
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+As you edit HTML files, grammar, style and typography issues are underlined in
+the code view. Right click on an underlined issue to replace its text with one
+of the suggested corrections, ignore the issue for the current session, stop
+checking for that kind of issue altogether, or see an explanation of it.
+Hovering the mouse over an issue shows a description of it, and pressing
+:kbd:`Shift+F8` jumps to the next issue in the current file. Corrections are made only to the text, so
+formatting such as bold and italics is preserved. You can turn off the
+underlining in :guilabel:`Preferences->Editor settings`.
+
+You can see all the issues in the book with :guilabel:`Tools->Check grammar`
+(:kbd:`Shift+F7`). Select an issue to see an explanation of it and the
+suggested replacements, then click :guilabel:`Change` to correct it, or
+:guilabel:`Show in editor` to edit the text yourself. The list of issues can be
+filtered by text and by the type of issue. Issues can be ignored for the
+current session, and rules that find issues you are not interested in can be
+disabled, and enabled again with the :guilabel:`Manage disabled rules`
+button. The :guilabel:`Picky` option also checks for stylistic issues that are
+not errors, such as wordiness.
+
+Grammar checking works for many languages. As with spell checking, the
+language of the text comes from the book's metadata and ``lang`` attributes in
+the HTML files, so books with text in multiple languages are checked
+correctly. The data needed to check a language is downloaded the first time
+it is needed, either by right clicking in the editor and choosing to download
+it, or with the :guilabel:`Check grammar` tool.
+
+For English, there is also a :guilabel:`Deep check` option, which checks
+every sentence with a neural network as well. This finds errors that the
+rules miss, but is slower and needs the neural network to be downloaded. Once
+downloaded, the neural network is also used to put the best suggestions for
+corrections first.
+
+Suggestions for rewriting sentences
+#####################################
+
+For English text, a neural network can suggest rewrites of sentences, to fix
+grammar, make them more fluent or clearer, simpler or more formal, or to
+paraphrase them. Right click on a sentence and choose :guilabel:`Suggest
+rewrites for the sentence` (:kbd:`Ctrl+Shift+F8`) to see suggestions for it,
+or open the :guilabel:`View->Rewrite suggestions` panel to see suggestions for
+the sentence the cursor is in as you move around the text. The changes each
+suggestion makes are highlighted, click :guilabel:`Apply` to rewrite the
+sentence, preserving its formatting. You can choose which kinds of suggestions
+to show. Suggestions are also available in the :guilabel:`Check grammar` tool,
+for the sentence containing the selected issue.
+
+The neural network is downloaded the first time it is needed, it is large,
+about a gigabyte. Generating suggestions is faster on a GPU. By default the GPU
+is used if it is supported and faster than the CPU, in which case versions of
+the neural network for both are downloaded, you can change this in
+:guilabel:`Preferences->Editor settings`.
 
 
 Inserting special characters
@@ -779,11 +912,11 @@ shows summaries of the files, images, links, words, characters and styles used
 in the book. Every line in the report is hot-linked. Double clicking a line
 jumps to the place in the book where that item is used or defined (as
 appropriate). For example, in the :guilabel:`Links` view, you can double click
-entries the :guilabel:`Source` column to jump to where the link is defined and
+entries in the :guilabel:`Source` column to jump to where the link is defined and
 entries in the :guilabel:`Target` column to jump to where the link points.
 
 .. image:: images/reports-ss.png
-    :alt: The Reports tool
+    :alt: The Reports tool with information and statistics about the book
     :align: center
     :class: fit-img
 
@@ -803,11 +936,12 @@ The HTML editor has very sophisticated syntax highlighting. Features include:
     * As you move your cursor through the HTML, the matching HTML tags are
       highlighted, and you can jump to the opening or closing tag with the
       keyboard shortcuts :kbd:`Ctrl+{` and :kbd:`Ctrl+}`. Similarly, you
-      can select the contents of a tag with :kbd:`Ctrl+Alt+T`.
+      can select the contents of a tag with :kbd:`Ctrl+Alt+T` or
+      :kbd:`Ctrl+Shift+T`.
     * Invalid HTML is highlighted with a red underline
     * Spelling errors in the text inside HTML tags and attributes such as title
       are highlighted. The spell checking is language aware, based on the value
-      of the lang attribute of the current tag and the overall book language.
+      of the ``lang`` attribute of the current tag and the overall book language.
     * CSS embedded inside ``<style>`` tags is highlighted
     * Special characters that can be hard to distinguish such as non-breaking
       spaces, different types of hyphens, etc. are highlighted.
@@ -821,7 +955,12 @@ Context sensitive help
 You can right click on an HTML tag name or a CSS property name to get help for that tag or property.
 
 You can also hold down the :kbd:`Ctrl` key and click on any filename inside a link tag
-to open that file in the editor automatically.
+to open that file in the editor automatically. Similarly, :kbd:`Ctrl` clicking
+a class name will take you to the first style rule that matches the tag and class.
+
+Right clicking a class name in an HTML file will allow you to rename the class,
+changing all occurrences of the class throughout the book and all its
+stylesheets.
 
 .. _editor_auto_complete:
 

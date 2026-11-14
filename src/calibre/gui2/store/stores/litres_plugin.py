@@ -1,69 +1,60 @@
-# -*- coding: utf-8 -*-
-from __future__ import absolute_import, division, print_function, unicode_literals
+# License: GPLv3 Copyright: 2011, Roman Mukhin <ramses_ru at hotmail.com>
+
 
 store_version = 2  # Needed for dynamic plugin loading
 
-__license__ = 'GPL 3'
-__copyright__ = '2011, Roman Mukhin <ramses_ru at hotmail.com>'
-__docformat__ = 'restructuredtext en'
-
 import random
 import re
-try:
-    from urllib.parse import quote
-except ImportError:
-    from urllib import quote
-
 from contextlib import closing
-from lxml import etree
-from PyQt5.Qt import QUrl
+from urllib.parse import quote
 
-from calibre import browser, url_slash_cleaner, prints
+from qt.core import QUrl
+
+from calibre import browser, prints, url_slash_cleaner
 from calibre.ebooks.chardet import xml_to_unicode
 from calibre.gui2 import open_url
 from calibre.gui2.store import StorePlugin
 from calibre.gui2.store.basic_config import BasicStoreConfig
 from calibre.gui2.store.search_result import SearchResult
 from calibre.gui2.store.web_store_dialog import WebStoreDialog
+from calibre.utils.xml_parse import safe_xml_fromstring
 
 
 class LitResStore(BasicStoreConfig, StorePlugin):
-    shop_url = u'http://www.litres.ru'
+    shop_url = 'http://www.litres.ru'
     # http://robot.litres.ru/pages/biblio_book/?art=174405
 
-    def open(self, parent=None, detail_item=None, external=False):
+    def open(self, gui=None, parent=None, detail_item=None, external=False) -> None:
 
-        aff_id = u'?' + _get_affiliate_id()
+        aff_id = '?' + _get_affiliate_id()
 
         url = self.shop_url + aff_id
         detail_url = None
         if detail_item:
             # http://www.litres.ru/pages/biblio_book/?art=157074
-            detail_url = self.shop_url + u'/pages/biblio_book/' + aff_id +\
-                u'&art=' + quote(detail_item)
+            detail_url = self.shop_url + '/pages/biblio_book/' + aff_id + '&art=' + quote(detail_item)
 
         if external or self.config.get('open_external', False):
-            open_url(QUrl(url_slash_cleaner(detail_url if detail_url else url)))
+            open_url(QUrl(url_slash_cleaner(detail_url or url)))
         else:
             d = WebStoreDialog(self.gui, url, parent, detail_url)
             d.setWindowTitle(self.name)
             d.set_tags(self.config.get('tags', ''))
-            d.exec_()
+            d.exec()
 
     def search(self, query, max_results=10, timeout=60):
-        search_url = u'http://robot.litres.ru/pages/catalit_browser/?checkpoint=2000-01-02&'\
-        'search=%s&limit=0,%s'
+        search_url = 'http://robot.litres.ru/pages/catalit_browser/?checkpoint=2000-01-02&search=%s&limit=0,%s'
         search_url = search_url % (quote(query), max_results)
 
         counter = max_results
         br = browser()
-        br.addheaders.append(['Accept-Encoding','gzip'])
+        br.addheaders.append(['Accept-Encoding', 'gzip'])  # ty: ignore[invalid-argument-type]
 
         with closing(br.open(search_url, timeout=timeout)) as r:
-            ungzipResponse(r,br)
-            raw= xml_to_unicode(r.read(), strip_encoding_pats=True, assume_utf8=True)[0]
+            ungzipResponse(r, br)
+            raw = xml_to_unicode(r.read(), strip_encoding_pats=True, assume_utf8=True)[0]
 
-            doc = etree.fromstring(raw, parser=etree.XMLParser(recover=True, no_network=True, resolve_entities=False))
+            doc = safe_xml_fromstring(raw)
             for data in doc.xpath('//*[local-name() = "fb2-book"]'):
                 if counter <= 0:
                     break
@@ -72,12 +63,12 @@ class LitResStore(BasicStoreConfig, StorePlugin):
                 try:
                     sRes = self.create_search_result(data)
                 except Exception as e:
-                    prints('ERROR: cannot parse search result #%s: %s'%(max_results - counter + 1, e))
+                    prints(f'ERROR: cannot parse search result #{max_results - counter + 1}: {e}')
                     continue
                 yield sRes
 
-    def get_details(self, search_result, timeout=60):
-        pass
+    def get_details(self, search_result, timeout=60) -> bool:
+        return False
 
     def create_search_result(self, data):
         xp_template = 'normalize-space(@{0})'
@@ -87,10 +78,8 @@ class LitResStore(BasicStoreConfig, StorePlugin):
         sRes.detail_item = data.xpath(xp_template.format('hub_id'))
         sRes.title = data.xpath('string(.//title-info/book-title/text()|.//publish-info/book-name/text())')
         # aut = concat('.//title-info/author/first-name', ' ')
-        authors = data.xpath('.//title-info/author/first-name/text()|'
-        './/title-info/author/middle-name/text()|'
-        './/title-info/author/last-name/text()')
-        sRes.author = u' '.join(map(type(u''), authors))
+        authors = data.xpath('.//title-info/author/first-name/text()|.//title-info/author/middle-name/text()|.//title-info/author/last-name/text()')
+        sRes.author = ' '.join(map(str, authors))
         sRes.price = data.xpath(xp_template.format('price'))
         # cover vs cover_preview
         sRes.cover_url = data.xpath(xp_template.format('cover_preview'))
@@ -103,25 +92,28 @@ class LitResStore(BasicStoreConfig, StorePlugin):
 
 
 def format_price_in_RUR(price):
-    '''
+    """
     Try to format price according ru locale: '12 212,34 руб.'
     @param price: price in format like 25.99
     @return: formatted price if possible otherwise original value
     @rtype: unicode
-    '''
-    if price and re.match(r"^\d*?\.\d*?$", price):
+    """
+    if price and re.match(r'^\d*?\.\d*?$', price):
         try:
-            price = u'{:,.2F} \u20BD'.format(float(price))  # \u20BD => руб.
+            price = f'{float(price):,.2F} \u20bd'  # \u20bd => руб.
             price = price.replace(',', ' ').replace('.', ',', 1)
-        except:
+        except Exception:
             pass
     return price
 
 
-def ungzipResponse(r,b):
+def ungzipResponse(r, b) -> None:
     headers = r.info()
-    if headers.get('Content-Encoding', '')=='gzip':
-        import gzip
+    if headers.get('Content-Encoding', '') == 'gzip':
+        try:
+            from compression import gzip
+        except ImportError:
+            import gzip
         gz = gzip.GzipFile(fileobj=r, mode='rb')
         data = gz.read()
         gz.close()
@@ -131,21 +123,21 @@ def ungzipResponse(r,b):
 
 
 def _get_affiliate_id():
-    aff_id = u'3623565'
+    aff_id = '3623565'
     # Use Kovid's affiliate id 30% of the time.
     if random.randint(1, 10) in (1, 2, 3):
-        aff_id = u'4084465'
-    return u'lfrom=' + aff_id
+        aff_id = '4084465'
+    return 'lfrom=' + aff_id
 
 
 def _parse_ebook_formats(formatsStr):
-    '''
+    """
     Creates a set with displayable names of the formats
 
     :param formatsStr: string with comma separated book formats
            as it provided by ozon.ru
     :return: a list with displayable book formats
-    '''
+    """
 
     formatsUnstruct = formatsStr.lower()
     formats = set()

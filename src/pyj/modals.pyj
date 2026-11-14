@@ -6,31 +6,124 @@ from elementmaker import E
 from gettext import gettext as _
 
 from ajax import ajax, ajax_send
+from book_list.globals import get_session_data
 from book_list.theme import get_color, get_font_size
-from dom import add_extra_css, build_rule, clear, set_css, svgicon, unique_id
+from dom import add_extra_css, build_rule, clear, ensure_id, set_css, svgicon, unique_id
 from popups import MODAL_Z_INDEX
 from utils import safe_set_inner_html
 from widgets import create_button
-from book_list.globals import get_session_data
 
 modal_container = None
 modal_count = 0
+SEPARATOR_CLASS = 'calibre-dialog-separator'
 
-add_extra_css(def():
+add_extra_css(def ():
+    modal_max = 'min(48rem, calc(100vw - 2rem))'
     style = build_rule(
         '#modal-container > div > a:hover',
         color=get_color('dialog-foreground') + ' !important',
         background_color=get_color('dialog-background') + ' !important'
     )
     style += build_rule(
-        '.button-box', display='flex', justify_content='flex-end', padding='1rem 0rem', overflow='hidden'
+        '#modal-container',
+        overflow_x='auto',
+        overflow_y='auto',
+        overscroll_behavior_x='none',
+        overscroll_behavior_y='contain',
+        touch_action='pan-x pan-y',
+        padding=(
+            'max(1rem, env(safe-area-inset-top, 0px)) max(1rem, env(safe-area-inset-right, 0px))'
+            ' max(1rem, env(safe-area-inset-bottom, 0px)) max(1rem, env(safe-area-inset-left, 0px))'
+        ),
+        box_sizing='border-box',
     )
-    style += build_rule('.button-box .calibre-push-button', transform_origin='right')
+    style += build_rule(
+        '#modal-container > div',
+        # Must not clip the absolutely positioned close control (it sits slightly outside the box)
+        overflow_x='visible',
+        overflow_y='visible',
+        width='max-content',
+        min_width='0',
+        max_width=modal_max,
+        box_sizing='border-box',
+    )
+    style += build_rule(
+        '.' + SEPARATOR_CLASS, padding_top='1em', margin_top='1em', border_top='var(--calibre-border-style)')
+    style += build_rule(
+        '.modal_height_container',
+        min_width='0',
+        max_width='100%',
+        overflow_wrap='anywhere',
+        word_break='break-word',
+        overflow_x='auto',
+        overflow_y='auto',
+        overscroll_behavior_x='none',
+        touch_action='pan-x pan-y',
+    )
+    style += build_rule(
+        '#modal-container .modal_height_container pre, #modal-container .modal_height_container code',
+        white_space='pre-wrap',
+        overflow_wrap='anywhere',
+        word_break='break-word',
+    )
+    style += build_rule(
+        '#modal-container .modal_height_container img, #modal-container .modal_height_container iframe',
+        max_width='100%',
+        height='auto',
+    )
+    style += build_rule(
+        '#modal-container .modal_height_container table',
+        max_width='100%',
+        box_sizing='border-box',
+    )
+    style += build_rule(
+        '#modal-container .modal_height_container th, #modal-container .modal_height_container td',
+        overflow_wrap='anywhere',
+        word_break='break-word',
+    )
+    style += build_rule(
+        '#modal-container .modal_height_container input:not([type="checkbox"]):not([type="radio"]):not([type="color"]):not([type="file"]),' +
+        '#modal-container .modal_height_container textarea, #modal-container .modal_height_container select',
+        max_width='100%',
+        box_sizing='border-box',
+    )
+    std_box = '#modal-container .button-box:not(.button-box--wrap-chips)'
+    chips_box = '#modal-container .button-box.button-box--wrap-chips'
+    style += build_rule(
+        '#modal-container .button-box',
+        display='flex', align_items='stretch',
+        flex_wrap='wrap', gap='0.5rem',
+        padding='1rem 0rem', min_width='0',
+    )
+    # wrap-reverse and column-reverse put the last button, which is the
+    # primary action, on top when the buttons do not fit on one line
+    style += build_rule(std_box, justify_content='space-between', flex_wrap='wrap-reverse')
+    style += build_rule(
+        std_box + ' > a.calibre-push-button',
+        flex='1 1 auto', min_width='0', justify_content='center',
+    )
+    # :only-of-type is a fallback for browsers that do not support :has()
+    style += '@media not all and (max-width: 420px) {\n'
+    for lone_button in [
+        std_box + ' > a.calibre-push-button:only-of-type',
+        std_box + ':not(:has(> a.calibre-push-button ~ a.calibre-push-button)) > a.calibre-push-button'
+    ]:
+        style += build_rule(lone_button, flex='0 1 auto', margin_left='auto')
+    style += '}\n'
+    style += '@media (max-width: 420px) {\n'
+    style += build_rule(std_box, flex_direction='column-reverse')
+    style += '}\n'
+    style += build_rule(chips_box, justify_content='flex-start')
+    style += build_rule(chips_box + ' > a.calibre-push-button', flex='0 1 auto')
+    style += build_rule(
+        '#modal-container > div > a:last-child',
+        z_index='2',
+    )
     return style
 )
 
-class Modal:
 
+class Modal:
     def __init__(self, create_func, on_close, show_close, onkeydown):
         nonlocal modal_count
         self.create_func, self.on_close, self.show_close = create_func, on_close, show_close
@@ -38,60 +131,132 @@ class Modal:
         modal_count += 1
         self.id = modal_count
 
-class ModalContainer:
 
+class ModalContainer:
     def __init__(self):
         div = E.div(id='modal-container', tabindex='0',
             E.div(  # popup
-                E.div(),  # content area
-                E.a(svgicon('close'), title=_('Close'))
+                E.div(class_='modal_height_container'),  # content area
+                E.a(svgicon('close'), title=_('Close'), aria_label=_('Close'), href='javascript: void(0)', role='button',
+                    onclick=self.close_current_modal.bind(self)),
+                # The popup is a dialog, named by its title, that gets focus
+                # when shown, so that screen readers announce it
+                role='dialog', aria_modal='true', tabindex='-1', style='outline: none',
             )
         )
         div.addEventListener('keydown', self.onkeydown.bind(self), {'passive': False})
+        self.container = div
         document.body.appendChild(div)
 
         # Container style
         set_css(div,
-            position='fixed', top='0', right='0', bottom='0', left='0', # Stretch over entire window
-            background_color='rgba(0,0,0,0.8)', z_index=MODAL_Z_INDEX + '',
-            display='none', text_align='center', user_select='none'
+            position='fixed', top='0', right='0', bottom='0', left='0',  # Stretch over entire window
+            background_color='rgba(0,0,0,0.5)', backdrop_filter='blur(2px)', webkit_backdrop_filter='blur(2px)',
+            z_index=MODAL_Z_INDEX + '',
+            display='none', user_select='none', justify_content='center', align_items='center',
+            overscroll_behavior_x='none', overscroll_behavior_y='contain',
         )
 
-        # Popup style
+        # Popup style (no background gradient — solid dialog-background for readability)
+        popup_max = 'min(48rem, calc(100vw - 2rem))'
         set_css(div.firstChild,
-            position='relative', display='inline-block', top='50vh', transform='translateY(-50%)',
-            min_width='25vw', max_width='70vw',  # Needed for iPhone 5
+            position='relative', display='inline-block',
+            min_width='min(16rem, calc(100vw - 2rem))', max_width=popup_max,
+            overflow_x='visible', overflow_y='visible', box_sizing='border-box',
             border_radius='1em', padding='1em 2em', margin_right='1em', margin_left='1em',
-            background=get_color('dialog-background'), color=get_color('dialog-foreground'),
-            background_image=get_color('dialog-background-image'), get_color('dialog-background'), get_color('dialog-background2')
+            background_color=get_color('dialog-background'),
+            color=get_color('dialog-foreground'),
+            background_image=get_color('dialog-background-image'),
+            box_shadow='var(--calibre-shadow-dialog)',
+            border='var(--calibre-border-style)',
         )
 
         # Close button style
         set_css(div.firstChild.lastChild,
             font_size='1.5em', line_height='100%', cursor='pointer', position='absolute',
             right='-0.5em', top='-0.5em', width='1em', height='1em',
-            background_color=get_color('window-foreground'), color=get_color('window-background'), display='inline-box',
-            border_radius='50%', padding='4px', text_align='center', box_shadow='1px 1px 3px black'
+            background_color=get_color('window-foreground'), color=get_color('window-background'),
+            border_radius='50%', padding='4px', text_align='center', box_shadow='var(--calibre-shadow-small)',
+            z_index='2',
         )
-        div.firstChild.lastChild.addEventListener('click', def(event): event.preventDefault(), self.close_current_modal(event);)
-
         # Content container style
-        set_css(div.firstChild.firstChild, user_select='text', max_height='60vh', overflow='auto')
+        # need padding: 1px to avoid scrollbar in modal on Qt WebEngine 6.3
+        set_css(div.firstChild.firstChild, user_select='text', max_height='min(60vh, calc(100vh - 6rem))',
+            overflow_x='auto', overflow_y='auto', overscroll_behavior_x='none', padding='1px', min_width='0', max_width='100%')
 
-        self.modals = v'[]'
+        self.modals = []
         self.current_modal = None
+        self.previously_focused = None
         self.hide = self.close_current_modal.bind(self)
 
     @property
     def modal_container(self):
-        return document.getElementById('modal-container')
+        return self.container
 
     def show_modal(self, create_func, on_close=None, show_close=True, onkeydown=None):
+        if self.current_modal is None and not self.modals.length:
+            # Remember where focus was so it can be restored when the last modal closes
+            active = document.activeElement
+            self.previously_focused = None if active is document.body else active
         self.modals.push(Modal(create_func, on_close, show_close, onkeydown))
         modal_id = self.modals[-1].id
         self.update()
-        window.setTimeout(def(): self.modal_container.focus();, 0)
+        window.setTimeout(def ():
+            # Leave focus alone if the dialog has already moved it to one of
+            # its controls
+            if not self.dialog.contains(document.activeElement):
+                self.dialog.focus()
+        , 0)
         return modal_id
+
+    @property
+    def dialog(self):
+        return self.container.firstChild
+
+    def label_dialog(self):
+        # Name the dialog by its title and describe it by its message, if any
+        content = self.dialog.firstChild
+
+        def refer_to(attr, q, prefix):
+            if q:
+                self.dialog.setAttribute(attr, ensure_id(q, prefix))
+            else:
+                self.dialog.removeAttribute(attr)
+
+        refer_to('aria-labelledby', content.querySelector('h1, h2, h3, [data-dialog-title]'), 'modal-title')
+        refer_to('aria-describedby', content.querySelector('[data-dialog-description]'), 'modal-description')
+
+    def focusable_elements(self):
+        ans = []
+        for el in self.dialog.querySelectorAll('a[href], button, input, select, textarea, iframe, [tabindex]'):
+            if el is self.dialog or el.disabled or el.getAttribute('tabindex') is '-1' or el.type is 'hidden':
+                continue
+            # Skip controls that are not shown, such as collapsed details
+            # or the close button of dialogs that cannot be closed
+            if not el.getClientRects().length or window.getComputedStyle(el).visibility is 'hidden':
+                continue
+            ans.push(el)
+        return ans
+
+    def keep_tab_in_dialog(self, event):
+        # Tab and Shift+Tab wrap around within the dialog instead of moving
+        # focus to the page behind it
+        els = self.focusable_elements()
+        active = document.activeElement
+        inside = self.dialog.contains(active) and active is not self.dialog
+        target = None
+        if not els.length:
+            target = self.dialog
+        else:
+            first, last = els[0], els[els.length - 1]
+            if event.shiftKey:
+                if not inside or active is first:
+                    target = last
+            elif (not inside and active is not self.dialog) or active is last:
+                target = first
+        if target:
+            event.preventDefault(), event.stopPropagation()
+            target.focus()
 
     def hide_modal(self, modal_id):
         if self.current_modal is not None and self.current_modal.id is modal_id:
@@ -114,8 +279,9 @@ class ModalContainer:
             except:
                 self.current_modal = None
                 raise
+            self.label_dialog()
             if c.style.display is 'none':
-                set_css(c, display='block')
+                c.style.display = 'flex'
             c.firstChild.lastChild.style.visibility = 'visible' if self.current_modal.show_close else 'hidden'
 
     def clear_current_modal(self):
@@ -124,8 +290,17 @@ class ModalContainer:
         clear(c.firstChild.firstChild)
         if self.modals.length is 0:
             set_css(c, display='none')
+            self.restore_focus()
         else:
             self.update()
+
+    def restore_focus(self):
+        prev, self.previously_focused = self.previously_focused, None
+        active = document.activeElement
+        # Only restore if focus was left in the modal or lost, never steal it
+        # from somewhere the modal's actions may have deliberately moved it
+        if prev and prev.isConnected and (not active or active is document.body or self.modal_container.contains(active)):
+            prev.focus()
 
     def close_current_modal(self, event):
         if self.current_modal is not None:
@@ -138,6 +313,10 @@ class ModalContainer:
             self.close_current_modal()
 
     def onkeydown(self, event):
+        if event.key is 'Tab' and not event.altKey and not event.ctrlKey and not event.metaKey:
+            if self.current_modal is not None:
+                self.keep_tab_in_dialog(event)
+            return
         if self.current_modal is not None and self.current_modal.onkeydown:
             return self.current_modal.onkeydown(event, self.clear_current_modal.bind(self))
         if (event.key is 'Escape' or event.key is 'Esc') and not event.altKey and not event.ctrlKey and not event.metaKey and not event.shiftKey:
@@ -145,12 +324,19 @@ class ModalContainer:
             self.close_current_modal(event)
 
 
-def create_simple_dialog_markup(title, msg, details, icon, prefix, parent):
+def create_simple_dialog_markup(title, msg, details, icon, prefix, icon_color, parent):
     details = details or ''
-    show_details = E.a(class_='blue-link', style='padding-top:1em; display:inline-block; margin-left: auto', _('Show details'))
-    show_details.addEventListener('click', def():
+    icon_color = icon_color or get_color('window-error-foreground')
+    show_details = E.a(class_='blue-link', style='padding-top:1em; display:inline-block; margin-left: auto', _('Show details'),
+                       href='javascript: void(0)', role='button')
+    show_details.addEventListener('click', def (ev):
+        ev.preventDefault()
         show_details.style.display = 'none'
-        show_details.nextSibling.style.display = 'block'
+        details_div = show_details.nextSibling
+        details_div.style.display = 'block'
+        # The link is hidden once clicked, so move focus to the details,
+        # rather than losing it, so that they are read out
+        details_div.focus()
     )
     is_html_msg = /<[a-zA-Z]/.test(msg)
     html_container = E.div()
@@ -165,38 +351,38 @@ def create_simple_dialog_markup(title, msg, details, icon, prefix, parent):
         prefix = E.span(' ' + prefix + ' ', style='white-space:pre; font-variant: small-caps')
     else:
         prefix = '\xa0'
-    parent.appendChild(
+    parent.appendChild(E.div(
+        style='max-width:100%; min-width:0; box-sizing:border-box; text-align:left; overflow-wrap:anywhere; word-break:break-word',
+        E.h2(
+            E.span(svgicon(icon), style=f'color:{icon_color}'), prefix, title,
+            style='font-weight: bold; font-size: ' + get_font_size('title') + '; overflow-wrap:anywhere; word-break:break-word',
+        ),
         E.div(
-            style='max-width:40em; text-align: left',
-            E.h2(
-                E.span(svgicon(icon), style='color:red'), prefix, title,
-                style='font-weight: bold; font-size: ' + get_font_size('title')
-            ),
-            E.div((html_container if is_html_msg else msg), style='padding-top: 1em; margin-top: 1em; border-top: 1px solid currentColor'),
-            E.div(style='display: ' + ('block' if details else 'none'),
-                show_details,
-                E.div(details_container,
-                        style='display:none; white-space:pre-wrap; font-size: smaller; margin-top: 1em; border-top: solid 1px currentColor; padding-top: 1em'
-                )
-            )
-        )
-    )
+            (html_container if is_html_msg else msg), data_dialog_description='1',
+            class_=SEPARATOR_CLASS, style='min-width:0; overflow-wrap:anywhere; word-break:break-word',
+        ),
+        E.div(
+            style='display: ' + ('block' if details else 'none'),
+            show_details,
+            E.div(details_container, class_=SEPARATOR_CLASS, tabindex='-1', style='display:none; white-space:pre-wrap; font-size: smaller; outline: none'),
+        ),
+    ))
 
 
-def create_simple_dialog(title, msg, details, icon, prefix, on_close=None):
-    show_modal(create_simple_dialog_markup.bind(None, title, msg, details, icon, prefix), on_close=on_close)
+def create_simple_dialog(title, msg, details, icon, prefix, on_close=None, icon_color=None):
+    show_modal(create_simple_dialog_markup.bind(None, title, msg, details, icon, prefix, icon_color), on_close=on_close)
 
 
 def create_custom_dialog(title, content_generator_func, on_close=None, onkeydown=None):
     def create_func(parent, close_modal):
         content_div = E.div()
-        content_generator_func(content_div, close_modal)
         parent.appendChild(
             E.div(
-                style='max-width:60em; text-align: left',
-                E.h2(title, style='font-weight: bold; font-size: ' + get_font_size('title')),
-                E.div(content_div, style='padding-top: 1em; margin-top: 1em; border-top: 1px solid currentColor'),
+                style='max-width:100%; min-width:0; box-sizing:border-box; text-align:left; overflow-wrap:anywhere; word-break:break-word',
+                E.h2(title, style='font-weight: bold; font-size: ' + get_font_size('title') + '; overflow-wrap:anywhere; word-break:break-word'),
+                E.div(content_div, class_=SEPARATOR_CLASS, style='min-width:0'),
         ))
+        content_generator_func(content_div, close_modal)
     show_modal(create_func, on_close=on_close, onkeydown=onkeydown)
 
 
@@ -221,19 +407,19 @@ def get_text_dialog(title, callback, initial_text=None, msg=None, rows=12):
             keyaction(False, close_modal)
 
     create_custom_dialog(
-        title, def(parent, close_modal):
+        title, def (parent, close_modal):
             parent.appendChild(E.div(
-                E.textarea(initial_text or '', placeholder=msg or '', id=cid, rows=rows + '', style='min-width: min(40rem, 60vw)'),
+                E.textarea(initial_text or '', placeholder=msg or '', id=cid, rows=rows + '',
+                           style='width:100%; max-width:100%; min-width:0; box-sizing:border-box; resize:vertical'),
                 E.div(class_='button-box',
+                    create_button(_('Cancel'), 'close', keyaction.bind(None, False, close_modal)),
                     create_button(_('OK'), 'check', keyaction.bind(None, True, close_modal), highlight=True),
-                    '\xa0',
-                    create_button(_('Cancel'), 'close', keyaction.bind(None, False, close_modal))
                 ),
             ))
-            window.setTimeout(def(): parent.querySelector('textarea').focus();, 10)
+            window.setTimeout(def (): parent.querySelector('textarea').focus();, 10)
         ,
-        on_close=keyaction.bind(None, False, None),
-        onkeydown=on_keydown
+        on_close = keyaction.bind(None, False, None),
+        onkeydown = on_keydown
     )
 
 
@@ -267,6 +453,9 @@ def question_dialog(
             event.preventDefault(), event.stopPropagation()
             keyaction(False, close_modal)
         if event.key is 'Enter' or event.key is 'Return' or event.key is 'Space':
+            if event.target and event.target.closest and event.target.closest('a[href], button, [role=button]'):
+                # Let the focused button, which can be No, handle it
+                return
             event.preventDefault(), event.stopPropagation()
             keyaction(True, close_modal)
 
@@ -284,34 +473,34 @@ def question_dialog(
         skip_box.style.display = 'none'
 
     create_custom_dialog(
-        title, def(parent, close_modal):
+        title, def (parent, close_modal):
             parent.appendChild(E.div(
-                E.div(msg),
+                E.div(msg, data_dialog_description='1'),
                 skip_box,
                 E.div(class_='button-box',
+                    create_button(no_text, 'close', keyaction.bind(None, False, close_modal)),
                     create_button(yes_text, 'check', keyaction.bind(None, True, close_modal), highlight=True),
-                    '\xa0',
-                    create_button(no_text, 'close', keyaction.bind(None, False, close_modal))
                 ))
             )
         ,
-        on_close=keyaction.bind(None, False, None),
-        onkeydown=on_keydown
+        on_close = keyaction.bind(None, False, None),
+        onkeydown = on_keydown
     )
-
 
 
 def create_progress_dialog(msg, on_close):
     msg = msg or _('Loading, please wait...')
-    pbar, msg_div = E.progress(style='display:inline-block'), E.div(msg, style='text-align:center; padding-top:1ex')
+    msg_div = E.div(msg, style='text-align:center; padding-top:1ex', data_dialog_title='1')
+    pbar = E.progress(style='display:inline-block', aria_labelledby=ensure_id(msg_div, 'progress-dialog-msg'))
+
     def create_func(parent):
-        parent.appendChild(E.div(style='text-align: center', pbar, msg_div))
+        parent.appendChild(E.div(style='text-align: center; max-width:100%; min-width:0; box-sizing:border-box', pbar, msg_div))
     show_close = on_close is not None
     modal_id = show_modal(create_func, on_close, show_close)
     return {
-        'close': def(): modal_container.hide_modal(modal_id);,
-        'update_progress': def(amount, total): pbar.max, pbar.value = total, amount;,
-        'set_msg': def(new_msg): safe_set_inner_html(msg_div, new_msg);,
+        'close': def (): modal_container.hide_modal(modal_id);,
+        'update_progress': def (amount, total): pbar.max, pbar.value = total, amount;,
+        'set_msg': def (new_msg): safe_set_inner_html(msg_div, new_msg);,
     }
 
 # def test_progress():
@@ -334,18 +523,36 @@ def create_progress_dialog(msg, on_close):
 # def test_error():
 #     error_dialog(
 #         'Hello, world!',
-#         'Some long text to test rendering/line breaking in error dialogs that contain lots of text like this test error dialog from hell in a handbasket with fruits and muppets making a scene.',
+#         'Some long text to test rendering/line breaking in error dialogs that contain lots of text'
+#         ' like this test error dialog from hell in a handbasket with fruits and muppets making a scene.',
 #         ['a word ' for i in range(10000)].join(' ')
 #     )
+
 
 def create_modal_container():
     nonlocal modal_container
     if modal_container is None:
         modal_container = ModalContainer()
+    elif not modal_container.container.isConnected:
+        # The document body was replaced, for example between tests, so
+        # discard any modals that were shown in the old document
+        modal_container.modals = []
+        modal_container.current_modal = None
+        modal_container.previously_focused = None
+        c = modal_container.container
+        clear(c.firstChild.firstChild)
+        c.style.display = 'none'
+        document.body.appendChild(c)
     # window.setTimeout(def():
     #     document.getElementById('books-view-1').addEventListener('click', test_progress)
     # , 10)
     return modal_container
+
+
+def is_modal_visible():
+    # True while a dialog is shown in the current document
+    return bool(modal_container and modal_container.current_modal and modal_container.container.isConnected)
+
 
 def show_modal(create_func, on_close=None, show_close=True, onkeydown=None):
     return modal_container.show_modal(create_func, on_close, show_close, onkeydown)
@@ -358,8 +565,14 @@ def close_all_modals():
 def error_dialog(title, msg, details=None, on_close=None):
     create_simple_dialog(title, msg, details, 'bug', _('Error:'), on_close)
 
+
 def warning_dialog(title, msg, details=None, on_close=None):
     create_simple_dialog(title, msg, details, 'warning', _('Warning:'), on_close)
+
+
+def info_dialog(title, msg, details=None, on_close=None):
+    create_simple_dialog(title, msg, details, 'check', '', on_close, icon_color=get_color('window-success-foreground'))
+
 
 def progress_dialog(msg, on_close=None):
     # Show a modal dialog with a progress bar and an optional close button.
@@ -370,13 +583,16 @@ def progress_dialog(msg, on_close=None):
     # Call close() once the task being performed is finished
     return create_progress_dialog(msg, on_close)
 
+
 def ajax_progress_dialog(path, on_complete, msg, extra_data_for_callback=None, **kw):
     pd = None
+
     def on_complete_callback(event_type, xhr, ev):
         nonlocal pd
         pd.close()
         pd = undefined
         return on_complete(event_type, xhr, ev)
+
     def on_progress_callback(loaded, total, xhr):
         pd.update_progress(loaded, total)
     xhr = ajax(path, on_complete_callback, on_progress=on_progress_callback, **kw)
@@ -385,13 +601,16 @@ def ajax_progress_dialog(path, on_complete, msg, extra_data_for_callback=None, *
     xhr.send()
     return xhr, pd
 
+
 def ajax_send_progress_dialog(path, data, on_complete, msg, **kw):
     pd = None
+
     def on_complete_callback(event_type, xhr, ev):
         nonlocal pd
         pd.close()
         pd = undefined
         return on_complete(event_type, xhr, ev)
+
     def on_progress_callback(loaded, total, xhr):
         pd.update_progress(loaded, total)
     xhr = ajax_send(path, data, on_complete_callback, on_progress=on_progress_callback, **kw)

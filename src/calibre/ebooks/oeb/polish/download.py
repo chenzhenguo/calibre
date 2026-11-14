@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2016, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-import cgi
 import mimetypes
 import os
 import posixpath
@@ -15,18 +12,37 @@ from functools import partial
 from io import BytesIO
 from multiprocessing.dummy import Pool
 from tempfile import NamedTemporaryFile
+from typing import IO, TYPE_CHECKING, Literal, TypeGuard
+from urllib.parse import urlparse
 
-from calibre import as_unicode, sanitize_file_name as sanitize_file_name_base
+from lxml import etree
+
+from calibre import as_unicode, browser
+from calibre import sanitize_file_name as sanitize_file_name_base
+from calibre.constants import iswindows
 from calibre.ebooks.oeb.base import OEB_DOCS, OEB_STYLES, barename, iterlinks
 from calibre.ebooks.oeb.polish.utils import guess_type
 from calibre.ptempfile import TemporaryDirectory
 from calibre.web import get_download_filename_from_response
-from polyglot.builtins import iteritems
-from polyglot.urllib import urlopen, urlparse
 from polyglot.binary import from_base64_bytes
+from polyglot.urllib import unquote
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Iterator, Mapping
+    from urllib.parse import ParseResult
+
+    from lxml.etree import _Element
+
+    from calibre.ebooks.oeb.polish.container import Container
+    from calibre.web import DownloadResponse
+
+    # Called with (url, bytes_downloaded, total_size)
+    type ProgressReport = Callable[[str, int, int], object]
+    # Either (True, (url, suggested_filename, downloaded_file_path, mime_type)) or (False, (url, error_message))
+    type DownloadResult = tuple[Literal[True], tuple[str, str, str, str]] | tuple[Literal[False], tuple[str, str]]
 
 
-def is_external(url):
+def is_external(url: str | None) -> TypeGuard[str]:
     try:
         purl = urlparse(url)
     except Exception:
@@ -34,16 +50,20 @@ def is_external(url):
     return purl.scheme in ('http', 'https', 'file', 'ftp', 'data')
 
 
-def iterhtmllinks(container, name):
-    for el, attr, link, pos in iterlinks(container.parsed(name)):
-        tag = barename(el.tag).lower()
+def iterhtmllinks(container: Container, name: str) -> Iterator[tuple[_Element, str | None, str]]:
+    root = container.parsed(name)
+    assert isinstance(root, etree._Element)  # only called for HTML files, parsed into lxml trees
+    for el, attr, link, pos in iterlinks(root):
+        eltag = el.tag
+        assert isinstance(eltag, str)  # iterlinks() only yields elements from iter('*')
+        tag = barename(eltag).lower()
         if tag != 'a' and is_external(link):
             yield el, attr, link
 
 
-def get_external_resources(container):
-    ans = defaultdict(list)
-    for name, media_type in iteritems(container.mime_map):
+def get_external_resources(container: Container) -> dict[str, list[str]]:
+    ans: defaultdict[str, list[str]] = defaultdict(list)
+    for name, media_type in container.mime_map.items():
         if container.has_name(name) and container.exists(name):
             if media_type in OEB_DOCS:
                 for el, attr, link in iterhtmllinks(container, name):
@@ -55,37 +75,38 @@ def get_external_resources(container):
     return dict(ans)
 
 
-def get_filename(original_url_parsed, response):
+def get_filename(original_url_parsed: ParseResult, response: DownloadResponse) -> str:
     ans = get_download_filename_from_response(response) or posixpath.basename(original_url_parsed.path) or 'unknown'
-    ct = response.info().get('Content-Type', '')
-    if ct:
-        ct = cgi.parse_header(ct)[0].lower()
-        if ct:
-            mt = guess_type(ans)
-            if mt != ct:
-                exts = mimetypes.guess_all_extensions(ct)
-                if exts:
-                    ans += exts[0]
+    headers = response.info()
+    try:
+        ct = headers.get_params()[0][0].lower()  # ty: ignore[not-subscriptable] a None result raises TypeError, handled below
+    except Exception:
+        ct = ''
+    if ct and ct != 'application/octet-stream':
+        mt = guess_type(ans)
+        if mt != ct:
+            exts = mimetypes.guess_all_extensions(ct)
+            if exts:
+                ans += exts[0]
     return ans
 
 
-def get_content_length(response):
+def get_content_length(response: DownloadResponse) -> int:
     cl = response.info().get('Content-Length')
     try:
-        return int(cl)
+        return int(cl)  # ty: ignore[invalid-argument-type] a missing header raises TypeError, handled below
     except Exception:
         return -1
 
 
-class ProgressTracker(object):
-
-    def __init__(self, fobj, url, sz, progress_report):
+class ProgressTracker:
+    def __init__(self, fobj: IO[bytes], url: str, sz: int, progress_report: ProgressReport) -> None:
         self.fobj = fobj
         self.progress_report = progress_report
         self.url, self.sz = url, sz
         self.close, self.flush, self.name = fobj.close, fobj.flush, fobj.name
 
-    def write(self, x):
+    def write(self, x: bytes) -> int:
         ret = self.fobj.write(x)
         try:
             self.progress_report(self.url, self.fobj.tell(), self.sz)
@@ -94,22 +115,26 @@ class ProgressTracker(object):
         return ret
 
 
-def sanitize_file_name(x):
+def sanitize_file_name(x: str) -> str:
     from calibre.ebooks.oeb.polish.check.parsing import make_filename_safe
+
     x = sanitize_file_name_base(x)
     while '..' in x:
         x = x.replace('..', '.')
     return make_filename_safe(x)
 
 
-def download_one(tdir, timeout, progress_report, data_uri_map, url):
+def download_one(tdir: str, timeout: float, progress_report: ProgressReport, data_uri_map: dict[bytes, str], url: str) -> DownloadResult:
     try:
         purl = urlparse(url)
         data_url_key = None
         with NamedTemporaryFile(dir=tdir, delete=False) as df:
             if purl.scheme == 'file':
-                src = lopen(purl.path, 'rb')
-                filename = os.path.basename(src)
+                path = unquote(purl.path)
+                if iswindows and path.startswith('/'):
+                    path = path[1:]
+                src = open(path, 'rb')  # ruff: ignore[open-file-with-context-handler]
+                filename = os.path.basename(path)
                 sz = (src.seek(0, os.SEEK_END), src.tell(), src.seek(0))[1]
             elif purl.scheme == 'data':
                 prefix, payload = purl.path.split(',', 1)
@@ -119,12 +144,6 @@ def download_one(tdir, timeout, progress_report, data_uri_map, url):
                     payload = from_base64_bytes(payload)
                 else:
                     payload = payload.encode('utf-8')
-                seen_before = data_uri_map.get(payload)
-                if seen_before is not None:
-                    return True, (url, filename, seen_before, guess_type(seen_before))
-                data_url_key = payload
-                src = BytesIO(payload)
-                sz = len(payload)
                 ext = 'unknown'
                 for x in parts:
                     if '=' not in x and '/' in x:
@@ -133,8 +152,14 @@ def download_one(tdir, timeout, progress_report, data_uri_map, url):
                             ext = exts[0]
                             break
                 filename = 'data-uri.' + ext
+                seen_before = data_uri_map.get(payload)
+                if seen_before is not None:
+                    return True, (url, filename, seen_before, guess_type(seen_before))
+                data_url_key = payload
+                src = BytesIO(payload)
+                sz = len(payload)
             else:
-                src = urlopen(url, timeout=timeout)
+                src = browser().open(url, timeout=timeout)
                 filename = get_filename(purl, src)
                 sz = get_content_length(src)
             progress_report(url, 0, sz)
@@ -146,25 +171,27 @@ def download_one(tdir, timeout, progress_report, data_uri_map, url):
             filename = sanitize_file_name(filename)
             mt = guess_type(filename)
             if mt in OEB_DOCS:
-                raise ValueError('The external resource {} looks like a HTML document ({})'.format(url, filename))
+                raise ValueError(f'The external resource {url} looks like a HTML document ({filename})')
             if not mt or mt == 'application/octet-stream' or '.' not in filename:
-                raise ValueError('The external resource {} is not of a known type'.format(url))
+                raise ValueError(f'The external resource {url} is not of a known type')
             return True, (url, filename, dest.name, mt)
     except Exception as err:
         return False, (url, as_unicode(err))
 
 
-def download_external_resources(container, urls, timeout=60, progress_report=lambda url, done, total: None):
-    failures = {}
-    replacements = {}
-    data_uri_map = {}
+def download_external_resources(
+    container: Container, urls: Iterable[str], timeout: float = 60, progress_report: ProgressReport = lambda url, done, total: None
+) -> tuple[dict[str, str], dict[str, str]]:
+    failures: dict[str, str] = {}
+    replacements: dict[str, str] = {}
+    data_uri_map: dict[bytes, str] = {}
     with TemporaryDirectory('editor-download') as tdir:
         pool = Pool(10)
         with closing(pool):
             for ok, result in pool.imap_unordered(partial(download_one, tdir, timeout, progress_report, data_uri_map), urls):
                 if ok:
                     url, suggested_filename, downloaded_file, mt = result
-                    with lopen(downloaded_file, 'rb') as src:
+                    with open(downloaded_file, 'rb') as src:
                         name = container.add_file(suggested_filename, src, mt, modify_name_if_needed=True)
                     replacements[url] = name
                 else:
@@ -173,24 +200,28 @@ def download_external_resources(container, urls, timeout=60, progress_report=lam
     return replacements, failures
 
 
-def replacer(url_map):
-    def replace(url):
-        r = url_map.get(url)
-        replace.replaced |= r != url
+class replacer:
+    file_type: str  # set by Container.replace_links()
+
+    def __init__(self, url_map: Mapping[str, str]) -> None:
+        self.url_map = url_map
+        self.replaced = False
+
+    def __call__(self, url: str) -> str:
+        r = self.url_map.get(url)
+        self.replaced |= r != url
         return url if r is None else r
-    replace.replaced = False
-    return replace
 
 
-def replace_resources(container, urls, replacements):
-    url_maps = defaultdict(dict)
+def replace_resources(container: Container, urls: Mapping[str, Iterable[str]], replacements: Mapping[str, str]) -> bool:
+    url_maps: defaultdict[str, dict[str, str]] = defaultdict(dict)
     changed = False
-    for url, names in iteritems(urls):
+    for url, names in urls.items():
         replacement = replacements.get(url)
         if replacement is not None:
             for name in names:
                 url_maps[name][url] = container.name_to_href(replacement, name)
-    for name, url_map in iteritems(url_maps):
+    for name, url_map in url_maps.items():
         r = replacer(url_map)
         container.replace_links(name, r)
         changed |= r.replaced

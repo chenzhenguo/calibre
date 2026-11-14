@@ -1,22 +1,33 @@
+# License: GPLv3 Copyright: 2009, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__ = 'GPL 3'
-__copyright__ = '2009, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-'''
+"""
 This module implements a simple commandline SMTP client that supports:
 
   * Delivery via an SMTP relay with SSL or TLS
   * Background delivery with failures being saved in a maildir mailbox
-'''
+"""
 
-import sys, traceback, os, socket, encodings.idna as idna
-from calibre import isbytestring
+import os
+import socket
+import sys
+import traceback
+from encodings import idna
+from typing import IO, TYPE_CHECKING
+
 from calibre.constants import iswindows
-from polyglot.builtins import unicode_type, as_unicode, native_string_type
+from calibre.utils import StreamOrPath
+from calibre.utils.localization import _
+from polyglot.builtins import as_unicode
+
+if TYPE_CHECKING:
+    import optparse
+    from collections.abc import Callable, Sequence
+    from email.message import EmailMessage, Message
+
+    from calibre.utils.config_base import Config, StringConfig
 
 
-def decode_fqdn(fqdn):
+def decode_fqdn(fqdn: str | bytes) -> str:
     if isinstance(fqdn, bytes):
         enc = 'mbcs' if iswindows else 'utf-8'
         try:
@@ -26,11 +37,11 @@ def decode_fqdn(fqdn):
     return fqdn
 
 
-def sanitize_hostname(hostname):
+def sanitize_hostname(hostname: str) -> str:
     return hostname.replace('..', '_')
 
 
-def safe_localhost():
+def safe_localhost() -> str:
     # RFC 2821 says we should use the fqdn in the EHLO/HELO verb, and
     # if that can't be calculated, that we should use a domain literal
     # instead (essentially an encoded IP address like [A.B.C.D]).
@@ -40,7 +51,12 @@ def safe_localhost():
         if not iswindows:
             raise
         from calibre_extensions.winutil import get_computer_name
+
         fqdn = get_computer_name()
+    except UnicodeEncodeError:
+        # happens when fqdn is too long to encode in IDNA
+        # https://bugs.launchpad.net/bugs/2163484
+        fqdn = ''
     if '.' in fqdn and fqdn != '.':
         # Some mail servers have problems with non-ascii local hostnames, see
         # https://bugs.launchpad.net/bugs/1256549
@@ -55,12 +71,13 @@ def safe_localhost():
             addr = socket.gethostbyname(socket.gethostname())
         except socket.gaierror:
             pass
-        local_hostname = '[%s]' % addr
+        local_hostname = f'[{addr}]'
     return local_hostname
 
 
-def get_msgid_domain(from_):
+def get_msgid_domain(from_: str) -> str:
     from email.utils import parseaddr
+
     try:
         # Parse out the address from the From line, and then the domain from that
         from_email = parseaddr(from_)[1]
@@ -72,97 +89,126 @@ def get_msgid_domain(from_):
     return msgid_domain or safe_localhost()
 
 
-def create_mail(from_, to, subject, text=None, attachment_data=None,
-                 attachment_type=None, attachment_name=None):
+def create_mail(
+    from_: str,
+    to: str,
+    subject: str,
+    text: str | bytes | None = None,
+    attachment_data: str | bytes | None = None,
+    attachment_type: str | None = None,
+    attachment_name: str | None = None,
+) -> EmailMessage:
     assert text or attachment_data
 
-    from email.mime.multipart import MIMEMultipart
-    from email.utils import formatdate
-    from email import encoders
     import uuid
+    from email.message import EmailMessage
+    from email.utils import formatdate
 
-    outer = MIMEMultipart()
-    outer['Subject'] = subject
-    outer['To'] = to
+    outer = EmailMessage()
     outer['From'] = from_
+    outer['To'] = to
+    outer['Subject'] = subject
     outer['Date'] = formatdate(localtime=True)
-    outer['Message-Id'] = "<{}@{}>".format(uuid.uuid4(), get_msgid_domain(from_))
+    outer['Message-Id'] = f'<{uuid.uuid4()}@{get_msgid_domain(from_)}>'
     outer.preamble = 'You will not see this in a MIME-aware mail reader.\n'
 
     if text is not None:
-        from email.mime.text import MIMEText
-        if isbytestring(text):
-            msg = MIMEText(text)
-        else:
-            msg = MIMEText(text, 'plain', 'utf-8')
-        outer.attach(msg)
+        if isinstance(text, bytes):
+            text = text.decode('utf-8', 'replace')
+        outer.set_content(text)
 
     if attachment_data is not None:
-        from email.mime.base import MIMEBase
-        from email.header import Header
         assert attachment_data and attachment_name
+        assert attachment_type is not None
         try:
             maintype, subtype = attachment_type.split('/', 1)
-        except AttributeError:
+        except Exception:
             maintype, subtype = 'application', 'octet-stream'
-        msg = MIMEBase(maintype, subtype, name=Header(attachment_name, 'utf-8').encode())
-        msg.set_payload(attachment_data)
-        encoders.encode_base64(msg)
-        msg.add_header('Content-Disposition', 'attachment',
-                       filename=Header(attachment_name, 'utf-8').encode())
-        outer.attach(msg)
+        if isinstance(attachment_data, str):
+            attachment_data = attachment_data.encode('utf-8')
+        outer.add_attachment(attachment_data, maintype=maintype, subtype=subtype, filename=attachment_name)
 
-    return outer.as_string()
+    return outer
 
 
-def get_mx(host, verbose=0):
+def get_mx(host: str, verbose: int = 0) -> list[str]:
     import dns.resolver
+
     if verbose:
         print('Find mail exchanger for', host)
     answers = list(dns.resolver.query(host, 'MX'))
     answers.sort(key=lambda x: int(getattr(x, 'preference', sys.maxsize)))
-    return [unicode_type(x.exchange) for x in answers if hasattr(x, 'exchange')]
+    return [str(x.exchange) for x in answers if hasattr(x, 'exchange')]
 
 
-def sendmail_direct(from_, to, msg, timeout, localhost, verbose,
-        debug_output=None):
-    import polyglot.smtplib as smtplib
-    hosts = get_mx(to.split('@')[-1].strip(), verbose)
-    timeout=None  # Non blocking sockets sometimes don't work
-    kwargs = dict(timeout=timeout, local_hostname=sanitize_hostname(localhost or safe_localhost()))
+def sendmail_direct(
+    from_: str,
+    to: str,
+    msg: Message | str | bytes,
+    timeout: float | None,
+    localhost: str | None,
+    verbose: int,
+    debug_output: Callable[..., object] | None = None,
+) -> tuple[int, bytes] | None:
+    from email.message import Message
+
+    from polyglot import smtplib
+
+    hosts = get_mx(to.split('@')[-1].strip(), verbose)  # ruff: ignore[missing-maxsplit-arg]
+    timeout = None  # Non blocking sockets sometimes don't work
+    kwargs: dict[str, object] = dict(timeout=timeout, local_hostname=sanitize_hostname(localhost or safe_localhost()))
     if debug_output is not None:
         kwargs['debug_to'] = debug_output
     s = smtplib.SMTP(**kwargs)
     s.set_debuglevel(verbose)
     if not hosts:
-        raise ValueError('No mail server found for address: %s'%to)
+        raise ValueError(f'No mail server found for address: {to}')
     last_error = last_traceback = None
     for host in hosts:
         try:
             s.connect(host, 25)
-            s.sendmail(from_, [to], msg)
+            if isinstance(msg, Message):
+                s.send_message(msg, from_, [to])
+            else:
+                s.sendmail(from_, [to], msg)
             return s.quit()
         except Exception as e:
             last_error, last_traceback = e, traceback.format_exc()
     if last_error is not None:
         print(last_traceback)
-        raise IOError('Failed to send mail: '+repr(last_error))
+        raise OSError('Failed to send mail: ' + repr(last_error))
 
 
-def get_smtp_class(use_ssl=False, debuglevel=0):
+def get_smtp_class(use_ssl: bool = False, debuglevel: int = 0) -> type:
     # We need this as in python 3.7 we have to pass the hostname
     # in the constructor, because of https://bugs.python.org/issue36094
     # which means the constructor calls connect(),
     # but there is no way to set debuglevel before connect() is called
-    import polyglot.smtplib as smtplib
+    from polyglot import smtplib
+
     cls = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
     bases = (cls,)
-    return type(native_string_type('SMTP'), bases, {native_string_type('debuglevel'): debuglevel})
+    return type('SMTP', bases, {'debuglevel': debuglevel})
 
 
-def sendmail(msg, from_, to, localhost=None, verbose=0, timeout=None,
-             relay=None, username=None, password=None, encryption='TLS',
-             port=-1, debug_output=None, verify_server_cert=False, cafile=None):
+def sendmail(
+    msg: Message | str | bytes,
+    from_: str,
+    to: Sequence[str],
+    localhost: str | None = None,
+    verbose: int = 0,
+    timeout: float | None = None,
+    relay: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    encryption: str = 'TLS',
+    port: int | str = -1,
+    debug_output: Callable[..., object] | None = None,
+    verify_server_cert: bool = False,
+    cafile: str | None = None,
+) -> tuple[int, bytes] | None:
+    from email.message import Message
+
     if relay is None:
         for x in to:
             return sendmail_direct(from_, x, msg, timeout, localhost, verbose)
@@ -170,7 +216,7 @@ def sendmail(msg, from_, to, localhost=None, verbose=0, timeout=None,
     port = int(port)
     if port < 0:
         port = 25 if encryption != 'SSL' else 465
-    kwargs = dict(host=relay, port=port, timeout=timeout, local_hostname=sanitize_hostname(localhost or safe_localhost()))
+    kwargs: dict[str, object] = dict(host=relay, port=port, timeout=timeout, local_hostname=sanitize_hostname(localhost or safe_localhost()))
     if debug_output is not None:
         kwargs['debug_to'] = debug_output
     cls = get_smtp_class(use_ssl=encryption == 'SSL', debuglevel=verbose)
@@ -179,6 +225,7 @@ def sendmail(msg, from_, to, localhost=None, verbose=0, timeout=None,
         context = None
         if verify_server_cert:
             import ssl
+
             context = ssl.create_default_context(cafile=cafile)
         s.starttls(context=context)
         s.ehlo()
@@ -186,22 +233,25 @@ def sendmail(msg, from_, to, localhost=None, verbose=0, timeout=None,
         s.login(username, password)
     ret = None
     try:
-        s.sendmail(from_, to, msg)
+        if isinstance(msg, Message):
+            s.send_message(msg, from_, to)
+        else:
+            s.sendmail(from_, to, msg)
     finally:
         try:
             ret = s.quit()
-        except:
+        except Exception:
             pass  # Ignore so as to not hide original error
     return ret
 
 
-def option_parser():
+def option_parser() -> optparse.OptionParser:
     try:
         from calibre.utils.config import OptionParser
-        OptionParser
     except ImportError:
         from optparse import OptionParser
-    parser = OptionParser(_('''\
+    parser = OptionParser(
+        _('''\
 %prog [options] [from to text]
 
 Send mail using the SMTP protocol. %prog has two modes of operation. In the
@@ -214,100 +264,122 @@ If text is not specified, a complete email message is read from STDIN.
 from is the email address of the sender and to is the email address
 of the recipient. When a complete email is read from STDIN, from and to
 are only used in the SMTP negotiation, the message headers are not modified.
-'''))
-    c=parser.add_option_group('COMPOSE MAIL',
-        _('Options to compose an email. Ignored if text is not specified')).add_option
+''')
+    )
+    c = parser.add_option_group('COMPOSE MAIL', _('Options to compose an email. Ignored if text is not specified')).add_option
     c('-a', '--attachment', help=_('File to attach to the email'))
     c('-s', '--subject', help=_('Subject of the email'))
 
-    parser.add_option('-l', '--localhost',
-                      help=_('Host name of localhost. Used when connecting '
-                            'to SMTP server.'))
-    r=parser.add_option_group('SMTP RELAY',
-        _('Options to use an SMTP relay server to send mail. '
-        'calibre will try to send the email directly unless --relay is '
-        'specified.')).add_option
+    parser.add_option('-l', '--localhost', help=_('Host name of localhost. Used when connecting to SMTP server.'))
+    r = parser.add_option_group(
+        'SMTP RELAY',
+        _('Options to use an SMTP relay server to send mail. calibre will try to send the email directly unless --relay is specified.'),
+    ).add_option
     r('-r', '--relay', help=_('An SMTP relay server to use to send mail.'))
-    r('-p', '--port', default=-1,
-      help=_('Port to connect to on relay server. Default is to use 465 if '
-      'encryption method is SSL and 25 otherwise.'))
+    r(
+        '-p',
+        '--port',
+        default=-1,
+        help=_('Port to connect to on relay server. Default is to use 465 if encryption method is SSL and 25 otherwise.'),
+    )
     r('-u', '--username', help=_('Username for relay'))
     r('-p', '--password', help=_('Password for relay'))
-    r('-e', '--encryption-method', default='TLS',
-      choices=['TLS', 'SSL', 'NONE'],
-      help=_('Encryption method to use when connecting to relay. Choices are '
-      'TLS, SSL and NONE. Default is TLS. WARNING: Choosing NONE is highly insecure'))
-    r('--dont-verify-server-certificate', help=_(
-        'Do not verify the server certificate when connecting using TLS. This used'
-        ' to be the default behavior in calibre versions before 3.27. If you are using'
-        ' a relay with a self-signed or otherwise invalid certificate, you can use this option to restore'
-        ' the pre 3.27 behavior'))
-    r('--cafile', help=_(
-        'Path to a file of concatenated CA certificates in PEM format, used to verify the'
-        ' server certificate when using TLS. By default, the system CA certificates are used.'))
-    parser.add_option('-o', '--outbox', help=_('Path to maildir folder to store '
-                      'failed email messages in.'))
-    parser.add_option('-f', '--fork', default=False, action='store_true',
-                      help=_('Fork and deliver message in background. '
-                      'If you use this option, you should also use --outbox '
-                      'to handle delivery failures.'))
+    r(
+        '-e',
+        '--encryption-method',
+        default='TLS',
+        choices=['TLS', 'SSL', 'NONE'],
+        help=_('Encryption method to use when connecting to relay. Choices are TLS, SSL and NONE. Default is TLS. WARNING: Choosing NONE is highly insecure'),
+    )
+    r(
+        '--dont-verify-server-certificate',
+        help=_(
+            'Do not verify the server certificate when connecting using TLS. This used'
+            ' to be the default behavior in calibre versions before 3.27. If you are using'
+            ' a relay with a self-signed or otherwise invalid certificate, you can use this option to restore'
+            ' the pre 3.27 behavior'
+        ),
+    )
+    r(
+        '--cafile',
+        help=_(
+            'Path to a file of concatenated CA certificates in PEM format, used to verify the'
+            ' server certificate when using TLS. By default, the system CA certificates are used.'
+        ),
+    )
+    parser.add_option('-o', '--outbox', help=_('Path to maildir folder to store failed email messages in.'))
+    parser.add_option(
+        '-f',
+        '--fork',
+        default=False,
+        action='store_true',
+        help=_('Fork and deliver message in background. If you use this option, you should also use --outbox to handle delivery failures.'),
+    )
     parser.add_option('-t', '--timeout', help=_('Timeout for connection'))
-    parser.add_option('-v', '--verbose', default=0, action='count',
-                      help=_('Be more verbose'))
+    parser.add_option('-v', '--verbose', default=0, action='count', help=_('Be more verbose'))
     return parser
 
 
-def extract_email_address(raw):
+def extract_email_address(raw: str) -> str:
     from email.utils import parseaddr
+
     return parseaddr(raw)[-1]
 
 
-def compose_mail(from_, to, text, subject=None, attachment=None,
-        attachment_name=None):
+def compose_mail(
+    from_: str,
+    to: str,
+    text: str | bytes | None,
+    subject: str | None = None,
+    attachment: str | bytes | IO[bytes] | None = None,
+    attachment_name: str | None = None,
+) -> EmailMessage:
     attachment_type = attachment_data = None
     if attachment is not None:
         try:
             from calibre import guess_type
-            guess_type
         except ImportError:
             from mimetypes import guess_type
-        attachment_data = attachment.read() if hasattr(attachment, 'read') \
-                            else open(attachment, 'rb').read()
-        attachment_type = guess_type(getattr(attachment, 'name', attachment))[0]
+        with StreamOrPath(attachment, 'rb') as f:
+            attachment_data = f.read()
+        attachment_type = guess_type(getattr(attachment, 'name', attachment))[0]  # ty: ignore[invalid-argument-type]
         if attachment_name is None:
-            attachment_name = os.path.basename(getattr(attachment,
-                'name', attachment))
-    subject = subject if subject else 'no subject'
-    return create_mail(from_, to, subject, text=text,
-            attachment_data=attachment_data, attachment_type=attachment_type,
-            attachment_name=attachment_name)
+            attachment_name = os.path.basename(getattr(attachment, 'name', attachment))  # ty: ignore[no-matching-overload]
+    subject = subject or 'no subject'
+    return create_mail(
+        from_,
+        to,
+        subject,
+        text=text,
+        attachment_data=attachment_data,
+        attachment_type=attachment_type,
+        attachment_name=attachment_name,
+    )
 
 
-def main(args=sys.argv):
+def main(args: list[str] = sys.argv) -> int:
     parser = option_parser()
     opts, args = parser.parse_args(args)
 
     if len(args) > 1:
         if len(args) < 4:
-            print('You must specify the from address, to address and body text'
-                    ' on the command line')
+            print('You must specify the from address, to address and body text on the command line')
             return 1
-        msg = compose_mail(args[1], args[2], args[3], subject=opts.subject,
-                           attachment=opts.attachment)
+        msg = compose_mail(args[1], args[2], args[3], subject=opts.subject, attachment=opts.attachment)
         from_, to = args[1:3]
         eto = [extract_email_address(x.strip()) for x in to.split(',')]
         efrom = extract_email_address(from_)
     else:
-        msg = sys.stdin.read()
-        from email import message_from_string
+        from email import message_from_bytes
         from email.utils import getaddresses
-        eml = message_from_string(msg)
-        tos = eml.get_all('to', [])
-        ccs = eml.get_all('cc', []) + eml.get_all('bcc', [])
+
+        msg = message_from_bytes(sys.stdin.buffer.read())
+        tos = msg.get_all('to', [])
+        ccs = msg.get_all('cc', []) + msg.get_all('bcc', [])
         eto = [x[1] for x in getaddresses(tos + ccs) if x[1]]
         if not eto:
             raise ValueError('Email from STDIN does not specify any recipients')
-        efrom = getaddresses(eml.get_all('from', []))
+        efrom = getaddresses(msg.get_all('from', []))
         if not efrom:
             raise ValueError('Email from STDIN does not specify a sender')
         efrom = efrom[0][1]
@@ -316,17 +388,29 @@ def main(args=sys.argv):
     if opts.outbox is not None:
         outbox = os.path.abspath(os.path.expanduser(opts.outbox))
         from mailbox import Maildir
+
         outbox = Maildir(opts.outbox, factory=None)
     if opts.fork:
         if os.fork() != 0:
             return 0
 
     try:
-        sendmail(msg, efrom, eto, localhost=opts.localhost, verbose=opts.verbose,
-             timeout=opts.timeout, relay=opts.relay, username=opts.username,
-             password=opts.password, port=opts.port,
-             encryption=opts.encryption_method, verify_server_cert=not opts.dont_verify_server_certificate, cafile=opts.cafile)
-    except:
+        sendmail(
+            msg,
+            efrom,
+            eto,
+            localhost=opts.localhost,
+            verbose=opts.verbose,
+            timeout=opts.timeout,
+            relay=opts.relay,
+            username=opts.username,
+            password=opts.password,
+            port=opts.port,
+            encryption=opts.encryption_method,
+            verify_server_cert=not opts.dont_verify_server_certificate,
+            cafile=opts.cafile,
+        )
+    except Exception:
         if outbox is not None:
             outbox.add(msg)
             outbox.close()
@@ -335,10 +419,11 @@ def main(args=sys.argv):
     return 0
 
 
-def config(defaults=None):
+def config(defaults: str | None = None) -> Config | StringConfig:
     from calibre.utils.config import Config, StringConfig
+
     desc = _('Control email delivery')
-    c = Config('smtp',desc) if defaults is None else StringConfig(defaults,desc)
+    c = Config('smtp', desc) if defaults is None else StringConfig(defaults, desc)
     c.add_opt('from_')
     c.add_opt('accounts', default={})
     c.add_opt('subjects', default={})

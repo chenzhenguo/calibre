@@ -1,27 +1,32 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
+# License: GPLv3 Copyright: 2010, Kovid Goyal <kovid@kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2010, Kovid Goyal <kovid@kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
+from functools import partial
 
 from calibre.gui2.actions import InterfaceAction
+from calibre.utils.localization import _
 
 
 class OpenFolderAction(InterfaceAction):
-
     name = 'Open Folder'
-    action_spec = (_('Open containing folder'), 'document_open.png',
-                   _('Open the folder containing the current book\'s files'), _('O'))
+    action_spec = (
+        _('Open book folder'),
+        'document_open.png',
+        _("Open the folder containing the current book's files"),
+        _('O'),
+    )
     dont_add_to = frozenset(('context-menu-device',))
     action_type = 'current'
+    action_add_menu = True
+    action_menu_clone_qaction = _('Open book folder')
 
-    def genesis(self):
-        self.qaction.triggered.connect(self.gui.iactions['View'].view_folder)
+    def genesis(self) -> None:
+        va = self.gui.iactions['View'].view_folder
+        self.qaction.triggered.connect(va)
+        a = self.create_menu_action(self.qaction.menu(), 'show-data-folder', _('Open book data folder'), icon='document_open.png', shortcut=())
+        a.triggered.connect(partial(va, data_folder=True))
 
-    def location_selected(self, loc):
+    def location_selected(self, loc) -> None:
         enabled = loc == 'library'
         self.qaction.setEnabled(enabled)
         self.menuless_qaction.setEnabled(enabled)

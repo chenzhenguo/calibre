@@ -6,41 +6,60 @@ from elementmaker import E
 from gettext import gettext as _
 
 from book_list.globals import get_session_data
-from dom import clear, svgicon, unique_id
+from book_list.theme import get_color
+from complete import create_simple_input_with_history
+from dom import add_extra_css, build_rule, clear, create_live_region, set_live_region_text, svgicon, unique_id
 from read_book.globals import is_dark_theme
 from read_book.highlights import all_styles
 from read_book.prefs.utils import create_button_box
 from read_book.selection_bar import all_actions
-from session import defaults
+from session import session_defaults
 
 CONTAINER = unique_id('selection-settings')
+
+
+add_extra_css(def ():
+    # Buttons that look like the links they replaced
+    sel = f'#{CONTAINER} button.simple-link'
+    ans = build_rule(sel, padding='0', border='none', background='none', font='inherit', color='inherit')
+    # They have no padding, so draw the focus ring outside the text
+    ans += build_rule(sel + ':focus-visible',
+        outline='2px solid ' + get_color('link-foreground'), outline_offset='3px', border_radius='4px')
+    return ans
+)
 
 
 def set_actions(use_defaults):
     c = get_container()
     adef = all_actions()
     sd = get_session_data()
-    actions = defaults.selection_bar_actions if use_defaults else sd.get('selection_bar_actions')
+    actions = session_defaults().selection_bar_actions if use_defaults else sd.get('selection_bar_actions')
     current = [x for x in actions if adef[x]]
     c.querySelector('.current-actions').dataset.actions = JSON.stringify(current)
     available_actions = [x for x in adef if current.indexOf(x) is -1]
     c.querySelector('.available-actions').dataset.actions = JSON.stringify(available_actions)
     update_action_tables()
-    quick_actions = defaults.selection_bar_quick_highlights if use_defaults else sd.get('selection_bar_quick_highlights')
+    quick_actions = session_defaults().selection_bar_quick_highlights if use_defaults else sd.get('selection_bar_quick_highlights')
     c.querySelector('.quick-actions').dataset.actions = JSON.stringify(quick_actions)
     update_quick_action_table()
 
 
 def restore_defaults():
     container = get_container()
+    sd = session_defaults()
     for control in container.querySelectorAll('input[name]'):
-        val = defaults[control.getAttribute('name')]
+        val = sd[control.getAttribute('name')]
         if control.type is 'checkbox':
             control.checked = val
         elif control.type is 'number':
             control.valueAsNumber = val
         else:
             control.value = val
+
+    for ta in container.querySelectorAll('textarea[name]'):
+        val = sd[ta.getAttribute('name')]
+        ta.value = val
+
     set_actions(True)
 
 
@@ -49,6 +68,7 @@ def get_container():
 
 
 def transfer(name, frm, to_):
+    # Returns the index the action had in the list it left
     c = get_container().querySelector('.' + frm)
     actions = JSON.parse(c.dataset.actions)
     idx = actions.indexOf(name)
@@ -62,17 +82,52 @@ def transfer(name, frm, to_):
         actions.push(name)
     c.dataset.actions = JSON.stringify(actions)
     update_action_tables()
+    return idx
 
 
-def add_action(name):
-    transfer(name, 'available-actions', 'current-actions')
+def action_button(table_class, op, name):
+    return get_container().querySelector(f'.{table_class} button[data-op={op}][data-action="{name}"]')
 
 
-def remove_action(name):
-    transfer(name, 'current-actions', 'available-actions')
+def focus_after_transfer(frm, op, idx, to_, to_op, name):
+    # The tables are rebuilt, so put focus back. Keep it in the list the action
+    # left, at the same position, so that several actions can be moved in a
+    # row, or follow the action when that list is now empty.
+    buttons = get_container().querySelectorAll(f'.{frm} button[data-op={op}]')
+    b = buttons[min(idx, buttons.length - 1)] if buttons.length else action_button(to_, to_op, name)
+    if b:
+        b.focus()
 
 
-def move_action(name, up):
+def announce(msg):
+    # Clear first so that a message is announced again even when it is the
+    # same as the previous one. A burst of changes announces only the last.
+    status = get_container().querySelector('.actions-status')
+    set_live_region_text(status, '')
+    set_live_region_text(status, msg, True)
+
+
+def add_action(name, ev):
+    had_focus = document.activeElement is ev.currentTarget
+    idx = transfer(name, 'available-actions', 'current-actions')
+    if had_focus:
+        focus_after_transfer('available-actions', 'add', idx, 'current-actions', 'remove', name)
+    # Focus stays in the available actions, so say where the action went,
+    # added actions go first
+    count = JSON.parse(get_container().querySelector('.current-actions').dataset.actions).length
+    announce(_('{0} added to the current actions at position 1 of {1}').format(all_actions()[name].text, count))
+
+
+def remove_action(name, ev):
+    had_focus = document.activeElement is ev.currentTarget
+    idx = transfer(name, 'current-actions', 'available-actions')
+    if had_focus:
+        focus_after_transfer('current-actions', 'remove', idx, 'available-actions', 'add', name)
+    announce(_('{} removed from the current actions').format(all_actions()[name].text))
+
+
+def move_action(name, up, ev):
+    had_focus = document.activeElement is ev.currentTarget
     c = get_container().querySelector('.current-actions')
     actions = JSON.parse(c.dataset.actions)
     idx = actions.indexOf(name)
@@ -82,6 +137,17 @@ def move_action(name, up):
     actions[new_idx], actions[idx] = a, b
     c.dataset.actions = JSON.stringify(actions)
     update_action_tables()
+    if had_focus:
+        # Follow the action, so that it can be moved again
+        action_button('current-actions', 'up' if up else 'down', name).focus()
+    # Focus stays on the same button, so say where the action is now
+    announce(_('{0} moved to position {1} of {2}').format(all_actions()[name].text, new_idx + 1, actions.length))
+
+
+def action_link(text, label, op, name, action):
+    # A button that looks like a link, named after the action it changes,
+    # since the visible text alone, such as "Up", does not say which
+    return E.button(text, type='button', class_='simple-link', aria_label=label, data_op=op, data_action=name, onclick=action)
 
 
 def build_action_table(container, is_current):
@@ -93,15 +159,15 @@ def build_action_table(container, is_current):
         ac = adef[action_name]
         if is_current:
             buttons = E.td(
-                E.span(_('Remove'), class_='simple-link', onclick=remove_action.bind(None, action_name)),
+                action_link(_('Remove'), _('Remove {}').format(ac.text), 'remove', action_name, remove_action.bind(None, action_name)),
                 E.span('\xa0', style='min-width: 2rem; display: inline-block'),
-                E.span(_('Up'), class_='simple-link', onclick=move_action.bind(None, action_name, True)),
+                action_link(_('Up'), _('Move {} up').format(ac.text), 'up', action_name, move_action.bind(None, action_name, True)),
                 E.span('\xa0', style='min-width: 2rem; display: inline-block'),
-                E.span(_('Down'), class_='simple-link', onclick=move_action.bind(None, action_name, False)),
+                action_link(_('Down'), _('Move {} down').format(ac.text), 'down', action_name, move_action.bind(None, action_name, False)),
             )
         else:
             buttons = E.td(
-                E.span(_('Add'), class_='simple-link', onclick=add_action.bind(None, action_name)),
+                action_link(_('Add'), _('Add {}').format(ac.text), 'add', action_name, add_action.bind(None, action_name)),
             )
         buttons.style.paddingLeft = '2rem'
         if ac.icon_function:
@@ -125,19 +191,21 @@ def update_quick_action_table():
     c.style.display = 'flex'
     c.style.flexWrap = 'wrap'
     current = {x: True for x in JSON.parse(c.dataset.actions)}
-    for hs in all_styles():
+    actions = list(all_styles())
+    actions.pysort(key=def (a): return (a.friendly_name or '').toLowerCase();)
+    for hs in actions:
         c.appendChild(E.label(
             style='margin: 1ex; display: flex; align-contents: center',
             hs.make_swatch(E.span(), is_dark_theme()),
             '\xa0',
-            hs.friendly_name,
-            '\xa0',
             E.input(type='checkbox', value=hs.key, checked=current[hs.key]),
+            '\xa0',
+            hs.friendly_name,
         ))
 
 
 def selected_quick_actions():
-    ans = v'[]'
+    ans = []
     c = get_container().querySelector('.quick-actions')
     for inp in c.querySelectorAll('input:checked'):
         if inp.value:
@@ -157,7 +225,16 @@ def create_selection_panel(container, apply_func, cancel_func):
         return E.div(style='margin-top:1ex', E.label(ans, '\xa0' + text))
 
     def url(name, text, title):
-        ans = E.input(type='url', name=name, value=sd.get(name), size='50', title=title or '', style='margin-top: 1ex')
+        ans = create_simple_input_with_history(name, input_type='url')
+        inp = ans.querySelector(f'input[name={name}]')
+        inp.value = sd.get(name) or ''
+        inp.setAttribute('size', '50')
+        inp.style.marginTop = '1ex'
+        return E.div(style='margin-top:1ex', E.label(text, E.br(), ans))
+
+    def cite_template_textarea(name, text, title):
+        ans = E.textarea(name=name, style='width: 100%; margin-top: 1ex; box-sizing: border-box; flex-grow: 10')
+        ans.value = sd.get(name)
         return E.div(style='margin-top:1ex', E.label(text, E.br(), ans))
 
     container.appendChild(cb(
@@ -176,10 +253,32 @@ def create_selection_panel(container, apply_func, cancel_func):
         E.h3(_('Available actions')),
         E.div(class_='available-actions')
     ))
+    status = create_live_region()
+    status.classList.add('actions-status')
+    container.appendChild(status)
     container.appendChild(E.div(style='padding: 1ex; border-bottom: solid 1px; margin-bottom: 1ex',
         E.h3(_('Quick highlight actions')),
         E.div(_('Choose highlight styles that will have dedicated buttons in the selection bar to create highlights with a single click')),
         E.div(class_='quick-actions'),
+    ))
+    container.appendChild(E.h3(_('Citing text')))
+    container.appendChild(cite_template_textarea(
+        'cite_text_template', _('Template for citing plain text:')))
+    container.appendChild(cite_template_textarea(
+        'cite_hl_template', _('Template for citing highlighted text:')))
+    container.appendChild(E.div(
+        E.div(
+            style='margin-top: 2ex',
+            _('{text} and {url} are available in both types of template. Additionally, {timestamp},'
+              ' {chapter}, {notes}, {style_type}, {style_kind} and {style_which} are available when citing a highlight.'
+            ).format(text='{text}', url='{url}', chapter='{chapter}', notes='{notes}', style_type='{style_type}',
+                     style_kind='{style_kind}', style_which='{style_which}', timestamp='{timestamp}',
+            )
+        ),
+        E.div(
+            style='margin-top: 2ex; margin-bottom: 2ex; border-bottom: solid 1px; padding-bottom: 1ex;',
+            _('Use "}}" and "{{" to escape "}" and "{".')
+        )
     ))
     set_actions()
 
@@ -193,6 +292,9 @@ def commit_selection(onchange):
     sd = get_session_data()
     container = get_container()
     changed = False
+    save_ev = new Event('save_history')
+    for x in container.querySelectorAll('[data-calibre-history-input]'):
+        x.dispatchEvent(save_ev)
     for control in container.querySelectorAll('input[name]'):
         name = control.getAttribute('name')
         if control.type is 'checkbox':
@@ -212,5 +314,13 @@ def commit_selection(onchange):
     if list(quick_highlights) != list(sd.get('selection_bar_quick_highlights')):
         changed = True
         sd.set('selection_bar_quick_highlights', quick_highlights)
+    # Save textarea
+    for ta in container.querySelectorAll('textarea[name]'):
+        name = ta.getAttribute('name')
+        val = (ta.value or '').strip() or session_defaults()[name]
+        old = sd.get(name)
+        if old is not val:
+            sd.set(name, val)
+            changed = True
     if changed:
         onchange()

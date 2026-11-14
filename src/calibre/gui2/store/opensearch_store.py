@@ -1,22 +1,17 @@
-# -*- coding: utf-8 -*-
-
-
-__license__ = 'GPL 3'
-__copyright__ = '2011, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
+# License: GPLv3 Copyright: 2011, John Schember <john@nachtimwald.com>
 
 from contextlib import closing
 
-from PyQt5.Qt import QUrl
+from qt.core import QUrl
 
-from calibre import (browser, guess_extension)
+from calibre import browser, guess_extension
 from calibre.gui2 import open_url
-from calibre.utils.xml_parse import safe_xml_fromstring
 from calibre.gui2.store import StorePlugin
 from calibre.gui2.store.search_result import SearchResult
 from calibre.gui2.store.web_store_dialog import WebStoreDialog
 from calibre.utils.opensearch.description import Description
 from calibre.utils.opensearch.query import Query
+from calibre.utils.xml_parse import safe_xml_fromstring
 
 
 def open_search(url, query, max_results=10, timeout=60):
@@ -82,24 +77,22 @@ def open_search(url, query, max_results=10, timeout=60):
 
 
 class OpenSearchOPDSStore(StorePlugin):
-
     open_search_url = ''
     web_url = ''
 
-    def open(self, parent=None, detail_item=None, external=False):
+    def open(self, gui=None, parent=None, detail_item=None, external=False) -> None:
         if not hasattr(self, 'web_url'):
             return
 
         if external or self.config.get('open_external', False):
-            open_url(QUrl(detail_item if detail_item else self.web_url))
+            open_url(QUrl(detail_item or self.web_url))
         else:
             d = WebStoreDialog(self.gui, self.web_url, parent, detail_item, create_browser=self.create_browser)
             d.setWindowTitle(self.name)
             d.set_tags(self.config.get('tags', ''))
-            d.exec_()
+            d.exec()
 
     def search(self, query, max_results=10, timeout=60):
         if not getattr(self, 'open_search_url', None):
             return
-        for result in open_search(self.open_search_url, query, max_results=max_results, timeout=timeout):
-            yield result
+        yield from open_search(self.open_search_url, query, max_results=max_results, timeout=timeout)

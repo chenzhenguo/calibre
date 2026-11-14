@@ -1,7 +1,5 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
 # License: GPLv3 Copyright: 2019, Kovid Goyal <kovid at kovidgoyal.net>
-from __future__ import absolute_import, division, print_function, unicode_literals
 
 import glob
 import hashlib
@@ -18,13 +16,14 @@ def locales_from_dicts(dicts):
     ans = {}
     for path in dicts:
         name = bname = os.path.basename(path)
-        name = name[len('hyph_'):-len('.dic')]
+        name = name[len('hyph_') : -len('.dic')]
         ans[name.replace('-', '_')] = bname
     return ans
 
 
 def locales_from_xcu(xcu, dicts):
     from lxml import etree
+
     with open(xcu, 'rb') as f:
         root = etree.fromstring(f.read(), parser=etree.XMLParser(recover=True, no_network=True, resolve_entities=False))
     ans = {}
@@ -54,14 +53,11 @@ def process_dictionaries(src, output_dir):
         if not dicts:
             continue
         xcu = os.path.join(q, 'dictionaries.xcu')
-        locales = (
-            locales_from_xcu(xcu, dicts) if os.path.exists(xcu) else
-            locales_from_dicts(dicts))
+        locales = locales_from_xcu(xcu, dicts) if os.path.exists(xcu) else locales_from_dicts(dicts)
         if locales:
             locale_data.update(locales)
             for d in dicts:
-                shutil.copyfile(
-                    d, os.path.join(output_dir, os.path.basename(d)))
+                shutil.copyfile(d, os.path.join(output_dir, os.path.basename(d)))
     data = json.dumps(locale_data, indent=2)
     if not isinstance(data, bytes):
         data = data.encode('utf-8')
@@ -71,22 +67,17 @@ def process_dictionaries(src, output_dir):
 
 def compress_tar(buf, outf):
     buf.seek(0)
-    try:
-        from calibre_lzma.xz import compress
-    except ImportError:
-        import lzma
-        outf.write(lzma.compress(buf.getvalue(), preset=9 | lzma.PRESET_EXTREME))
-    else:
-        compress(buf, outf)
+    import lzma
+
+    outf.write(lzma.compress(buf.getvalue(), preset=9 | lzma.PRESET_EXTREME))
 
 
 class Hyphenation(ReVendor):
-
     description = 'Download the hyphenation dictionaries'
     NAME = 'hyphenation'
     TAR_NAME = 'hyphenation dictionaries'
     VERSION = 'master'
-    DOWNLOAD_URL = 'https://github.com/LibreOffice/dictionaries/archive/%s.tar.gz' % VERSION
+    DOWNLOAD_URL = f'https://github.com/LibreOffice/dictionaries/archive/{VERSION}.tar.gz'
     CAN_USE_SYSTEM_VERSION = False
 
     def run(self, opts):
@@ -100,7 +91,7 @@ class Hyphenation(ReVendor):
             for dic in dics:
                 with open(os.path.join(output_dir, dic), 'rb') as f:
                     m.update(f.read())
-            hsh = type('')(m.hexdigest())
+            hsh = str(m.hexdigest())
             buf = BytesIO()
             with tarfile.TarFile(fileobj=buf, mode='w') as tf:
                 for dic in dics:

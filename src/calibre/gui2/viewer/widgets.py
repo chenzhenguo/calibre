@@ -1,28 +1,26 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPL v3 Copyright: 2020, Kovid Goyal <kovid at kovidgoyal.net>
 
 import re
 
-from PyQt5.Qt import (
-    QAction, QFont, QFontMetrics, QStyle, QStyledItemDelegate, Qt, pyqtSignal, QPalette
-)
+from qt.core import QAction, QFont, QFontMetrics, QPalette, QStyle, QStyledItemDelegate, Qt, pyqtSignal
 
 from calibre.gui2 import QT_HIDDEN_CLEAR_ACTION
 from calibre.gui2.widgets2 import HistoryComboBox
+from calibre.utils.localization import _
 
 
 class ResultsDelegate(QStyledItemDelegate):  # {{{
-
     add_ellipsis = True
     emphasize_text = True
+    has_icons = False
 
     def result_data(self, result):
         if not hasattr(result, 'is_hidden'):
             return None, None, None, None, None
         return result.is_hidden, result.before, result.text, result.after, False
 
-    def paint(self, painter, option, index):
+    def paint(self, painter, option, index) -> None:
         QStyledItemDelegate.paint(self, painter, option, index)
         result = index.data(Qt.ItemDataRole.UserRole)
         is_hidden, result_before, result_text, result_after, show_leading_dot = self.result_data(result)
@@ -32,7 +30,7 @@ class ResultsDelegate(QStyledItemDelegate):  # {{{
         try:
             p = option.palette
             c = QPalette.ColorRole.HighlightedText if option.state & QStyle.StateFlag.State_Selected else QPalette.ColorRole.Text
-            group = (QPalette.ColorGroup.Active if option.state & QStyle.StateFlag.State_Active else QPalette.ColorGroup.Inactive)
+            group = QPalette.ColorGroup.Active if option.state & QStyle.StateFlag.State_Active else QPalette.ColorGroup.Inactive
             c = p.color(group, c)
             painter.setPen(c)
             font = option.font
@@ -42,7 +40,12 @@ class ResultsDelegate(QStyledItemDelegate):  # {{{
             else:
                 emphasis_font = font
             flags = Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextSingleLine | Qt.TextFlag.TextIncludeTrailingSpaces
-            rect = option.rect.adjusted(option.decorationSize.width() + 4 if is_hidden else 0, 0, 0, 0)
+            rect = option.rect.adjusted(
+                option.decorationSize.width() + (6 if self.has_icons else 4) if self.has_icons or is_hidden else 0,
+                0,
+                0,
+                0,
+            )
             painter.setClipRect(rect)
             before = re.sub(r'\s+', ' ', result_before)
             if show_leading_dot:
@@ -66,13 +69,40 @@ class ResultsDelegate(QStyledItemDelegate):  # {{{
                 painter.drawText(rect, flags, text)
             else:
                 self.draw_match(
-                    painter, flags, before, text, after, rect, before_width, match_width, after_width, ellipsis_width, emphasis_font, font)
+                    painter,
+                    flags,
+                    before,
+                    text,
+                    after,
+                    rect,
+                    before_width,
+                    match_width,
+                    after_width,
+                    ellipsis_width,
+                    emphasis_font,
+                    font,
+                )
         except Exception:
             import traceback
+
             traceback.print_exc()
         painter.restore()
 
-    def draw_match(self, painter, flags, before, text, after, rect, before_width, match_width, after_width, ellipsis_width, emphasis_font, normal_font):
+    def draw_match(
+        self,
+        painter,
+        flags,
+        before,
+        text,
+        after,
+        rect,
+        before_width,
+        match_width,
+        after_width,
+        ellipsis_width,
+        emphasis_font,
+        normal_font,
+    ) -> None:
         extra_width = int(rect.width() - match_width)
         if before_width < after_width:
             left_width = min(extra_width // 2, before_width)
@@ -106,30 +136,51 @@ class ResultsDelegate(QStyledItemDelegate):  # {{{
             painter.setFont(normal_font)
             painter.drawText(r, flags, eafter)
 
+
 # }}}
 
 
 class SearchBox(HistoryComboBox):  # {{{
-
     history_saved = pyqtSignal(object, object)
+    history_pruned = pyqtSignal(object)
+    history_cleared = pyqtSignal()
     cleared = pyqtSignal()
 
-    def __init__(self, parent=None):
-        HistoryComboBox.__init__(self, parent)
-        self.lineEdit().setPlaceholderText(_('Search'))
-        self.lineEdit().setClearButtonEnabled(True)
-        ac = self.lineEdit().findChild(QAction, QT_HIDDEN_CLEAR_ACTION)
+    def __init__(self, parent=None) -> None:
+        HistoryComboBox.__init__(self, parent, strip_completion_entries=False)
+        self.suppress_history = False
+        le = self.lineEdit()
+        assert le is not None
+        le.setPlaceholderText(_('Search'))
+        le.setClearButtonEnabled(True)
+        ac = le.findChild(QAction, QT_HIDDEN_CLEAR_ACTION)
         if ac is not None:
             ac.triggered.connect(self.cleared)
 
     def save_history(self):
+        if self.suppress_history:
+            self.suppress_history = False
+            return
         ret = HistoryComboBox.save_history(self)
         self.history_saved.emit(self.text(), self.history)
         return ret
 
-    def contextMenuEvent(self, event):
-        menu = self.lineEdit().createStandardContextMenu()
+    def remove_history_item(self, item) -> None:
+        super().remove_history_item(item)
+        self.history_pruned.emit(self.history)
+
+    def clear_history(self) -> None:
+        super().clear_history()
+        self.history_cleared.emit()
+
+    def contextMenuEvent(self, e) -> None:
+        ctx_le = self.lineEdit()
+        assert ctx_le is not None
+        menu = ctx_le.createStandardContextMenu()
+        assert menu is not None
         menu.addSeparator()
         menu.addAction(_('Clear search history'), self.clear_history)
-        menu.exec_(event.globalPos())
+        menu.exec(e.globalPos())
+
+
 # }}}

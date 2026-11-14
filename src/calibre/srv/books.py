@@ -1,7 +1,5 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2016, Kovid Goyal <kovid at kovidgoyal.net>
-
 
 import errno
 import json as jsonlib
@@ -9,36 +7,50 @@ import os
 import tempfile
 import time
 from functools import partial
-from hashlib import sha1
+from hashlib import sha256
 from threading import Lock, RLock
+from typing import IO, TYPE_CHECKING, cast
 
 from calibre.constants import cache_dir, iswindows
 from calibre.customize.ui import plugin_for_input_format
-from calibre.srv.errors import BookNotFound, HTTPNotFound
+from calibre.db.book_storage import validate_book_storage
+from calibre.ebooks.metadata import authors_to_string
+from calibre.srv.errors import BookNotFound, HTTPBadRequest, HTTPForbidden, HTTPNotFound
+from calibre.srv.last_read import last_read_cache
 from calibre.srv.metadata import book_as_json
 from calibre.srv.render_book import RENDER_VERSION
 from calibre.srv.routes import endpoint, json
-from calibre.srv.utils import get_db, get_library_data
-from calibre.utils.filenames import rmtree
+from calibre.srv.utils import get_db, get_library_data, is_recipe_fmt
+from calibre.utils.filenames import path_from_root, rmtree
+from calibre.utils.localization import _
+from calibre.utils.resources import get_path as P
 from calibre.utils.serialize import json_dumps
-from polyglot.builtins import as_unicode, itervalues, map
+from polyglot.builtins import as_unicode
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from calibre.db.book_storage import BookStorageEntry
+    from calibre.srv.handler import Context
+    from calibre.srv.http_response import ETaggedDynamicOutput, ETaggedFile, RequestData
+    from calibre.srv.jobs import Job
 
 cache_lock = RLock()
-queued_jobs = {}
-failed_jobs = {}
+queued_jobs: dict[str, int] = {}
+failed_jobs: dict[str, tuple[bool | None, str | None]] = {}
 
 
-def abspath(x):
+def abspath(x: str) -> str:
     x = os.path.abspath(x)
     if iswindows and not x.startswith('\\\\?\\'):
         x = '\\\\?\\' + os.path.abspath(x)
     return x
 
 
-_books_cache_dir = None
+_books_cache_dir: str | None = None
 
 
-def books_cache_dir():
+def books_cache_dir() -> str:
     global _books_cache_dir
     if _books_cache_dir:
         return _books_cache_dir
@@ -46,31 +58,31 @@ def books_cache_dir():
     for d in 'sf':
         try:
             os.makedirs(os.path.join(base, d))
-        except EnvironmentError as e:
+        except OSError as e:
             if e.errno != errno.EEXIST:
                 raise
     _books_cache_dir = base
     return base
 
 
-def book_hash(library_uuid, book_id, fmt, size, mtime):
+def book_hash(library_uuid: str, book_id: int, fmt: str, size: int, mtime: int) -> str:
     raw = json_dumps((library_uuid, book_id, fmt.upper(), size, mtime, RENDER_VERSION))
-    return as_unicode(sha1(raw).hexdigest())
+    return as_unicode(sha256(raw).hexdigest())
 
 
 staging_cleaned = False
 
 
-def safe_remove(x, is_file=None):
+def safe_remove(x: str, is_file: bool | None = None) -> None:
     if is_file is None:
         is_file = os.path.isfile(x)
     try:
         os.remove(x) if is_file else rmtree(x, ignore_errors=True)
-    except EnvironmentError:
+    except OSError:
         pass
 
 
-def queue_job(ctx, copy_format_to, bhash, fmt, book_id, size, mtime):
+def queue_job(ctx: Context, copy_format_to: Callable[[IO[bytes]], object], bhash: str, fmt: str, book_id: int, size: int, mtime: int) -> int | None:
     global staging_cleaned
     tdir = os.path.join(books_cache_dir(), 's')
     if not staging_cleaned:
@@ -81,17 +93,26 @@ def queue_job(ctx, copy_format_to, bhash, fmt, book_id, size, mtime):
     with os.fdopen(fd, 'wb') as f:
         copy_format_to(f)
     tdir = tempfile.mkdtemp('', '', tdir)
-    job_id = ctx.start_job('Render book %s (%s)' % (book_id, fmt), 'calibre.srv.render_book', 'render', args=(
-        pathtoebook, tdir, {'size':size, 'mtime':mtime, 'hash':bhash}),
-        job_done_callback=job_done, job_data=(bhash, pathtoebook, tdir))
-    queued_jobs[bhash] = job_id
+    job_id = ctx.start_job(
+        f'Render book {book_id} ({fmt})',
+        'calibre.srv.render_book',
+        'render',
+        args=(pathtoebook, tdir, {'size': size, 'mtime': mtime, 'hash': bhash}),
+        job_done_callback=job_done,
+        job_data=(bhash, pathtoebook, tdir),
+    )
+    if job_id is None:  # the server is shutting down
+        safe_remove(pathtoebook)
+        safe_remove(tdir, False)
+    else:
+        queued_jobs[bhash] = job_id
     return job_id
 
 
-last_final_clean_time = 0
+last_final_clean_time: float = 0
 
 
-def clean_final(interval=24 * 60 * 60):
+def clean_final(interval: float = 24 * 60 * 60) -> None:
     global last_final_clean_time
     now = time.time()
     if now - last_final_clean_time < interval:
@@ -100,17 +121,28 @@ def clean_final(interval=24 * 60 * 60):
     fdir = os.path.join(books_cache_dir(), 'f')
     for x in os.listdir(fdir):
         try:
-            tm = os.path.getmtime(os.path.join(fdir, x,  'calibre-book-manifest.json'))
-        except EnvironmentError:
+            tm = os.path.getmtime(os.path.join(fdir, x, 'calibre-book-manifest.json'))
+        except OSError:
             continue
         if now - tm >= interval:
             # This book has not been accessed for a long time, delete it
             safe_remove(x)
 
 
-def job_done(job):
+def rename_with_retry(a: str, b: str, sleep_time: float = 1) -> None:
+    try:
+        os.rename(a, b)
+    except PermissionError:
+        if iswindows:
+            time.sleep(sleep_time)  # In case something has temporarily locked a file
+            os.rename(a, b)
+        else:
+            raise
+
+
+def job_done(job: Job) -> None:
     with cache_lock:
-        bhash, pathtoebook, tdir = job.data
+        bhash, pathtoebook, tdir = cast('tuple[str, str, str]', job.data)
         queued_jobs.pop(bhash, None)
         safe_remove(pathtoebook)
         if job.failed:
@@ -121,25 +153,28 @@ def job_done(job):
                 clean_final()
                 dest = os.path.join(books_cache_dir(), 'f', bhash)
                 safe_remove(dest, False)
-                os.rename(tdir, dest)
+                rename_with_retry(tdir, dest)
             except Exception:
                 import traceback
+
                 failed_jobs[bhash] = (False, traceback.format_exc())
 
 
-@endpoint('/book-manifest/{book_id}/{fmt}', postprocess=json, types={'book_id':int})
-def book_manifest(ctx, rd, book_id, fmt):
+@endpoint('/book-manifest/{book_id}/{fmt}', postprocess=json, types={'book_id': int})
+def book_manifest(ctx: Context, rd: RequestData, book_id: int, fmt: str) -> dict[str, object]:
     db, library_id = get_library_data(ctx, rd)[:2]
     force_reload = rd.query.get('force_reload') == '1'
+    if is_recipe_fmt(fmt):
+        raise HTTPForbidden('Viewing recipe files is not allowed, as they allow code execution')
     if plugin_for_input_format(fmt) is None:
-        raise HTTPNotFound('The format %s cannot be viewed' % fmt.upper())
+        raise HTTPNotFound(f'The format {fmt.upper()} cannot be viewed')
     if not ctx.has_id(rd, db, book_id):
         raise BookNotFound(book_id, db)
     with db.safe_read_lock:
         fm = db.format_metadata(book_id, fmt, allow_cache=False)
         if not fm:
-            raise HTTPNotFound('No %s format for the book (id:%s) in the library: %s' % (fmt, book_id, library_id))
-        size, mtime = map(int, (fm['size'], time.mktime(fm['mtime'].utctimetuple())*10))
+            raise HTTPNotFound(f'No {fmt} format for the book (id:{book_id}) in the library: {library_id}')
+        size, mtime = map(int, (fm['size'], time.mktime(fm['mtime'].utctimetuple()) * 10))
         bhash = book_hash(db.library_id, book_id, fmt, size, mtime)
         with cache_lock:
             mpath = abspath(os.path.join(books_cache_dir(), 'f', bhash, 'calibre-book-manifest.json'))
@@ -147,50 +182,53 @@ def book_manifest(ctx, rd, book_id, fmt):
                 safe_remove(mpath, True)
             try:
                 os.utime(mpath, None)
-                with lopen(mpath, 'rb') as f:
+                with open(mpath, 'rb') as f:
                     ans = jsonlib.load(f)
                 ans['metadata'] = book_as_json(db, book_id)
                 user = rd.username or None
                 ans['last_read_positions'] = db.get_last_read_positions(book_id, fmt, user) if user else []
                 ans['annotations_map'] = db.annotations_map_for_book(book_id, fmt, user_type='web', user=user or '*')
+                ans['book_storage'] = db.book_storage_for_book(book_id, fmt, user_type='web', user=user) if user else None
                 return ans
-            except EnvironmentError as e:
+            except OSError as e:
                 if e.errno != errno.ENOENT:
                     raise
             x = failed_jobs.pop(bhash, None)
             if x is not None:
-                return {'aborted':x[0], 'traceback':x[1], 'job_status':'finished'}
+                return {'aborted': x[0], 'traceback': x[1], 'job_status': 'finished'}
             job_id = queued_jobs.get(bhash)
             if job_id is None:
                 job_id = queue_job(ctx, partial(db.copy_format_to, book_id, fmt), bhash, fmt, book_id, size, mtime)
-    status, result, tb, aborted = ctx.job_status(job_id)
-    return {'aborted': aborted, 'traceback':tb, 'job_status':status, 'job_id':job_id}
+    # job_id is None when the server is shutting down
+    status, result, tb, aborted = (None, None, None, None) if job_id is None else ctx.job_status(job_id)
+    return {'aborted': aborted, 'traceback': tb, 'job_status': status, 'job_id': job_id}
 
 
-@endpoint('/book-file/{book_id}/{fmt}/{size}/{mtime}/{+name}', types={'book_id':int, 'size':int, 'mtime':int})
-def book_file(ctx, rd, book_id, fmt, size, mtime, name):
+@endpoint('/book-file/{book_id}/{fmt}/{size}/{mtime}/{+name}', types={'book_id': int, 'size': int, 'mtime': int})
+def book_file(ctx: Context, rd: RequestData, book_id: int, fmt: str, size: int, mtime: int, name: str) -> ETaggedFile:
     db, library_id = get_library_data(ctx, rd)[:2]
     if not ctx.has_id(rd, db, book_id):
         raise BookNotFound(book_id, db)
     bhash = book_hash(db.library_id, book_id, fmt, size, mtime)
-    base = abspath(os.path.join(books_cache_dir(), 'f'))
-    mpath = abspath(os.path.join(base, bhash, name))
-    if not mpath.startswith(base):
-        raise HTTPNotFound('No book file with hash: %s and name: %s' % (bhash, name))
+    base = abspath(os.path.join(books_cache_dir(), 'f', bhash))
     try:
-        return rd.filesystem_file_with_custom_etag(lopen(mpath, 'rb'), bhash, name)
-    except EnvironmentError as e:
+        mpath = path_from_root(base, name)
+    except ValueError:
+        raise HTTPNotFound(f'No book file with hash: {bhash} and name: {name}')
+    try:
+        return rd.filesystem_file_with_custom_etag(open(mpath, 'rb'), bhash, name)
+    except OSError as e:
         if e.errno != errno.ENOENT:
             raise
-        raise HTTPNotFound('No book file with hash: %s and name: %s' % (bhash, name))
+        raise HTTPNotFound(f'No book file with hash: {bhash} and name: {name}')
 
 
 @endpoint('/book-get-last-read-position/{library_id}/{+which}', postprocess=json)
-def get_last_read_position(ctx, rd, library_id, which):
-    '''
+def get_last_read_position(ctx: Context, rd: RequestData, library_id: str, which: str) -> dict[str, object]:
+    """
     Get last read position data for the specified books, where which is of the form:
     book_id1-fmt1_book_id2-fmt2,...
-    '''
+    """
     db = get_db(ctx, rd, library_id)
     user = rd.username or None
     if not user:
@@ -205,34 +243,40 @@ def get_last_read_position(ctx, rd, library_id, which):
             continue
         if book_id not in allowed_book_ids:
             continue
-        key = '{}:{}'.format(book_id, fmt)
+        key = f'{book_id}:{fmt}'
         ans[key] = db.get_last_read_positions(book_id, fmt, user)
     return ans
 
 
-@endpoint('/book-set-last-read-position/{library_id}/{book_id}/{+fmt}', types={'book_id': int}, methods=('POST',))
-def set_last_read_position(ctx, rd, library_id, book_id, fmt):
+@endpoint('/book-set-last-read-position/{library_id}/{book_id}/{+fmt}', types={'book_id': int}, methods=('POST',), needs_db_write=True)
+def set_last_read_position(ctx: Context, rd: RequestData, library_id: str, book_id: int, fmt: str) -> bytes:
     db = get_db(ctx, rd, library_id)
-    user = rd.username or None
+    user = rd.username
     if not ctx.has_id(rd, db, book_id):
         raise BookNotFound(book_id, db)
+    if not user:
+        raise HTTPForbidden('Last read positions are only saved for logged in users')
     try:
         data = jsonlib.load(rd.request_body_file)
         device, cfi, pos_frac = data['device'], data['cfi'], data['pos_frac']
     except Exception:
         raise HTTPNotFound('Invalid data')
-    db.set_last_read_position(
-        book_id, fmt, user=user, device=device, cfi=cfi or None, pos_frac=pos_frac)
+    cfi = cfi or None
+    db.set_last_read_position(book_id, fmt, user=user, device=device, cfi=cfi, pos_frac=pos_frac)
+    with db.safe_read_lock:
+        tt = cast('str', db._field_for('title', book_id))  # books always have a title
+        tt += ' ' + _('by') + ' ' + authors_to_string(db._field_for('authors', book_id))
+    last_read_cache().add_last_read_position(library_id, book_id, fmt, user, cfi, pos_frac, tt)
     rd.outheaders['Content-type'] = 'text/plain'
     return b''
 
 
 @endpoint('/book-get-annotations/{library_id}/{+which}', postprocess=json)
-def get_annotations(ctx, rd, library_id, which):
-    '''
+def get_annotations(ctx: Context, rd: RequestData, library_id: str, which: str) -> dict[str, object]:
+    """
     Get annotations and last read position data for the specified books, where which is of the form:
     book_id1-fmt1_book_id2-fmt2,...
-    '''
+    """
     db = get_db(ctx, rd, library_id)
     user = rd.username or '*'
     ans = {}
@@ -245,16 +289,21 @@ def get_annotations(ctx, rd, library_id, which):
             continue
         if book_id not in allowed_book_ids:
             continue
-        key = '{}:{}'.format(book_id, fmt)
+        key = f'{book_id}:{fmt}'
         ans[key] = {
             'last_read_positions': db.get_last_read_positions(book_id, fmt, user),
-            'annotations_map': db.annotations_map_for_book(book_id, fmt, user_type='web', user=user) if user else {}
+            'annotations_map': db.annotations_map_for_book(book_id, fmt, user_type='web', user=user) if user else {},
         }
     return ans
 
 
-@endpoint('/book-update-annotations/{library_id}/{book_id}/{+fmt}', types={'book_id': int}, methods=('POST',))
-def update_annotations(ctx, rd, library_id, book_id, fmt):
+@endpoint(
+    '/book-update-annotations/{library_id}/{book_id}/{+fmt}',
+    types={'book_id': int},
+    methods=('POST',),
+    needs_db_write=True,
+)
+def update_annotations(ctx: Context, rd: RequestData, library_id: str, book_id: int, fmt: str) -> bytes:
     db = get_db(ctx, rd, library_id)
     user = rd.username or '*'
     if not ctx.has_id(rd, db, book_id):
@@ -264,22 +313,63 @@ def update_annotations(ctx, rd, library_id, book_id, fmt):
     except Exception:
         raise HTTPNotFound('Invalid data')
     alist = []
-    for val in itervalues(amap):
+    for val in amap.values():
         if val:
             alist.extend(val)
     db.merge_annotations_for_book(book_id, fmt, alist, user_type='web', user=user)
     return b''
 
 
+@endpoint('/book-get-storage/{library_id}/{book_id}/{+fmt}', types={'book_id': int}, postprocess=json)
+def get_book_storage(ctx: Context, rd: RequestData, library_id: str, book_id: int, fmt: str) -> BookStorageEntry | None:
+    """
+    Get the per book storage (localStorage for scripts in the book) for the
+    current user. Returns null if there is no storage or the user is not logged
+    in, as storage is not saved on the server for anonymous users.
+    """
+    db = get_db(ctx, rd, library_id)
+    if not ctx.has_id(rd, db, book_id):
+        raise BookNotFound(book_id, db)
+    if not rd.username:
+        return None
+    return db.book_storage_for_book(book_id, fmt, user_type='web', user=rd.username)
+
+
+@endpoint(
+    '/book-set-storage/{library_id}/{book_id}/{+fmt}',
+    types={'book_id': int},
+    methods=('POST',),
+    needs_db_write=True,
+    postprocess=json,
+)
+def set_book_storage(ctx: Context, rd: RequestData, library_id: str, book_id: int, fmt: str) -> BookStorageEntry:
+    """
+    Set the per book storage for the current user, unless the storage on the
+    server is newer. Returns the storage on the server after the update. The
+    POST body must be a JSON object of the form: {"timestamp": seconds since
+    epoch, "data": {key: value}}. Only available to logged in users.
+    """
+    db = get_db(ctx, rd, library_id)
+    if not ctx.has_id(rd, db, book_id):
+        raise BookNotFound(book_id, db)
+    if not rd.username:
+        raise HTTPForbidden('Book storage is only available to logged in users')
+    try:
+        entry = validate_book_storage(jsonlib.load(rd.request_body_file))
+    except ValueError as err:
+        raise HTTPBadRequest(f'Invalid book storage: {err}')
+    return db.update_book_storage_for_book(book_id, fmt, entry, user_type='web', user=rd.username)
+
+
 mathjax_lock = Lock()
-mathjax_manifest = None
+mathjax_manifest: dict | None = None
 
 
-def manifest_as_json():
+def manifest_as_json() -> bytes:
     return P('mathjax/manifest.json', data=True, allow_user_override=False)
 
 
-def get_mathjax_manifest():
+def get_mathjax_manifest() -> dict:
     global mathjax_manifest
     with mathjax_lock:
         if mathjax_manifest is None:
@@ -288,13 +378,13 @@ def get_mathjax_manifest():
 
 
 @endpoint('/mathjax/{+which=""}', auth_required=False)
-def mathjax(ctx, rd, which):
+def mathjax(ctx: Context, rd: RequestData, which: str) -> ETaggedDynamicOutput | ETaggedFile:
     manifest = get_mathjax_manifest()
     if not which:
         return rd.etagged_dynamic_response(manifest['etag'], manifest_as_json, content_type='application/json; charset=UTF-8')
     if which not in manifest['files']:
-        raise HTTPNotFound('No MathJax file named: %s' % which)
+        raise HTTPNotFound(f'No MathJax file named: {which}')
     path = os.path.abspath(P('mathjax/' + which, allow_user_override=False))
     if not path.startswith(P('mathjax', allow_user_override=False)):
-        raise HTTPNotFound('No MathJax file named: %s' % which)
-    return rd.filesystem_file_with_constant_etag(lopen(path, 'rb'), manifest['etag'])
+        raise HTTPNotFound(f'No MathJax file named: {which}')
+    return rd.filesystem_file_with_constant_etag(open(path, 'rb'), manifest['etag'])

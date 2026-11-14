@@ -4,12 +4,12 @@ from __python__ import bound_methods, hash_literals
 
 import traceback
 from aes import GCM
-from gettext import gettext as _, install
+from elementmaker import E
+from gettext import install
 
 from book_list.globals import get_translations, main_js
 from book_list.theme import get_font_family
 from dom import ensure_id
-
 
 LOADING_DOC = '''
 <!DOCTYPE html>
@@ -17,10 +17,8 @@ LOADING_DOC = '''
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
-<script type="text/javascript" id="bootstrap">
-window.iframe_entry_point = '__ENTRY_POINT__';  // different in different iframes
-window.default_font_family = '__FONT__';  // from the theme
-__SCRIPT__
+<!-- script must be on a single line so that source map matches up -->
+<script type="text/javascript" id="bootstrap">window.iframe_entry_point = '__ENTRY_POINT__'; window.default_font_family = '__FONT__';  __SCRIPT__
 end_script
 </head>
 <body>
@@ -32,15 +30,7 @@ __BS__
 '''.replace('end_script', '<' + '/script>')  # cannot have a closing script tag as this is embedded inside a script tag in index.html
 
 
-def iframe_js():
-    if not iframe_js.ans:
-        iframe_js.ans = main_js().replace(/is_running_in_iframe\s*=\s*false/, 'is_running_in_iframe = true')
-        main_js(None)
-    return iframe_js.ans
-
-
 class Messenger:
-
     def __init__(self):
         self.secret = Uint8Array(64)
 
@@ -57,17 +47,23 @@ class Messenger:
 
 
 class IframeWrapper:
-
-    def __init__(self, handlers, iframe, entry_point, bootstrap_text, url):
+    def __init__(self, handlers, iframe, entry_point, bootstrap_text):
         self.messenger = Messenger()
         self.iframe_id = ensure_id(iframe, 'content-iframe')
-        self.needs_init = True
+        self.reload_count = 0
+        if ':' in entry_point:
+            self.needs_init = iframe.src is not entry_point
+            self.srcdoc_created = True
+            self.constructor_url = entry_point
+            self.entry_point = None
+        else:
+            self.needs_init = True
+            self.srcdoc_created = False
+            self.constructor_url = None
+            self.entry_point = entry_point
         self.ready = False
         self.encrypted_communications = False
-        self.srcdoc_created = False
-        self.constructor_url = url
-        self.entry_point = entry_point
-        self.bootstrap_text = bootstrap_text
+        self.bootstrap_text = bootstrap_text or ''
         self.handlers = {k: handlers[k] for k in handlers}
         self.on_ready_handler = self.handlers.ready
         self.handlers.ready = self.on_iframe_ready
@@ -85,11 +81,11 @@ class IframeWrapper:
         if self.entry_point:
             data = {
                 'BS': self.bootstrap_text,
-                'SCRIPT': iframe_js(),
+                'SCRIPT': main_js(),
                 'FONT': get_font_family(),
                 'ENTRY_POINT': self.entry_point,
             }
-            self.iframe.srcdoc = LOADING_DOC.replace(r, def(match, field): return data[field];)
+            self.iframe.srcdoc = LOADING_DOC.replace(r, def (match, field): return data[field];)
         else:
             self.iframe.src = self.constructor_url
         self.srcdoc_created = True
@@ -105,8 +101,9 @@ class IframeWrapper:
                 iframe.srcdoc = '<p>&nbsp;</p>'
                 iframe.srcdoc = sdoc
             else:
-                iframe.src = 'about:blank'
-                iframe.src = self.constructor_url
+                self.reload_count += 1
+                ch = '&' if '?' in self.constructor_url else '?'
+                iframe.src = self.constructor_url + f'{ch}rc={self.reload_count}'
         else:
             self.create_srcdoc()
 
@@ -116,8 +113,10 @@ class IframeWrapper:
         self.encrypted_communications = False
 
     def _send_message(self, action, encrypted, data):
+        if not self.ready:
+            return
         data.action = action
-        msg = {'data':data, 'encrypted': encrypted}
+        msg = {'data': data, 'encrypted': encrypted}
         if encrypted:
             msg.data = self.messenger.encrypt(data)
         self.iframe.contentWindow.postMessage(msg, '*')
@@ -164,20 +163,38 @@ class IframeWrapper:
             callback()
 
 
-class IframeClient:
+def create_wrapped_iframe(handlers, bootstrap_text, entry_point, kw):
+    if ':' in entry_point:
+        # this is a document loaded via the fake protocol from web_view.py
+        kw.src = entry_point
+        kw.sandbox = (kw.sandbox or '') + ' allow-same-origin'
+    iframe = E.iframe(**kw)
+    ans = IframeWrapper(handlers, iframe, entry_point, bootstrap_text)
+    return iframe, ans
 
-    def __init__(self, handlers):
+
+instance_numbers = {}
+
+
+class IframeClient:
+    def __init__(self, handlers, name):
         self.encrypted_communications = False
+        self.name = name
+        if not instance_numbers[self.name]:
+            instance_numbers[self.name] = 0
+        instance_numbers[self.name] += 1
+        self.instance_num = instance_numbers[self.name]
         self.handlers = {k: handlers[k] for k in handlers}
         self.initialize_handler = handlers.initialize
         self.handlers.initialize = self.initialize
         self.ready_sent = False
         window.addEventListener('message', self.handle_message, False)
-        window.addEventListener('load', def():
-            if not self.ready_sent:
-                self.send_message('ready', {})
-                self.ready_sent = True
-        )
+        window.addEventListener('load', self.send_ready, {'once': True})
+
+    def send_ready(self):
+        if not self.ready_sent:
+            self.send_message('ready', {})
+            self.ready_sent = True
 
     def initialize(self, data):
         nonlocal print
@@ -198,6 +215,9 @@ class IframeClient:
         msg = event.data
         data = msg.data
         if msg.encrypted:
+            if not self.gcm_from_parent:
+                print(f'the iframe {self.name}-{self.instance_num} got an encrypted message from its parent without being initialized')
+                return
             # We cannot use self.encrypted_communications as the 'display'
             # message has to be unencrypted as it transports Blob objects
             try:
@@ -218,12 +238,13 @@ class IframeClient:
                 console.log(e)
                 details = traceback.format_exc()
                 console.log(details)
-                self.send_message('error', title=_('Error in message handler'), details=details, msg=e.toString())
+                self.send_message('error', title='Error in message handler', details=details, msg=e.toString())
         else:
             print('Unknown action in message to iframe from parent: ' + data.action)
 
     def send_message(self, action, data):
         data.action = action
+        data.iframe_id = f'{self.name}-{self.instance_num}'
         if self.encrypted_communications:
             data = self.gcm_to_parent.encrypt(JSON.stringify(data))
         window.parent.postMessage(data, '*')

@@ -110,7 +110,7 @@ will be expanded to::
 
     <a href="filename">whatever text you selected</a>
 
-Inserting a HTML image tag [<i]
+Inserting an HTML image tag [<i]
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 This is very similar to inserting an HTML link, as we saw above. It allows you
@@ -125,6 +125,8 @@ Insert an arbitrary HTML tag [<<]
 
 This allows you to insert an arbitrary full HTML tag (or wrap previously
 selected text in the tag). To use it, simply type ``<<`` and press |ct|.
+If you want to wrap selected text, first select the text, press |ct| then
+type ``<<`` and press |ct| again.
 The editor will expand it to::
 
     <|></>
@@ -135,7 +137,7 @@ Type the tag name, for example: ``span`` and press |ct|, that will result in::
 
 You will note that the closing tag has been automatically filled with ``span``.
 This is achieved with yet another feature of placeholders, *mirroring*.
-Mirroring simply means that if you specify the sample placeholder more than
+Mirroring simply means that if you specify the same placeholder more than
 once in a template, the second and all later positions will be automatically
 filled in with whatever you type in the first position, when you press |ct|.
 The definition for this snippet is::
@@ -180,7 +182,7 @@ snippet in the future. Then specify the *trigger*. A trigger is simply the text
 that you have to type in the editor before pressing |ct| in order to expand the
 snippet.
 
-Then specify the snippet template. You should start with one of the example
+Then specify the snippet template. You should start with one of the examples
 above and modify it to suit your needs. Finally, specify which file types you
 want the snippet to be active for. This way you can have multiple snippets with
 the same trigger text that work differently in different file types.

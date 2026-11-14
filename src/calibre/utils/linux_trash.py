@@ -1,6 +1,4 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
-
 
 # Copyright 2010 Hardcoded Software (http://www.hardcoded.net)
 
@@ -18,13 +16,12 @@
 # For external volumes this implementation will raise an exception if it can't
 # find or create the user's trash directory.
 
-import os, stat
+import os
 import os.path as op
-from datetime import datetime
 import shutil
-
-from polyglot.builtins import unicode_type
-from polyglot.urllib import quote
+import stat
+from datetime import datetime
+from urllib.parse import quote
 
 FILES_DIR = 'files'
 INFO_DIR = 'info'
@@ -36,26 +33,26 @@ HOMETRASH = op.join(XDG_DATA_HOME, 'Trash')
 
 uid = os.getuid()
 TOPDIR_TRASH = '.Trash'
-TOPDIR_FALLBACK = '.Trash-%s'%uid
+TOPDIR_FALLBACK = f'.Trash-{uid}'
 
 
-def uniquote(raw):
-    if isinstance(raw, unicode_type):
+def uniquote(raw: str | bytes) -> str:
+    if isinstance(raw, str):
         raw = raw.encode('utf-8')
-    return unicode_type(quote(raw))
+    return str(quote(raw))
 
 
-def is_parent(parent, path):
+def is_parent(parent: str, path: str) -> bool:
     path = op.realpath(path)  # In case it's a symlink
     parent = op.realpath(parent)
     return path.startswith(parent)
 
 
-def format_date(date):
-    return date.strftime("%Y-%m-%dT%H:%M:%S")
+def format_date(date: datetime) -> str:
+    return date.strftime('%Y-%m-%dT%H:%M:%S')
 
 
-def info_for(src, topdir):
+def info_for(src: str, topdir: str | None) -> str:
     # ...it MUST not include a ".."" directory, and for files not "under" that
     # directory, absolute pathnames must be used. [2]
     if topdir is None or not is_parent(topdir, src):
@@ -63,19 +60,19 @@ def info_for(src, topdir):
     else:
         src = op.relpath(src, topdir)
 
-    info  = "[Trash Info]\n"
-    info += "Path=" + uniquote(src) + "\n"
-    info += "DeletionDate=" + format_date(datetime.now()) + "\n"
+    info = '[Trash Info]\n'
+    info += 'Path=' + uniquote(src) + '\n'
+    info += 'DeletionDate=' + format_date(datetime.now()) + '\n'  # ruff: ignore[call-datetime-now-without-tzinfo]
     return info
 
 
-def check_create(dir):
+def check_create(dir: str) -> None:
     # use 0700 for paths [3]
     if not op.exists(dir):
         os.makedirs(dir, 0o700)
 
 
-def trash_move(src, dst, topdir=None):
+def trash_move(src: str, dst: str, topdir: str | None = None) -> None:
     filename = op.basename(src)
     filespath = op.join(dst, FILES_DIR)
     infopath = op.join(dst, INFO_DIR)
@@ -85,7 +82,7 @@ def trash_move(src, dst, topdir=None):
     destname = filename
     while op.exists(op.join(filespath, destname)) or op.exists(op.join(infopath, destname + INFO_SUFFIX)):
         counter += 1
-        destname = '%s %s%s' % (base_name, counter, ext)
+        destname = f'{base_name} {counter}{ext}'
 
     check_create(filespath)
     check_create(infopath)
@@ -98,7 +95,7 @@ def trash_move(src, dst, topdir=None):
         f.write(data)
 
 
-def find_mount_point(path):
+def find_mount_point(path: str) -> str:
     # Even if something's wrong, "/" is a mount point, so the loop will exit.
     # Use realpath in case it's a symlink
     path = op.realpath(path)  # Required to avoid infinite loop
@@ -107,7 +104,7 @@ def find_mount_point(path):
     return path
 
 
-def find_ext_volume_global_trash(volume_root):
+def find_ext_volume_global_trash(volume_root: str) -> str | None:
     # from [2] Trash directories (1) check for a .Trash dir with the right
     # permissions set.
     trash_dir = op.join(volume_root, TOPDIR_TRASH)
@@ -120,7 +117,7 @@ def find_ext_volume_global_trash(volume_root):
     if not op.isdir(trash_dir) or op.islink(trash_dir) or not (mode & stat.S_ISVTX):
         return None
 
-    trash_dir = op.join(trash_dir, unicode_type(uid))
+    trash_dir = op.join(trash_dir, str(uid))
     try:
         check_create(trash_dir)
     except OSError:
@@ -128,7 +125,7 @@ def find_ext_volume_global_trash(volume_root):
     return trash_dir
 
 
-def find_ext_volume_fallback_trash(volume_root):
+def find_ext_volume_fallback_trash(volume_root: str) -> str:
     # from [2] Trash directories (1) create a .Trash-$uid dir.
     trash_dir = op.join(volume_root, TOPDIR_FALLBACK)
     # Try to make the directory, if we can't the OSError exception will escape
@@ -137,26 +134,27 @@ def find_ext_volume_fallback_trash(volume_root):
     return trash_dir
 
 
-def find_ext_volume_trash(volume_root):
+def find_ext_volume_trash(volume_root: str) -> str:
     trash_dir = find_ext_volume_global_trash(volume_root)
     if trash_dir is None:
         trash_dir = find_ext_volume_fallback_trash(volume_root)
     return trash_dir
 
+
 # Pull this out so it's easy to stub (to avoid stubbing lstat itself)
 
 
-def get_dev(path):
+def get_dev(path: str) -> int:
     return os.lstat(path).st_dev
 
 
-def send2trash(path):
+def send2trash(path: str) -> None:
     if not op.exists(path):
-        raise OSError("File not found: %s" % path)
+        raise OSError(f'File not found: {path}')
     # ...should check whether the user has the necessary permissions to delete
     # it, before starting the trashing operation itself. [2]
     if not os.access(path, os.W_OK):
-        raise OSError("Permission denied: %s" % path)
+        raise OSError(f'Permission denied: {path}')
     # if the file to be trashed is on the same device as HOMETRASH we
     # want to move it there.
     path_dev = get_dev(path)
@@ -172,6 +170,6 @@ def send2trash(path):
         topdir = find_mount_point(path)
         trash_dev = get_dev(topdir)
         if trash_dev != path_dev:
-            raise OSError("Couldn't find mount point for %s" % path)
+            raise OSError(f"Couldn't find mount point for {path}")
         dest_trash = find_ext_volume_trash(topdir)
     trash_move(path, dest_trash, topdir)

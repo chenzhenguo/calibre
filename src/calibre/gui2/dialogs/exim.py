@@ -1,26 +1,43 @@
 #!/usr/bin/env python
-# vim:fileencoding=utf-8
 # License: GPLv3 Copyright: 2015, Kovid Goyal <kovid at kovidgoyal.net>
 
-
+import os
+import stat
 from functools import partial
-from threading import Thread, Event
-import os, stat
+from threading import Event, Thread
 
-from PyQt5.Qt import (
-    QSize, QStackedLayout, QWidget, QVBoxLayout, QLabel, QPushButton,
-    QListWidget, QListWidgetItem, QIcon, Qt, pyqtSignal, QGridLayout,
-    QProgressBar, QDialog, QDialogButtonBox, QScrollArea, QLineEdit, QFrame, QAbstractItemView
+from qt.core import (
+    QAbstractItemView,
+    QBoxLayout,
+    QDialog,
+    QDialogButtonBox,
+    QFrame,
+    QGridLayout,
+    QIcon,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSize,
+    QStackedLayout,
+    Qt,
+    QVBoxLayout,
+    QWidget,
+    pyqtSignal,
 )
 
-from calibre import human_readable, as_unicode
+from calibre import as_unicode, human_readable
 from calibre.constants import iswindows
 from calibre.db.legacy import LibraryDatabase
 from calibre.gui2 import choose_dir, error_dialog, question_dialog
 from calibre.gui2.widgets2 import Dialog
-from calibre.utils.exim import all_known_libraries, export, Importer, import_data
+from calibre.startup import connect_lambda
+from calibre.utils.exim import Importer, all_known_libraries, export, import_data
 from calibre.utils.icu import numeric_sort_key
-from polyglot.builtins import range
+from calibre.utils.localization import _
 
 
 def disk_usage(path_to_dir, abort=None):
@@ -37,14 +54,13 @@ def disk_usage(path_to_dir, abort=None):
                 if stat.S_ISDIR(r.st_mode):
                     stack.append(cpath)
                 ans += r.st_size
-        except EnvironmentError:
+        except OSError:
             pass
     return ans
 
 
 class ImportLocation(QWidget):
-
-    def __init__(self, lpath, parent=None):
+    def __init__(self, lpath, parent=None) -> None:
         QWidget.__init__(self, parent)
         self.l = l = QGridLayout(self)
         self.la = la = QLabel(_('Previous location: ') + lpath)
@@ -54,12 +70,12 @@ class ImportLocation(QWidget):
         self.le = le = QLineEdit(self)
         le.setPlaceholderText(_('Location to import this library to'))
         l.addWidget(le, 1, 0)
-        self.b = b = QPushButton(QIcon(I('document_open.png')), _('Select &folder'), self)
+        self.b = b = QPushButton(QIcon.ic('document_open.png'), _('Select &folder'), self)
         b.clicked.connect(self.select_folder)
         l.addWidget(b, 1, 1)
         self.lpath = lpath
 
-    def select_folder(self):
+    def select_folder(self) -> None:
         path = choose_dir(self, 'select-folder-for-imported-library', _('Choose a folder for this library'))
         if path is not None:
             self.le.setText(path)
@@ -70,14 +86,13 @@ class ImportLocation(QWidget):
 
 
 class RunAction(QDialog):
-
     update_current_signal = pyqtSignal(object, object, object)
     update_overall_signal = pyqtSignal(object, object, object)
     finish_signal = pyqtSignal()
 
-    def __init__(self, title, err_msg, action, parent=None):
+    def __init__(self, title, err_msg, action, parent=None) -> None:
         QDialog.__init__(self, parent)
-        self.setWindowTitle(_('Working please wait...'))
+        self.setWindowTitle(_('Working, please wait...'))
         self.title, self.action, self.tb, self.err_msg = title, action, None, err_msg
         self.abort = Event()
         self.setup_ui()
@@ -85,7 +100,7 @@ class RunAction(QDialog):
         t.daemon = True
         t.start()
 
-    def setup_ui(self):
+    def setup_ui(self) -> None:
         self.l = l = QGridLayout(self)
         self.bb = QDialogButtonBox(self)
         self.bb.setStandardButtons(QDialogButtonBox.StandardButton.Cancel)
@@ -98,7 +113,7 @@ class RunAction(QDialog):
         self.overall = p = QProgressBar(self)
         p.setMinimum(0), p.setValue(0), p.setMaximum(0)
         p.setMinimumWidth(450)
-        l.addWidget(p, l.rowCount()-1, 1)
+        l.addWidget(p, l.rowCount() - 1, 1)
         self.omsg = la = QLabel(self)
         la.setMaximumWidth(450)
         l.addWidget(la, l.rowCount(), 1)
@@ -106,7 +121,7 @@ class RunAction(QDialog):
         l.addWidget(la, l.rowCount(), 0)
         self.current = p = QProgressBar(self)
         p.setMinimum(0), p.setValue(0), p.setMaximum(0)
-        l.addWidget(p, l.rowCount()-1, 1)
+        l.addWidget(p, l.rowCount() - 1, 1)
         self.cmsg = la = QLabel(self)
         la.setMaximumWidth(450)
         l.addWidget(la, l.rowCount(), 1)
@@ -115,40 +130,47 @@ class RunAction(QDialog):
         self.update_overall_signal.connect(self.update_overall, type=Qt.ConnectionType.QueuedConnection)
         self.finish_signal.connect(self.finish_processing, type=Qt.ConnectionType.QueuedConnection)
 
-    def update_overall(self, msg, count, total):
+    def update_overall(self, msg, count, total) -> None:
         self.overall.setMaximum(total), self.overall.setValue(count)
         self.omsg.setText(msg)
 
-    def update_current(self, msg, count, total):
+    def update_current(self, msg, count, total) -> None:
         self.current.setMaximum(total), self.current.setValue(count)
         self.cmsg.setText(msg)
 
-    def reject(self):
+    def reject(self) -> None:
         self.abort.set()
-        self.bb.button(QDialogButtonBox.StandardButton.Cancel).setEnabled(False)
+        cancel_btn = self.bb.button(QDialogButtonBox.StandardButton.Cancel)
+        assert cancel_btn is not None
+        cancel_btn.setEnabled(False)
 
     def finish_processing(self):
         if self.abort.is_set():
             return QDialog.reject(self)
         if self.tb is not None:
-            error_dialog(self, _('Failed'), self.err_msg + ' ' + _('Click "Show Details" for more information.'),
-                            det_msg=self.tb, show=True)
+            error_dialog(
+                self,
+                _('Failed'),
+                self.err_msg + ' ' + _('Click "Show details" for more information.'),
+                det_msg=self.tb,
+                show=True,
+            )
         self.accept()
 
-    def run_action(self):
+    def run_action(self) -> None:
         try:
             self.action(abort=self.abort, progress1=self.update_overall_signal.emit, progress2=self.update_current_signal.emit)
         except Exception:
             import traceback
+
             self.tb = traceback.format_exc()
         self.finish_signal.emit()
 
 
 class EximDialog(Dialog):
-
     update_disk_usage = pyqtSignal(object, object)
 
-    def __init__(self, parent=None, initial_panel=None):
+    def __init__(self, parent=None, initial_panel=None) -> None:
         self.initial_panel = initial_panel
         self.abort_disk_usage = Event()
         self.restart_needed = False
@@ -157,22 +179,27 @@ class EximDialog(Dialog):
     def sizeHint(self):
         return QSize(800, 600)
 
-    def setup_ui(self):
+    def setup_ui(self) -> None:
         self.l = l = QVBoxLayout(self)
         self.stack = s = QStackedLayout()
         l.addLayout(s)
         l.addWidget(self.bb)
         self.welcome = w = QWidget(self)
         s.addWidget(w)
-        w.l = l = QVBoxLayout(w)
-        w.la = la = QLabel('<p>' + _(
-            'You can export all calibre data, including your books, settings and plugins'
-            ' into a single directory. Then, you can use this tool to re-import all that'
-            ' data into a different calibre install, for example, on another computer.') + '<p>' +
-        _(
-            'This is a simple way to move your calibre installation with all its data to'
-            ' a new computer, or to replicate your current setup on a second computer.'
-        ))
+        l = QVBoxLayout(w)
+        la = QLabel(
+            '<p>'
+            + _(
+                'You can export all calibre data, including your books, settings and plugins'
+                ' into a single folder. Then, you can use this tool to re-import all that'
+                ' data into a different calibre install, for example, on another computer.'
+            )
+            + '<p>'
+            + _(
+                'This is a simple way to move your calibre installation with all its data to'
+                ' a new computer, or to replicate your current setup on a second computer.'
+            )
+        )
         la.setWordWrap(True)
         l.addWidget(la)
         l.addSpacing(20)
@@ -189,14 +216,16 @@ class EximDialog(Dialog):
 
     def export_lib_text(self, lpath, size=None):
         return _('{0} [Size: {1}]\nin {2}').format(
-            os.path.basename(lpath), ('' if size < 0 else human_readable(size))
-            if size is not None else _('Calculating...'), os.path.dirname(lpath))
+            os.path.basename(lpath),
+            ('' if size < 0 else human_readable(size)) if size is not None else _('Calculating...'),
+            os.path.dirname(lpath),
+        )
 
-    def setup_export_panel(self):
+    def setup_export_panel(self) -> None:
         self.export_panel = w = QWidget(self)
         self.stack.addWidget(w)
-        w.l = l = QVBoxLayout(w)
-        w.la = la = QLabel(_('Select which libraries you want to export below'))
+        l = QVBoxLayout(w)
+        la = QLabel(_('Select which libraries you want to export below'))
         la.setWordWrap(True), l.addWidget(la)
         self.lib_list = ll = QListWidget(self)
         l.addWidget(ll)
@@ -204,38 +233,47 @@ class EximDialog(Dialog):
         ll.setStyleSheet('QListView::item { padding: 5px }')
         ll.setAlternatingRowColors(True)
         lpaths = all_known_libraries()
-        for lpath in sorted(lpaths, key=lambda x:numeric_sort_key(os.path.basename(x))):
+        for lpath in sorted(lpaths, key=lambda x: numeric_sort_key(os.path.basename(x))):
             i = QListWidgetItem(self.export_lib_text(lpath), ll)
             i.setData(Qt.ItemDataRole.UserRole, lpath)
-            i.setData(Qt.ItemDataRole.UserRole+1, lpaths[lpath])
-            i.setIcon(QIcon(I('lt.png')))
+            i.setData(Qt.ItemDataRole.UserRole + 1, lpaths[lpath])
+            i.setIcon(QIcon.ic('lt.png'))
             i.setSelected(True)
-        self.update_disk_usage.connect((
-            lambda i, sz: self.lib_list.item(i).setText(self.export_lib_text(
-                self.lib_list.item(i).data(Qt.ItemDataRole.UserRole), sz))), type=Qt.ConnectionType.QueuedConnection)
 
-    def get_lib_sizes(self):
+        def _on_disk_usage_update(i, sz) -> None:
+            item = self.lib_list.item(i)
+            assert item is not None
+            item.setText(self.export_lib_text(item.data(Qt.ItemDataRole.UserRole), sz))
+
+        self.update_disk_usage.connect(_on_disk_usage_update, type=Qt.ConnectionType.QueuedConnection)
+
+    def get_lib_sizes(self) -> None:
         for i in range(self.lib_list.count()):
-            path = self.lib_list.item(i).data(Qt.ItemDataRole.UserRole)
+            lib_list_item = self.lib_list.item(i)
+            assert lib_list_item is not None
+            path = lib_list_item.data(Qt.ItemDataRole.UserRole)
             try:
                 sz = disk_usage(path, abort=self.abort_disk_usage)
             except Exception:
                 import traceback
+
                 traceback.print_exc()
             self.update_disk_usage.emit(i, sz)
 
-    def setup_import_panel(self):
+    def setup_import_panel(self) -> None:
         self.import_panel = w = QWidget(self)
         self.stack.addWidget(w)
-        w.stack = s = QStackedLayout(w)
+        self.import_panel_stack = s = QStackedLayout(w)
         self.ig = w = QWidget()
         s.addWidget(w)
-        w.l = l = QVBoxLayout(w)
-        w.la = la = QLabel(_('Specify the folder containing the previously exported calibre data that you'
-                             ' wish to import.'))
+        l = QVBoxLayout(w)
+        la = QLabel(_('<b style="color: red">WARNING</b>: do not import calibre data you get from an untrusted source, as that is a security risk.'))
         la.setWordWrap(True)
         l.addWidget(la)
-        self.export_dir_button = b = QPushButton(QIcon(I('document_open.png')), _('Choose &folder'), self)
+        la = QLabel(_('Specify the folder containing the previously exported calibre data that you wish to import.'))
+        la.setWordWrap(True)
+        l.addWidget(la)
+        self.export_dir_button = b = QPushButton(QIcon.ic('document_open.png'), _('Choose &folder'), self)
         b.clicked.connect(self.select_import_folder)
         l.addWidget(b), l.addStretch()
 
@@ -244,9 +282,13 @@ class EximDialog(Dialog):
         s.addWidget(w)
         self.slp = w = QWidget(self)
         self.select_libraries_panel.setWidget(w)
-        w.l = l = QVBoxLayout(w)
-        w.la = la = QLabel(_('Specify locations for the libraries you want to import. A location must be an empty folder'
-                             ' on your computer. If you leave any blank, those libraries will not be imported.'))
+        l = QVBoxLayout(w)
+        la = QLabel(
+            _(
+                'Specify locations for the libraries you want to import. A location must be an empty folder'
+                ' on your computer. If you leave any blank, those libraries will not be imported.'
+            )
+        )
         la.setWordWrap(True)
         l.addWidget(la)
 
@@ -254,26 +296,37 @@ class EximDialog(Dialog):
         path = choose_dir(self, 'choose-export-folder-for-import', _('Select folder with exported data'))
         if path is None:
             return
-        if not question_dialog(self, _('Are you sure?'), _(
-            'Importing calibre data means all libraries, settings, plugins, etc will be imported. This is'
-            ' a security risk, only proceed if the data you are importing was previously generated by you, using the calibre'
-            ' export functionality.'
-            )):
+        if not question_dialog(
+            self,
+            _('Are you sure?'),
+            _(
+                'Importing calibre data means all libraries, settings, plugins, etc will be imported. This is'
+                ' a security risk, only proceed if the data you are importing was previously generated by you, using the calibre'
+                ' export functionality.'
+            ),
+        ):
             return
         try:
             self.importer = Importer(path)
         except Exception as e:
             import traceback
-            return error_dialog(self, _('Not valid'), _(
-                'The folder {0} is not valid: {1}').format(path, as_unicode(e)), det_msg=traceback.format_exc(), show=True)
-        self.setup_select_libraries_panel()
-        self.import_panel.stack.setCurrentIndex(1)
 
-    def setup_select_libraries_panel(self):
+            return error_dialog(
+                self,
+                _('Not valid'),
+                _('The folder {0} is not valid: {1}').format(path, as_unicode(e)),
+                det_msg=traceback.format_exc(),
+                show=True,
+            )
+        self.setup_select_libraries_panel()
+        self.import_panel_stack.setCurrentIndex(1)
+
+    def setup_select_libraries_panel(self) -> None:
         self.imported_lib_widgets = []
         self.frames = []
         l = self.slp.layout()
-        for lpath in sorted(self.importer.metadata['libraries'], key=lambda x:numeric_sort_key(os.path.basename(x))):
+        assert isinstance(l, QBoxLayout)
+        for lpath in sorted(self.importer.metadata['libraries'], key=lambda x: numeric_sort_key(os.path.basename(x))):
             f = QFrame(self)
             self.frames.append(f)
             l.addWidget(f)
@@ -283,18 +336,26 @@ class EximDialog(Dialog):
             self.imported_lib_widgets.append(w)
         l.addStretch()
 
-    def validate_import(self):
+    def validate_import(self) -> bool:
         from calibre.gui2.ui import get_gui
+
         g = get_gui()
         if g is not None:
             if g.iactions['Connect Share'].content_server_is_running:
-                error_dialog(self, _('Content server running'), _(
-                    'Cannot import while the Content server is running, shut it down first by clicking the'
-                    ' "Connect/share" button on the calibre toolbar'), show=True)
+                error_dialog(
+                    self,
+                    _('Content server running'),
+                    _('Cannot import while the Content server is running, shut it down first by clicking the "Connect/share" button on the calibre toolbar'),
+                    show=True,
+                )
                 return False
-        if self.import_panel.stack.currentIndex() == 0:
-            error_dialog(self, _('No folder selected'), _(
-                'You must select a folder containing the previously exported data that you wish to import'), show=True)
+        if self.import_panel_stack.currentIndex() == 0:
+            error_dialog(
+                self,
+                _('No folder selected'),
+                _('You must select a folder containing the previously exported data that you wish to import'),
+                show=True,
+            )
             return False
         else:
             blanks = []
@@ -304,28 +365,38 @@ class EximDialog(Dialog):
                     blanks.append(w.lpath)
                     continue
                 if iswindows and len(newloc) > LibraryDatabase.WINDOWS_LIBRARY_PATH_LIMIT:
-                    error_dialog(self, _('Too long'),
-                        _('Path to library ({0}) too long. Must be less than'
-                        ' {1} characters.').format(newloc, LibraryDatabase.WINDOWS_LIBRARY_PATH_LIMIT), show=True)
+                    error_dialog(
+                        self,
+                        _('Too long'),
+                        _('Path to library ({0}) too long. It must be less than {1} characters.').format(newloc, LibraryDatabase.WINDOWS_LIBRARY_PATH_LIMIT),
+                        show=True,
+                    )
                     return False
                 if not os.path.isdir(newloc):
-                    error_dialog(self, _('Not a folder'), _('%s is not a folder')%newloc, show=True)
+                    error_dialog(self, _('Not a folder'), _('%s is not a folder') % newloc, show=True)
                     return False
                 if os.listdir(newloc):
-                    error_dialog(self, _('Folder not empty'), _('%s is not an empty folder')%newloc, show=True)
+                    error_dialog(self, _('Folder not empty'), _('%s is not an empty folder') % newloc, show=True)
                     return False
             if blanks:
                 if len(blanks) == len(self.imported_lib_widgets):
-                    error_dialog(self, _('No libraries selected'), _(
-                        'You must specify the location for at least one library'), show=True)
+                    error_dialog(
+                        self,
+                        _('No libraries selected'),
+                        _('You must specify the location for at least one library'),
+                        show=True,
+                    )
                     return False
-                if not question_dialog(self, _('Some libraries ignored'), _(
-                        'You have chosen not to import some libraries. Proceed anyway?')):
+                if not question_dialog(
+                    self,
+                    _('Some libraries ignored'),
+                    _('You have chosen not to import some libraries. Proceed anyway?'),
+                ):
                     return False
         return True
 
-    def show_panel(self, which):
-        self.validate = self.run_action = lambda : True
+    def show_panel(self, which) -> None:
+        self.validate = self.run_action = lambda: True
         if which is None:
             self.bb.setStandardButtons(QDialogButtonBox.StandardButton.Cancel)
         else:
@@ -339,40 +410,58 @@ class EximDialog(Dialog):
                 self.validate = self.validate_import
                 self.run_action = self.run_import_action
             self.bb.setStandardButtons(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        self.stack.setCurrentIndex({'export':1, 'import':2}.get(which, 0))
+        self.stack.setCurrentIndex({'export': 1, 'import': 2}.get(which, 0))
 
-    def validate_export(self):
-        path = choose_dir(self, 'export-calibre-dir', _('Choose a directory to export to'))
+    def validate_export(self) -> bool:
+        path = choose_dir(self, 'export-calibre-dir', _('Choose a folder to export to'))
         if not path:
             return False
         if os.listdir(path):
-            error_dialog(self, _('Export dir not empty'), _(
-                'The directory you choose to export the data to must be empty.'), show=True)
+            error_dialog(
+                self,
+                _('Export folder not empty'),
+                _('The folder you choose to export the data to must be empty.'),
+                show=True,
+            )
             return False
         self.export_dir = path
         return True
 
     def run_export_action(self):
         from calibre.gui2.ui import get_gui
-        library_paths = {i.data(Qt.ItemDataRole.UserRole):i.data(Qt.ItemDataRole.UserRole+1) for i in self.lib_list.selectedItems()}
+
+        library_paths = {i.data(Qt.ItemDataRole.UserRole): i.data(Qt.ItemDataRole.UserRole + 1) for i in self.lib_list.selectedItems()}
         dbmap = {}
         gui = get_gui()
         if gui is not None:
             db = gui.current_db
             dbmap[db.library_path] = db.new_api
-        return RunAction(_('Exporting all calibre data...'), _(
-            'Failed to export data.'), partial(export, self.export_dir, library_paths=library_paths, dbmap=dbmap),
-                      parent=self).exec_() == QDialog.DialogCode.Accepted
+        return (
+            RunAction(
+                _('Exporting all calibre data...'),
+                _('Failed to export data.'),
+                partial(export, self.export_dir, library_paths=library_paths, dbmap=dbmap),
+                parent=self,
+            ).exec()
+            == QDialog.DialogCode.Accepted
+        )
 
     def run_import_action(self):
         library_path_map = {}
         for w in self.imported_lib_widgets:
             if w.path:
                 library_path_map[w.lpath] = w.path
-        return RunAction(_('Importing all calibre data...'), _(
-            'Failed to import data.'), partial(import_data, self.importer, library_path_map), parent=self).exec_() == QDialog.DialogCode.Accepted
+        return (
+            RunAction(
+                _('Importing all calibre data...'),
+                _('Failed to import data.'),
+                partial(import_data, self.importer, library_path_map),
+                parent=self,
+            ).exec()
+            == QDialog.DialogCode.Accepted
+        )
 
-    def accept(self):
+    def accept(self) -> None:
         if not self.validate():
             return
         self.abort_disk_usage.set()
@@ -380,14 +469,15 @@ class EximDialog(Dialog):
             self.restart_needed = self.stack.currentIndex() == 2
             Dialog.accept(self)
 
-    def reject(self):
+    def reject(self) -> None:
         self.abort_disk_usage.set()
         Dialog.reject(self)
 
 
 if __name__ == '__main__':
     from calibre.gui2 import Application
+
     app = Application([])
     d = EximDialog(initial_panel='import')
-    d.exec_()
+    d.exec()
     del app

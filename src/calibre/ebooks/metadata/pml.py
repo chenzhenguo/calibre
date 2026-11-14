@@ -1,27 +1,26 @@
-# -*- coding: utf-8 -*-
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
-
-'''
+"""
 Read meta information from TXT files
-'''
+"""
 
-
-import os
 import glob
+import os
 import re
+from typing import IO, TYPE_CHECKING
 
+from calibre import prepare_string_for_xml
 from calibre.ebooks.metadata import MetaInformation
 from calibre.ptempfile import TemporaryDirectory
+from calibre.utils.localization import _
 from calibre.utils.zipfile import ZipFile
-from calibre import prepare_string_for_xml
+
+if TYPE_CHECKING:
+    from calibre.ebooks.metadata.book.base import Metadata
 
 
-def get_metadata(stream, extract_cover=True):
-    """ Return metadata as a L{MetaInfo} object """
+def get_metadata(stream: IO[bytes], extract_cover: bool = True) -> Metadata:
+    """Return metadata as a L{MetaInfo} object"""
     mi = MetaInformation(_('Unknown'), [_('Unknown')])
     stream.seek(0)
 
@@ -42,37 +41,42 @@ def get_metadata(stream, extract_cover=True):
         if extract_cover:
             mi.cover_data = get_cover(os.path.splitext(os.path.basename(stream.name))[0], os.path.abspath(os.path.dirname(stream.name)))
 
-    for comment in re.findall(br'(?ms)\\v.*?\\v', pml):
-        m = re.search(br'TITLE="(.*?)"', comment)
+    for comment in re.findall(rb'(?ms)\\v.*?\\v', pml):
+        m = re.search(rb'TITLE="(.*?)"', comment)
         if m:
-            mi.title = re.sub('[\x00-\x1f]', '', prepare_string_for_xml(m.group(1).strip().decode('cp1252', 'replace')))
-        m = re.search(br'AUTHOR="(.*?)"', comment)
+            mi.title = re.sub(r'[\x00-\x1f]', '', prepare_string_for_xml(m.group(1).strip().decode('cp1252', 'replace')))
+        m = re.search(rb'AUTHOR="(.*?)"', comment)
         if m:
             if mi.authors == [_('Unknown')]:
                 mi.authors = []
-            mi.authors.append(re.sub('[\x00-\x1f]', '', prepare_string_for_xml(m.group(1).strip().decode('cp1252', 'replace'))))
-        m = re.search(br'PUBLISHER="(.*?)"', comment)
+            mi.authors.append(re.sub(r'[\x00-\x1f]', '', prepare_string_for_xml(m.group(1).strip().decode('cp1252', 'replace'))))
+        m = re.search(rb'PUBLISHER="(.*?)"', comment)
         if m:
-            mi.publisher = re.sub('[\x00-\x1f]', '', prepare_string_for_xml(m.group(1).strip().decode('cp1252', 'replace')))
-        m = re.search(br'COPYRIGHT="(.*?)"', comment)
+            mi.publisher = re.sub(r'[\x00-\x1f]', '', prepare_string_for_xml(m.group(1).strip().decode('cp1252', 'replace')))
+        m = re.search(rb'COPYRIGHT="(.*?)"', comment)
         if m:
-            mi.rights = re.sub('[\x00-\x1f]', '', prepare_string_for_xml(m.group(1).strip().decode('cp1252', 'replace')))
-        m = re.search(br'ISBN="(.*?)"', comment)
+            mi.rights = re.sub(r'[\x00-\x1f]', '', prepare_string_for_xml(m.group(1).strip().decode('cp1252', 'replace')))
+        m = re.search(rb'ISBN="(.*?)"', comment)
         if m:
-            mi.isbn = re.sub('[\x00-\x1f]', '', prepare_string_for_xml(m.group(1).strip().decode('cp1252', 'replace')))
+            mi.isbn = re.sub(r'[\x00-\x1f]', '', prepare_string_for_xml(m.group(1).strip().decode('cp1252', 'replace')))
 
     return mi
 
 
-def get_cover(name, tdir, top_level=False):
+def get_cover(name: str, tdir: str, top_level: bool = False) -> tuple[str, bytes | None]:
     cover_path = ''
     cover_data = None
 
     if top_level:
         cover_path = os.path.join(tdir, 'cover.png') if os.path.exists(os.path.join(tdir, 'cover.png')) else ''
     if not cover_path:
-        cover_path = os.path.join(tdir, name + '_img', 'cover.png') if os.path.exists(os.path.join(tdir, name + '_img', 'cover.png')) else os.path.join(
-            os.path.join(tdir, 'images'), 'cover.png') if os.path.exists(os.path.join(os.path.join(tdir, 'images'), 'cover.png')) else ''
+        cover_path = (
+            os.path.join(tdir, name + '_img', 'cover.png')
+            if os.path.exists(os.path.join(tdir, name + '_img', 'cover.png'))
+            else os.path.join(os.path.join(tdir, 'images'), 'cover.png')
+            if os.path.exists(os.path.join(os.path.join(tdir, 'images'), 'cover.png'))
+            else ''
+        )
     if cover_path:
         with open(cover_path, 'rb') as cstream:
             cover_data = cstream.read()

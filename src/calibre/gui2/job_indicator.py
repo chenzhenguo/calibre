@@ -1,28 +1,18 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-from PyQt5.Qt import (
-    QAbstractAnimation, QBrush, QColor, QEasingCurve, QPainter, QPainterPath,
-    QPalette, QPoint, QPointF, QPropertyAnimation, QRect, Qt, QWidget
-)
+from qt.core import QAbstractAnimation, QBrush, QColor, QEasingCurve, QPainter, QPainterPath, QPalette, QPoint, QPointF, QPropertyAnimation, QRect, Qt, QWidget
 
 from calibre.gui2 import config
-from polyglot.builtins import range
 
 
 class Pointer(QWidget):
-
-    def __init__(self, gui):
+    def __init__(self, gui) -> None:
         QWidget.__init__(self, gui)
         self.setObjectName('jobs_pointer')
         self.setVisible(False)
         self.resize(100, 80)
-        self.animation = QPropertyAnimation(self, b"geometry", self)
+        self.animation = QPropertyAnimation(self, b'geometry', self)
         self.animation.setDuration(750)
         self.animation.setLoopCount(2)
         self.animation.setEasingCurve(QEasingCurve.Type.Linear)
@@ -43,7 +33,7 @@ class Pointer(QWidget):
         self.color.setAlpha(100)
         self.brush = QBrush(self.color, Qt.BrushStyle.SolidPattern)
 
-        # from PyQt5.Qt import QTimer
+        # from qt.core import QTimer
         # QTimer.singleShot(1000, self.start)
 
     @property
@@ -51,8 +41,7 @@ class Pointer(QWidget):
         return self.parent()
 
     def point_at(self, frac):
-        return (self.path.pointAtPercent(frac).toPoint() -
-                QPoint(self.rect().center().x(), self.height()))
+        return self.path.pointAtPercent(frac).toPoint() - QPoint(self.rect().center().x(), self.height())
 
     def rect_at(self, frac):
         return QRect(self.point_at(frac), self.size())
@@ -65,14 +54,14 @@ class Pointer(QWidget):
             parent = parent.parent()
         return pos
 
-    def start(self):
+    def start(self) -> None:
         if config['disable_animations']:
             return
         self.setVisible(True)
         self.raise_()
         end = self.abspos(self.gui.jobs_button)
-        end = QPointF(end.x() + self.gui.jobs_button.width()/3.0, end.y()+20)
-        start = QPointF(end.x(), end.y() - 0.5*self.height())
+        end = QPointF(end.x() + self.gui.jobs_button.width() / 3.0, end.y() + 20)
+        start = QPointF(end.x(), end.y() - 0.5 * self.height())
         self.path = QPainterPath(QPointF(start))
         self.path.lineTo(end)
         self.path.closeSubpath()
@@ -85,7 +74,7 @@ class Pointer(QWidget):
             self.animation.setKeyValueAt(i, self.rect_at(i))
         self.animation.start()
 
-    def paintEvent(self, ev):
+    def paintEvent(self, a0) -> None:
         p = QPainter(self)
         p.setRenderHints(QPainter.RenderHint.Antialiasing)
         p.setBrush(self.brush)

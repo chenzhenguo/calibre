@@ -8,12 +8,31 @@ def is_non_empty_text_node(node):
     return (node.nodeType is Node.TEXT_NODE or node.nodeType is Node.CDATA_SECTION_NODE) and node.nodeValue.length > 0
 
 
-def text_nodes_in_range(r):
+def is_element_visible(elem):
+    s = window.getComputedStyle(elem)
+    return s.display is not 'none' and s.visibility is not 'hidden'
+
+
+def is_node_visible(node):
+    if node.nodeType is not Node.ELEMENT_NODE:
+        node = node.parentElement
+        if not node:
+            return False
+    current = node
+    while current:
+        if not is_element_visible(current):
+            return False
+        current = current.parentElement
+    return True
+
+
+def select_nodes_from_range(r, predicate):
     parent = r.commonAncestorContainer
     doc = parent.ownerDocument or document
     iterator = doc.createNodeIterator(parent)
     in_range = False
-    ans = v'[]'
+    ans = []
+    check_for_end = not (r.startContainer.isSameNode(r.endContainer) and r.startContainer.isSameNode(parent))
     while True:
         node = iterator.nextNode()
         if not node:
@@ -21,18 +40,43 @@ def text_nodes_in_range(r):
         if not in_range and node.isSameNode(r.startContainer):
             in_range = True
         if in_range:
-            if is_non_empty_text_node(node):
+            if predicate(node):
                 ans.push(node)
-            if node.isSameNode(r.endContainer):
+            if check_for_end and node.isSameNode(r.endContainer):
                 break
     return ans
 
 
-def first_annot_in_range(r, annot_id_uuid_map):
+def select_first_node_from_range(r, predicate):
     parent = r.commonAncestorContainer
     doc = parent.ownerDocument or document
     iterator = doc.createNodeIterator(parent)
     in_range = False
+    check_for_end = not (r.startContainer.isSameNode(r.endContainer) and r.startContainer.isSameNode(parent))
+    while True:
+        node = iterator.nextNode()
+        if not node:
+            break
+        if not in_range and node.isSameNode(r.startContainer):
+            in_range = True
+        if in_range:
+            if predicate(node):
+                return node
+            if check_for_end and node.isSameNode(r.endContainer):
+                break
+
+
+def text_nodes_in_range(r):
+    return select_nodes_from_range(r, is_non_empty_text_node)
+
+
+def all_annots_in_range(r, annot_id_uuid_map, ans):
+    parent = r.commonAncestorContainer
+    doc = parent.ownerDocument or document
+    iterator = doc.createNodeIterator(parent)
+    is_full_tree = parent is doc.documentElement
+    in_range = is_full_tree
+    check_for_end = not is_full_tree and not (r.startContainer.isSameNode(r.endContainer) and r.startContainer.isSameNode(parent))
     while True:
         node = iterator.nextNode()
         if not node:
@@ -43,9 +87,23 @@ def first_annot_in_range(r, annot_id_uuid_map):
             if node.dataset and node.dataset.calibreRangeWrapper:
                 annot_id = annot_id_uuid_map[node.dataset.calibreRangeWrapper]
                 if annot_id:
-                    return annot_id
-            if node.isSameNode(r.endContainer):
+                    if not ans:
+                        return annot_id
+                    ans[annot_id] = True
+            if check_for_end and node.isSameNode(r.endContainer):
                 break
+    return ans
+
+
+def first_annot_in_range(r, annot_id_uuid_map):
+    return all_annots_in_range(r, annot_id_uuid_map)
+
+
+def all_annots_in_selection(sel, annot_id_uuid_map):
+    ans = v'{}'
+    for i in range(sel.rangeCount):
+        all_annots_in_range(sel.getRangeAt(i), annot_id_uuid_map, ans)
+    return Object.keys(ans)
 
 
 def remove(node):
@@ -88,8 +146,7 @@ def select_crw(crw):
         sel.removeAllRanges()
         sel.addRange(r)
         return True
-    else:
-        print(f'range-wrapper: {crw} does not exist')
+    print(f'range-wrapper: {crw} does not exist')
     return False
 
 
@@ -99,10 +156,6 @@ def wrap_range(r, wrapper):
     except:
         wrapper.appendChild(r.extractContents())
         r.insertNode(wrapper)
-    # remove any empty text nodes created by surroundContents() on either
-    # side of the wrapper. This happens for instance on Chrome when
-    # wrapping all text inside <i>some text</i>
-    r.commonAncestorContainer.normalize()
 
 
 def create_wrapper_function(wrapper_elem, r, intersecting_wrappers, process_wrapper, all_wrappers):
@@ -126,6 +179,13 @@ def create_wrapper_function(wrapper_elem, r, intersecting_wrappers, process_wrap
             current_range.setEnd(node, end_offset)
             end_node = current_wrapper
             end_offset = 1
+        if current_range.collapsed:
+            # Don't wrap empty ranges. This is needed otherwise two adjacent
+            # selections of text will incorrectly be detected as overlapping.
+            # For example: highlight abc then def in the word abcdef here the
+            # second highlight's first range is the collapsed range at the end
+            # of <span wrapper-for-first-highlight>abc<span wrapper-for-2nd></span></span>
+            return
         crw = node.parentNode?.dataset?.calibreRangeWrapper
         if crw:
             intersecting_wrappers[crw] = True
@@ -133,7 +193,6 @@ def create_wrapper_function(wrapper_elem, r, intersecting_wrappers, process_wrap
         if process_wrapper:
             process_wrapper(current_wrapper)
         all_wrappers.push(current_wrapper)
-        return current_wrapper
 
     return wrap_node
 
@@ -141,24 +200,33 @@ def create_wrapper_function(wrapper_elem, r, intersecting_wrappers, process_wrap
 wrapper_counter = 0
 
 
-def wrap_text_in_range(styler, r, class_to_add_to_last, process_wrapper):
+def wrap_text_in_range(styler, r, class_to_add_to_last, process_wrapper, title):
     if not r:
         sel = window.getSelection()
         if not sel or not sel.rangeCount:
-            return None, v'[]'
+            return None, []
         r = sel.getRangeAt(0)
     if r.isCollapsed:
-        return None, v'[]'
+        return None, []
 
     wrapper_elem = document.createElement('span')
     wrapper_elem.dataset.calibreRangeWrapper = v'++wrapper_counter' + ''
+    if title:
+        wrapper_elem.setAttribute('title', title)
     if styler:
         styler(wrapper_elem)
 
     intersecting_wrappers = {}
-    all_wrappers = v'[]'
+    all_wrappers = []
     wrap_node = create_wrapper_function(wrapper_elem, r, intersecting_wrappers, process_wrapper, all_wrappers)
     text_nodes_in_range(r).map(wrap_node)
+    ancestor = r.commonAncestorContainer
+    if ancestor.nodeType is Node.TEXT_NODE:
+        ancestor = ancestor.parentNode
+    # remove any empty text nodes created by surroundContents() on either
+    # side of the wrapper. This happens for instance on Chrome when
+    # wrapping all text inside <i>some text</i>
+    ancestor.normalize()
     crw = wrapper_elem.dataset.calibreRangeWrapper
     v'delete intersecting_wrappers[crw]'
     if class_to_add_to_last and all_wrappers.length:
@@ -172,27 +240,33 @@ def last_span_for_crw(crw):
         return nodes[-1]
 
 
+def set_title_for_crw(crw, title):
+    for node in document.querySelectorAll(f'span[data-calibre-range-wrapper="{crw}"]'):
+        if title:
+            node.setAttribute('title', title)
+        else:
+            node.removeAttribute('title')
+
+
 def reset_highlight_counter():
     nonlocal wrapper_counter
     wrapper_counter = 0
 
 
 def get_annot_id_for(node, offset, annot_id_uuid_map):
-
     if not node:
         return
     if node.nodeType is Node.ELEMENT_NODE:
-        if node.dataset.calibreRangeWrapper:
+        if node.dataset?.calibreRangeWrapper:
             return annot_id_uuid_map[node.dataset.calibreRangeWrapper]
         if offset is 0:
-
-            if node.firstChild?.nodeType is Node.ELEMENT_NODE and node.firstChild.dataset.calibreRangeWrapper:
+            if node.firstChild?.nodeType is Node.ELEMENT_NODE and node.firstChild.dataset?.calibreRangeWrapper:
                 return annot_id_uuid_map[node.firstChild.dataset.calibreRangeWrapper]
         elif offset < node.childNodes.length:
             node = node.childNodes[offset]
-            return get_annot_id_for(node, 0)
+            return get_annot_id_for(node, 0, annot_id_uuid_map)
     elif node.nodeType is Node.TEXT_NODE:
-        if node.parentNode?.nodeType is Node.ELEMENT_NODE and node.parentNode.dataset.calibreRangeWrapper:
+        if node.parentNode?.nodeType is Node.ELEMENT_NODE and node.parentNode.dataset?.calibreRangeWrapper:
             return annot_id_uuid_map[node.parentNode.dataset.calibreRangeWrapper]
 
 

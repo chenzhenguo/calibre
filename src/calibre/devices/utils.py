@@ -1,114 +1,139 @@
 #!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:fdm=marker:ai
+# License: GPLv3 Copyright: 2012, Kovid Goyal <kovid at kovidgoyal.net>
 
-
-__license__   = 'GPL v3'
-__copyright__ = '2012, Kovid Goyal <kovid at kovidgoyal.net>'
-__docformat__ = 'restructuredtext en'
-
-import os, time, re
+import os
+import re
+import time
 from functools import partial
+from typing import TYPE_CHECKING, cast
 
-from calibre.devices.errors import DeviceError, WrongDestinationError, FreeSpaceError
-from polyglot.builtins import unicode_type
+from calibre.devices.errors import DeviceError, FreeSpaceError, WrongDestinationError
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Sequence
+    from types import ModuleType
+
+    from calibre.ebooks.metadata.book.base import Metadata
 
 
-def sanity_check(on_card, files, card_prefixes, free_space):
+def sanity_check(on_card: str | None, files: Iterable[object], card_prefixes: Sequence[str | None], free_space: Sequence[int]) -> None:
     if on_card == 'carda' and not card_prefixes[0]:
-        raise WrongDestinationError(_(
-            'The reader has no storage card %s. You may have changed '
-            'the default send to device action. Right click on the "Send '
-            'to device" button and reset the default action to be '
-            '"Send to main memory".')%'A')
+        raise WrongDestinationError(
+            _(
+                'The reader has no storage card %s. You may have changed '
+                'the default send to device action. Right click on the "Send '
+                'to device" button and reset the default action to be '
+                '"Send to main memory".'
+            )
+            % 'A'
+        )
     elif on_card == 'cardb' and not card_prefixes[1]:
-        raise WrongDestinationError(_(
-            'The reader has no storage card %s. You may have changed '
-            'the default send to device action. Right click on the "Send '
-            'to device" button and reset the default action to be '
-            '"Send to main memory".')%'B')
+        raise WrongDestinationError(
+            _(
+                'The reader has no storage card %s. You may have changed '
+                'the default send to device action. Right click on the "Send '
+                'to device" button and reset the default action to be '
+                '"Send to main memory".'
+            )
+            % 'B'
+        )
     elif on_card and on_card not in ('carda', 'cardb'):
         raise DeviceError(_('Selected slot: %s is not supported.') % on_card)
 
     size = 0
     for f in files:
-        size += os.path.getsize(getattr(f, 'name', f))
+        # files are either paths or file objects with a name attribute
+        size += os.path.getsize(cast('str', getattr(f, 'name', f)))
 
-    if not on_card and size > free_space[0] - 2*1024*1024:
-        raise FreeSpaceError(_("There is insufficient free space in main memory"))
-    if on_card == 'carda' and size > free_space[1] - 1024*1024:
-        raise FreeSpaceError(_("There is insufficient free space on the storage card"))
-    if on_card == 'cardb' and size > free_space[2] - 1024*1024:
-        raise FreeSpaceError(_("There is insufficient free space on the storage card"))
+    if not on_card and size > free_space[0] - 2 * 1024 * 1024:
+        raise FreeSpaceError(_('There is insufficient free space in main memory'))
+    if on_card == 'carda' and size > free_space[1] - 1024 * 1024:
+        raise FreeSpaceError(_('There is insufficient free space on the storage card'))
+    if on_card == 'cardb' and size > free_space[2] - 1024 * 1024:
+        raise FreeSpaceError(_('There is insufficient free space on the storage card'))
 
 
-def build_template_regexp(template):
+def build_template_regexp(template: str) -> re.Pattern[str]:
     from calibre import prints
 
-    def replfunc(match, seen=None):
+    def replfunc(match: re.Match[str], seen: set[str] | None = None) -> str:
         v = match.group(1)
         if v in ['authors', 'author_sort']:
             v = 'author'
         if v in ('title', 'series', 'series_index', 'isbn', 'author'):
+            assert seen is not None
             if v not in seen:
                 seen.add(v)
                 return '(?P<' + v + '>.+?)'
         return '(.+?)'
-    s = set()
+
+    s: set[str] = set()
     f = partial(replfunc, seen=s)
 
     try:
         template = template.rpartition('/')[2]
-        return re.compile(re.sub('{([^}]*)}', f, template) + r'([_\d]*$)')
-    except:
-        prints(u'Failed to parse template: %r'%template)
-        template = u'{title} - {authors}'
-        return re.compile(re.sub('{([^}]*)}', f, template) + r'([_\d]*$)')
+        return re.compile(re.sub(r'{([^}]*)}', f, template) + r'([_\d]*$)')
+    except Exception:
+        prints(f'Failed to parse template: {template!r}')
+        template = '{title} - {authors}'
+        return re.compile(re.sub(r'{([^}]*)}', f, template) + r'([_\d]*$)')
 
 
-def create_upload_path(mdata, fname, template, sanitize,
-        prefix_path='',
-        path_type=os.path,
-        maxlen=250,
-        use_subdirs=True,
-        news_in_folder=True,
-        filename_callback=lambda x, y:x,
-        sanitize_path_components=lambda x: x
-        ):
-    from calibre.library.save_to_disk import get_components, config
+def create_upload_path(
+    mdata: Metadata,
+    fname: str,
+    template: str | bytes,
+    sanitize: Callable[[str], str],
+    prefix_path: str = '',
+    path_type: ModuleType = os.path,
+    maxlen: int = 250,
+    use_subdirs: bool = True,
+    news_in_folder: bool = True,
+    filename_callback: Callable[[str, Metadata], str] = lambda x, y: x,
+    sanitize_path_components: Callable[[list[str]], list[str]] = lambda x: x,
+) -> str:
+    from calibre.library.save_to_disk import config, get_components
     from calibre.utils.filenames import shorten_components_to
 
     special_tag = None
     if mdata.tags:
         for t in mdata.tags:
-            if t.startswith(_('News')) or t.startswith('/'):
+            if t.startswith((_('News'), '/')):
                 special_tag = t
                 break
 
     if mdata.tags and _('News') in mdata.tags:
         try:
             p = mdata.pubdate
-            date  = (p.year, p.month, p.day)
-        except:
+            assert p is not None  # failures are handled below
+            date = (p.year, p.month, p.day)
+        except Exception:
             today = time.localtime()
             date = (today[0], today[1], today[2])
-        template = u"{title}_%d-%d-%d" % date
+        template = f'{{title}}_{date[0]}-{date[1]}-{date[2]}'
 
     fname = sanitize(fname)
     ext = path_type.splitext(fname)[1]
 
     opts = config().parse()
-    if not isinstance(template, unicode_type):
+    if not isinstance(template, str):
         template = template.decode('utf-8')
-    app_id = unicode_type(getattr(mdata, 'application_id', ''))
+    app_id = str(getattr(mdata, 'application_id', ''))
     id_ = mdata.get('id', fname)
-    extra_components = get_components(template, mdata, id_,
-            timefmt=opts.send_timefmt, length=maxlen-len(app_id)-1,
-            sanitize_func=sanitize, last_has_extension=False)
+    extra_components = get_components(
+        template,
+        mdata,
+        id_,
+        timefmt=opts.send_timefmt,
+        length=maxlen - len(app_id) - 1,
+        sanitize_func=sanitize,
+        last_has_extension=False,
+    )
     if not extra_components:
-        extra_components.append(sanitize(filename_callback(fname,
-            mdata)))
+        extra_components.append(sanitize(filename_callback(fname, mdata)))
     else:
-        extra_components[-1] = sanitize(filename_callback(extra_components[-1]+ext, mdata))
+        extra_components[-1] = sanitize(filename_callback(extra_components[-1] + ext, mdata))
 
     if extra_components[-1] and extra_components[-1][0] in ('.', '_'):
         extra_components[-1] = 'x' + extra_components[-1][1:]
@@ -131,7 +156,7 @@ def create_upload_path(mdata, fname, template, sanitize,
     if not use_subdirs:
         extra_components = extra_components[-1:]
 
-    def remove_trailing_periods(x):
+    def remove_trailing_periods(x: str) -> str:
         ans = x
         while ans.endswith('.'):
             ans = ans[:-1].strip()

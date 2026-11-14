@@ -1,49 +1,61 @@
-# -*- coding: utf-8 -*-
+# License: GPLv3 Copyright: 2009, John Schember <john@nachtimwald.com>
 
+import io
+import os
+from typing import TYPE_CHECKING
 
-__license__ = 'GPL 3'
-__copyright__ = '2009, John Schember <john@nachtimwald.com>'
-__docformat__ = 'restructuredtext en'
-
-import os, io
-
-from calibre.customize.conversion import (OutputFormatPlugin,
-        OptionRecommendation)
+from calibre.customize.conversion import InputFormatPlugin, OptionRecommendation, OutputFormatPlugin
 from calibre.ptempfile import TemporaryDirectory
-from polyglot.builtins import unicode_type
+from calibre.utils.localization import _
+
+if TYPE_CHECKING:
+    from optparse import Values
+
+    from calibre.ebooks.oeb.base import Manifest, OEBBook
+    from calibre.utils.logging import Log
 
 
 class PMLOutput(OutputFormatPlugin):
-
     name = 'PML Output'
     author = 'John Schember'
     file_type = 'pmlz'
     commit_name = 'pml_output'
 
     options = {
-        OptionRecommendation(name='pml_output_encoding', recommended_value='cp1252',
+        OptionRecommendation(
+            name='pml_output_encoding',
+            recommended_value='cp1252',
             level=OptionRecommendation.LOW,
-            help=_('Specify the character encoding of the output document. '
-            'The default is cp1252.')),
-        OptionRecommendation(name='inline_toc',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help=_('Add Table of Contents to beginning of the book.')),
-        OptionRecommendation(name='full_image_depth',
-            recommended_value=False, level=OptionRecommendation.LOW,
-            help=_('Do not reduce the size or bit depth of images. Images '
-                   'have their size and depth reduced by default to accommodate '
-                   'applications that can not convert images on their '
-                   'own such as Dropbook.')),
+            help=_('Specify the character encoding of the output document. The default is cp1252.'),
+        ),
+        OptionRecommendation(
+            name='inline_toc',
+            recommended_value=False,
+            level=OptionRecommendation.LOW,
+            help=_('Add Table of Contents to beginning of the book.'),
+        ),
+        OptionRecommendation(
+            name='full_image_depth',
+            recommended_value=False,
+            level=OptionRecommendation.LOW,
+            help=_(
+                'Do not reduce the size or bit depth of images. Images '
+                'have their size and depth reduced by default to accommodate '
+                'applications that can not convert images on their '
+                'own such as Dropbook.'
+            ),
+        ),
     }
 
-    def convert(self, oeb_book, output_path, input_plugin, opts, log):
+    def convert(self, oeb_book: OEBBook, output: str, input_plugin: InputFormatPlugin, opts: Values, log: Log) -> None:
+        output_path = output
         from calibre.ebooks.pml.pmlml import PMLMLizer
         from calibre.utils.zipfile import ZipFile
 
         with TemporaryDirectory('_pmlz_output') as tdir:
             pmlmlizer = PMLMLizer(log)
-            pml = unicode_type(pmlmlizer.extract_content(oeb_book, opts))
-            with lopen(os.path.join(tdir, 'index.pml'), 'wb') as out:
+            pml = str(pmlmlizer.extract_content(oeb_book, opts))
+            with open(os.path.join(tdir, 'index.pml'), 'wb') as out:
                 out.write(pml.encode(opts.pml_output_encoding, 'replace'))
 
             img_path = os.path.join(tdir, 'index_img')
@@ -55,17 +67,20 @@ class PMLOutput(OutputFormatPlugin):
             pmlz = ZipFile(output_path, 'w')
             pmlz.add_dir(tdir)
 
-    def write_images(self, manifest, image_hrefs, out_dir, opts):
+    def write_images(self, manifest: Manifest, image_hrefs: dict[str, str], out_dir: str, opts: Values) -> None:
         from PIL import Image
 
         from calibre.ebooks.oeb.base import OEB_RASTER_IMAGES
+
         for item in manifest:
             if item.media_type in OEB_RASTER_IMAGES and item.href in image_hrefs.keys():
+                raw = item.data
+                assert isinstance(raw, bytes)
                 if opts.full_image_depth:
-                    im = Image.open(io.BytesIO(item.data))
+                    im = Image.open(io.BytesIO(raw))
                 else:
-                    im = Image.open(io.BytesIO(item.data)).convert('P')
-                    im.thumbnail((300,300), Image.ANTIALIAS)
+                    im = Image.open(io.BytesIO(raw)).convert('P')
+                    im.thumbnail((300, 300), Image.Resampling.LANCZOS)
 
                 data = io.BytesIO()
                 im.save(data, 'PNG')
@@ -73,5 +88,5 @@ class PMLOutput(OutputFormatPlugin):
 
                 path = os.path.join(out_dir, image_hrefs[item.href])
 
-                with lopen(path, 'wb') as out:
+                with open(path, 'wb') as out:
                     out.write(data)

@@ -1,6 +1,6 @@
+# License: PSF
 
-
-"""Easy to use object-oriented thread pool framework.
+'''Easy to use object-oriented thread pool framework.
 
 A thread pool is an object that maintains a pool of worker threads to perform
 time consuming operations in parallel. It assigns jobs to the threads
@@ -30,38 +30,50 @@ Basic usage:
 See the end of the module code for a brief, annotated usage example.
 
 Website : http://chrisarndt.de/en/software/python/threadpool/
-"""
+'''
 
 __all__ = [
-  'makeRequests',
-  'NoResultsPending',
-  'NoWorkersAvailable',
-  'ThreadPool',
-  'WorkRequest',
-  'WorkerThread'
+    'NoResultsPending',
+    'NoWorkersAvailable',
+    'ThreadPool',
+    'WorkRequest',
+    'WorkerThread',
+    'makeRequests',
 ]
 
-__author__ = "Christopher Arndt"
-__version__ = "1.2.3"
-__revision__ = "$Revision: 1.5 $"
-__date__ = "$Date: 2006/06/23 12:32:25 $"
-__license__ = 'Python license'
+__author__ = 'Christopher Arndt'
+__version__ = '1.2.3'
+__revision__ = '$Revision: 1.5 $'
+__date__ = '$Date: 2006/06/23 12:32:25 $'
 
 # standard library modules
+import queue
 import threading
-from polyglot import queue
+import time
+from typing import TYPE_CHECKING, Any, Unpack
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Hashable, Iterable, Sequence
+    from typing import TypedDict
+
+    class ThreadKw(TypedDict, total=False):
+        name: str | None
+        daemon: bool | None
 
 # exceptions
 
 
 class NoResultsPending(Exception):
     """All work requests have been processed."""
+
     pass
 
 
 class NoWorkersAvailable(Exception):
     """No worker threads available to process remaining requests."""
+
     pass
+
 
 # classes
 
@@ -73,42 +85,39 @@ class WorkerThread(threading.Thread):
     one queue and puts the results in another until it is dismissed.
     """
 
-    def __init__(self, requestsQueue, resultsQueue, **kwds):
-        """Set up thread in daemonic mode and start it immediatedly.
+    def __init__(self, requestsQueue: queue.Queue[WorkRequest], resultsQueue: queue.Queue[tuple[WorkRequest, object]], **kwds: Unpack[ThreadKw]) -> None:
+        """Set up thread in daemonic mode and start it immediately.
 
         requestsQueue and resultQueue are instances of queue.Queue passed
         by the ThreadPool class when it creates a new worker thread.
         """
-
+        kwds['daemon'] = True
         threading.Thread.__init__(self, **kwds)
-        self.setDaemon(1)
         self.workRequestQueue = requestsQueue
         self.resultQueue = resultsQueue
         self._dismissed = threading.Event()
         self.start()
 
-    def run(self):
+    def run(self) -> None:
         """Repeatedly process the job queue until told to exit."""
 
-        while not self._dismissed.isSet():
+        while not self._dismissed.is_set():
             # thread blocks here, if queue empty
             request = self.workRequestQueue.get()
-            if self._dismissed.isSet():
+            if self._dismissed.is_set():
                 # if told to exit, return the work request we just picked up
                 self.workRequestQueue.put(request)
                 break  # and exit
             try:
-                self.resultQueue.put(
-                    (request, request.callable(*request.args, **request.kwds))
-                )
-            except:
+                self.resultQueue.put((request, request.callable(*request.args, **request.kwds)))
+            except Exception:
                 request.exception = True
                 import traceback
+
                 self.resultQueue.put((request, traceback.format_exc()))
 
-    def dismiss(self):
-        """Sets a flag to tell the thread to exit when done with current job.
-        """
+    def dismiss(self) -> None:
+        """Sets a flag to tell the thread to exit when done with current job."""
 
         self._dismissed.set()
 
@@ -121,8 +130,20 @@ class WorkRequest:
     but with different arguments for each call.
     """
 
-    def __init__(self, callable, args=None, kwds=None, requestID=None,
-      callback=None, exc_callback=None):
+    # these are used by the recipe download system
+    feed: Any
+    article: Any
+    feed_dir: str
+
+    def __init__(
+        self,
+        callable: Callable[..., object],
+        args: Sequence[object] | None = None,
+        kwds: dict[str, object] | None = None,
+        requestID: Hashable | None = None,
+        callback: Callable[[WorkRequest, object], object] | None = None,
+        exc_callback: Callable[[WorkRequest, str], object] | None = None,
+    ) -> None:
         """Create a work request for a callable and attach callbacks.
 
         A work request consists of the callable to be executed by a
@@ -150,7 +171,7 @@ class WorkRequest:
             try:
                 hash(requestID)
             except TypeError:
-                raise TypeError("requestID must be hashable.")
+                raise TypeError('requestID must be hashable.')
             self.requestID = requestID
         self.exception = False
         self.callback = callback
@@ -166,10 +187,10 @@ class ThreadPool:
     See the module doctring for more information.
     """
 
-    def __init__(self, num_workers, q_size=0):
+    def __init__(self, num_workers: int, q_size: int = 0) -> None:
         """Set up the thread pool and start num_workers worker threads.
 
-        num_workers is the number of worker threads to start initialy.
+        num_workers is the number of worker threads to start initially.
         If q_size > 0 the size of the work request queue is limited and
         the thread pool blocks when the queue is full and it tries to put
         more work requests in it (see putRequest method).
@@ -181,29 +202,27 @@ class ThreadPool:
         self.workRequests = {}
         self.createWorkers(num_workers)
 
-    def createWorkers(self, num_workers):
+    def createWorkers(self, num_workers: int) -> None:
         """Add num_workers worker threads to the pool."""
 
         for i in range(num_workers):
-            self.workers.append(WorkerThread(self.requestsQueue,
-              self.resultsQueue))
+            self.workers.append(WorkerThread(self.requestsQueue, self.resultsQueue))
 
-    def dismissWorkers(self, num_workers):
-        """Tell num_workers worker threads to quit after their current task.
-        """
+    def dismissWorkers(self, num_workers: int) -> None:
+        """Tell num_workers worker threads to quit after their current task."""
 
         for i in range(min(num_workers, len(self.workers))):
             worker = self.workers.pop()
             worker.dismiss()
 
-    def putRequest(self, request, block=True, timeout=0):
+    def putRequest(self, request: WorkRequest, block: bool = True, timeout: float | None = 0) -> None:
         """Put work request into work queue and save its id for later."""
 
         assert isinstance(request, WorkRequest)
         self.requestsQueue.put(request, block, timeout)
         self.workRequests[request.requestID] = request
 
-    def poll(self, block=False):
+    def poll(self, block: bool = False) -> None:
         """Process any new results in the queue."""
 
         while True:
@@ -216,18 +235,17 @@ class ThreadPool:
             try:
                 # get back next results
                 request, result = self.resultsQueue.get(block=block)
-                # has an exception occured?
+                # has an exception occurred?
                 if request.exception and request.exc_callback:
                     request.exc_callback(request, result)
                 # hand results to callback, if any
-                if request.callback and not \
-                  (request.exception and request.exc_callback):
+                if request.callback and not (request.exception and request.exc_callback):
                     request.callback(request, result)
                 del self.workRequests[request.requestID]
             except queue.Empty:
                 break
 
-    def wait(self, sleep=0):
+    def wait(self, sleep: float = 0) -> None:
         """Wait for results, blocking until all have arrived."""
 
         while 1:
@@ -237,10 +255,16 @@ class ThreadPool:
             except NoResultsPending:
                 break
 
+
 # helper functions
 
 
-def makeRequests(callable, args_list, callback=None, exc_callback=None):
+def makeRequests(
+    callable: Callable[..., object],
+    args_list: Iterable[object],
+    callback: Callable[[WorkRequest, object], object] | None = None,
+    exc_callback: Callable[[WorkRequest, str], object] | None = None,
+) -> list[WorkRequest]:
     """Create several work requests for same callable with different arguments.
 
     Convenience function for creating several work requests for the same
@@ -258,54 +282,44 @@ def makeRequests(callable, args_list, callback=None, exc_callback=None):
     requests = []
     for item in args_list:
         if isinstance(item, tuple):
-            requests.append(
-              WorkRequest(callable, item[0], item[1], callback=callback,
-                exc_callback=exc_callback)
-            )
+            requests.append(WorkRequest(callable, item[0], item[1], callback=callback, exc_callback=exc_callback))
         else:
-            requests.append(
-              WorkRequest(callable, [item], None, callback=callback,
-                exc_callback=exc_callback)
-            )
+            requests.append(WorkRequest(callable, [item], None, callback=callback, exc_callback=exc_callback))
     return requests
+
 
 ################
 # USAGE EXAMPLE
 ################
 
-
 if __name__ == '__main__':
     import random
-    import time
 
     # the work the threads will have to do (rather trivial in our example)
-    def do_something(data):
-        time.sleep(random.randint(1,5))
+    def do_something(data: int) -> float:
+        time.sleep(random.randint(1, 5))
         result = round(random.random() * data, 5)
         # just to show off, we throw an exception once in a while
         if result > 3:
-            raise RuntimeError("Something extraordinary happened!")
+            raise RuntimeError('Something extraordinary happened!')
         return result
 
     # this will be called each time a result is available
-    def print_result(request, result):
-        print("**Result: %s from request #%s" % (result, request.requestID))
+    def print_result(request: WorkRequest, result: object) -> None:
+        print(f'**Result: {result} from request #{request.requestID}')
 
     # this will be called when an exception occurs within a thread
-    def handle_exception(request, exc_info):
-        print("Exception occured in request #%s: %s" %
-          (request.requestID, exc_info[1]))
+    def handle_exception(request: WorkRequest, exc_info: str) -> None:
+        print(f'Exception occurred in request #{request.requestID}: {exc_info}')
 
     # assemble the arguments for each job to a list...
-    data = [random.randint(1,10) for i in range(20)]
+    data = [random.randint(1, 10) for i in range(20)]
     # ... and build a WorkRequest object for each item in data
     requests = makeRequests(do_something, data, print_result, handle_exception)
 
     # or the other form of args_lists accepted by makeRequests: ((,), {})
-    data = [((random.randint(1,10),), {}) for i in range(20)]
-    requests.extend(
-      makeRequests(do_something, data, print_result, handle_exception)
-    )
+    data = [((random.randint(1, 10),), {}) for i in range(20)]
+    requests.extend(makeRequests(do_something, data, print_result, handle_exception))
 
     # we create a pool of 3 worker threads
     main = ThreadPool(3)
@@ -313,7 +327,7 @@ if __name__ == '__main__':
     # then we put the work requests in the queue...
     for req in requests:
         main.putRequest(req)
-        print("Work request #%s added." % req.requestID)
+        print(f'Work request #{req.requestID} added.')
     # or shorter:
     # [main.putRequest(req) for req in requests]
 
@@ -327,15 +341,15 @@ if __name__ == '__main__':
     while 1:
         try:
             main.poll()
-            print("Main thread working...")
+            print('Main thread working...')
             time.sleep(0.5)
             if i == 10:
-                print("Adding 3 more worker threads...")
+                print('Adding 3 more worker threads...')
                 main.createWorkers(3)
             i += 1
         except KeyboardInterrupt:
-            print("Interrupted!")
+            print('Interrupted!')
             break
         except NoResultsPending:
-            print("All results collected.")
+            print('All results collected.')
             break
